@@ -58,3 +58,9 @@ python src/train_baselines.py --data_dir data/datasets --models_dir models
 
 La estructura y las etapas de este proyecto siguen la propuesta detallada en [este enlace](https://chatgpt.com/share/683f51dc-ae58-8008-b59f-2aaf9ac1d3d7).
 
+5. Entrenar modelo XGBoost:
+```bash
+python src/train_xgboost.py --data_dir data/datasets --models_dir models
+```
+
+Un archivo de ejemplo se incluye en `data/raw/sample_trips.csv` para probar el pipeline completo.

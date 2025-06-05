@@ -194,4 +194,5 @@ cython_debug/
 .cursorindexingignore
 # Data folders
 data/
-
+!data/raw/sample_trips.csv
+models/*.json
