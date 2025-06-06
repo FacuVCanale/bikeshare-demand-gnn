@@ -1,2 +1,0 @@
-data/raw/trips/*.csv filter=lfs diff=lfs merge=lfs -text
-data/raw/users/*.csv filter=lfs diff=lfs merge=lfs -text

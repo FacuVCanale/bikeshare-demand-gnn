@@ -3,20 +3,70 @@ from pathlib import Path
 import pandas as pd
 
 
-def load_trips(input_dir: Path) -> pd.DataFrame:
-    """Carga todos los CSV de viajes en un solo DataFrame."""
+def load_csv_files(input_dir: Path, parse_dates: list[str] = None, dayfirst: bool = True) -> pd.DataFrame:
+    """Función genérica para cargar todos los CSV de un directorio en un solo DataFrame."""
     files = sorted(input_dir.glob('*.csv'))
     dfs = []
     for f in files:
-        df = pd.read_csv(
-            f,
-            parse_dates=["fecha_origen", "fecha_destino"],
-            dayfirst=True,
-        )
+        print(f"Cargando: {f.name}")
+        read_kwargs = {"low_memory": False}
+        
+        if parse_dates:
+            sample_df = pd.read_csv(f, nrows=0)
+            existing_date_cols = [col for col in parse_dates if col in sample_df.columns]
+            if existing_date_cols:
+                read_kwargs.update({"parse_dates": existing_date_cols, "dayfirst": dayfirst})
+        
+        df = pd.read_csv(f, **read_kwargs)
         dfs.append(df)
     if not dfs:
         raise FileNotFoundError("No se encontraron CSV en " + str(input_dir))
     return pd.concat(dfs, ignore_index=True)
+
+
+def load_users(input_dir: Path) -> pd.DataFrame:
+    """Carga todos los CSV de usuarios en un solo DataFrame."""
+    return load_csv_files(input_dir)
+
+
+def load_trips(input_dir: Path) -> pd.DataFrame:
+    """Carga todos los CSV de viajes en un solo DataFrame."""
+    # Los nombres de columnas pueden variar entre archivos, usamos los más comunes
+    date_columns = ["fecha_origen", "fecha_destino", "fecha_origen_recorrido", "fecha_destino_recorrido"]
+    # Usar dayfirst=False porque las fechas están en formato ISO (YYYY-MM-DD)
+    return load_csv_files(input_dir, parse_dates=date_columns, dayfirst=False)
+
+
+
+
+def load_all_raw_data(raw_dir: Path, save_dir: Path = None, verbose: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carga todos los datasets raw (usuarios y viajes) desde el directorio data/raw."""
+    users_dir = raw_dir / "users"
+    trips_dir = raw_dir / "trips"
+    
+    if verbose:
+        print("=== CARGANDO DATASETS DE USUARIOS ===")
+    users_df = load_users(users_dir)
+    print(f"Total usuarios: {len(users_df):,} registros")
+    print(f"Columnas: {list(users_df.columns)}")
+    print()
+    
+    if verbose:
+        print("=== CARGANDO DATASETS DE VIAJES ===")
+    trips_df = load_trips(trips_dir)
+    print(f"Total viajes: {len(trips_df):,} registros")
+    print(f"Columnas: {list(trips_df.columns)}")
+    print()
+    
+    return users_df, trips_df
+
+
+
+
+
+
+
+
 
 
 def compute_counts(df: pd.DataFrame, dt_minutes: int = 30) -> tuple[pd.DataFrame, pd.DataFrame]:
