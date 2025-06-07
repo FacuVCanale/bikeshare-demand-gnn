@@ -255,187 +255,103 @@ def print_summary_statistics(users_df: pd.DataFrame, processed_users: Dict[str, 
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
 # =============================================================================
 
-def split_data_until_august_2024(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
-                                train_end_date: str = "2023-06-30",
-                                val_end_date: str = "2023-12-31",
-                                test_end_date: str = "2024-08-31",
-                                verbose: bool = True) -> Dict[str, pd.DataFrame]:
+def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
+                          max_date: str = "2024-08-31",
+                          user_date_col: str = 'fecha_alta',
+                          trip_date_col: str = 'fecha_origen_recorrido',
+                          verbose: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Splitea los datos de usuarios y viajes manteniendo integridad temporal.
-    
-    RESTRICCIÓN IMPORTANTE: Solo se utilizan datos hasta agosto 2024 inclusive.
+    Filtra los datos hasta una fecha máxima específica.
     
     Args:
-        users_df: DataFrame de usuarios completo
-        trips_df: DataFrame de viajes completo  
+        users_df: DataFrame de usuarios
+        trips_df: DataFrame de viajes
+        max_date: Fecha máxima a incluir (formato YYYY-MM-DD)
+        user_date_col: Columna de fecha en users_df
+        trip_date_col: Columna de fecha en trips_df
+        verbose: Si mostrar información
+        
+    Returns:
+        Tuple con (users_filtered, trips_filtered)
+    """
+    max_datetime = pd.to_datetime(max_date)
+    
+    # Filtrar usuarios
+    users_filtered = users_df[
+        (users_df[user_date_col].notna()) & 
+        (users_df[user_date_col] <= max_datetime)
+    ].copy()
+    
+    # Filtrar viajes
+    trips_filtered = trips_df[
+        (trips_df[trip_date_col].notna()) & 
+        (trips_df[trip_date_col] <= max_datetime)
+    ].copy()
+    
+    if verbose:
+        print(f"🔽 FILTRADO HASTA {max_date}")
+        print(f"👥 Usuarios: {len(users_df):,} → {len(users_filtered):,} (-{len(users_df) - len(users_filtered):,})")
+        print(f"🚲 Viajes: {len(trips_df):,} → {len(trips_filtered):,} (-{len(trips_df) - len(trips_filtered):,})")
+    
+    return users_filtered, trips_filtered
+
+
+def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
+                       train_end_date: str, val_end_date: str, test_end_date: str,
+                       user_date_col: str = 'fecha_alta',
+                       trip_date_col: str = 'fecha_origen_recorrido',
+                       verbose: bool = True) -> Dict[str, pd.DataFrame]:
+    """
+    Splitea los datos de usuarios y viajes por rangos temporales.
+    
+    Args:
+        users_df: DataFrame de usuarios (ya preprocesado)
+        trips_df: DataFrame de viajes (ya preprocesado)
         train_end_date: Fecha final para entrenamiento (formato YYYY-MM-DD)
         val_end_date: Fecha final para validación (formato YYYY-MM-DD)
-        test_end_date: Fecha final para test (formato YYYY-MM-DD, máximo 2024-08-31)
+        test_end_date: Fecha final para test (formato YYYY-MM-DD)
+        user_date_col: Nombre de la columna de fecha en users_df
+        trip_date_col: Nombre de la columna de fecha en trips_df
         verbose: Si mostrar información del split
         
     Returns:
-        Dict con las claves:
-        - 'users_train', 'users_val', 'users_test': DataFrames de usuarios
-        - 'trips_train', 'trips_val', 'trips_test': DataFrames de viajes
-        - 'split_info': Información detallada del split
-        
-    Raises:
-        ValueError: Si test_end_date es posterior a agosto 2024
+        Dict con los DataFrames spliteados
     """
     
-    # Validar restricción temporal
-    max_allowed_date = pd.to_datetime("2024-08-31")
-    test_date = pd.to_datetime(test_end_date)
-    
-    if test_date > max_allowed_date:
-        raise ValueError(f"La fecha de test no puede ser posterior a agosto 2024. "
-                        f"Recibido: {test_end_date}, máximo permitido: 2024-08-31")
-    
-    if verbose:
-        print("🔄 INICIANDO SPLIT TEMPORAL DE DATOS ECOBICI")
-        print("=" * 50)
-        print(f"📅 Restricción: Solo datos hasta {max_allowed_date.strftime('%B %Y')}")
-    
-    # =========================================================================
-    # PREPARACIÓN DE FECHAS
-    # =========================================================================
-    
+    # Convertir fechas
     train_end = pd.to_datetime(train_end_date)
     val_end = pd.to_datetime(val_end_date) 
     test_end = pd.to_datetime(test_end_date)
     
-    # =========================================================================
-    # PROCESAMIENTO DE USUARIOS
-    # =========================================================================
+    if verbose:
+        print("🔄 SPLIT TEMPORAL")
+        print(f"📅 Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
     
-    users_work = users_df.copy()
-    
-    # Convertir fecha_alta a datetime
-    if not pd.api.types.is_datetime64_any_dtype(users_work['fecha_alta']):
-        users_work['fecha_alta'] = pd.to_datetime(users_work['fecha_alta'], errors='coerce')
-    
-    # Filtrar usuarios hasta la fecha máxima permitida
-    users_filtered = users_work[
-        (users_work['fecha_alta'].notna()) & 
-        (users_work['fecha_alta'] <= max_allowed_date)
+    # Split usuarios
+    users_train = users_df[users_df[user_date_col] <= train_end].copy()
+    users_val = users_df[
+        (users_df[user_date_col] > train_end) & 
+        (users_df[user_date_col] <= val_end)
+    ].copy()
+    users_test = users_df[
+        (users_df[user_date_col] > val_end) & 
+        (users_df[user_date_col] <= test_end)
     ].copy()
     
-    # Split de usuarios por fecha de alta
-    users_train = users_filtered[users_filtered['fecha_alta'] <= train_end].copy()
-    users_val = users_filtered[
-        (users_filtered['fecha_alta'] > train_end) & 
-        (users_filtered['fecha_alta'] <= val_end)
+    # Split viajes
+    trips_train = trips_df[trips_df[trip_date_col] <= train_end].copy()
+    trips_val = trips_df[
+        (trips_df[trip_date_col] > train_end) & 
+        (trips_df[trip_date_col] <= val_end)
     ].copy()
-    users_test = users_filtered[
-        (users_filtered['fecha_alta'] > val_end) & 
-        (users_filtered['fecha_alta'] <= test_end)
+    trips_test = trips_df[
+        (trips_df[trip_date_col] > val_end) & 
+        (trips_df[trip_date_col] <= test_end)
     ].copy()
-    
-    # =========================================================================
-    # PROCESAMIENTO DE VIAJES  
-    # =========================================================================
-    
-    trips_work = trips_df.copy()
-    
-    # Determinar columna de fecha principal
-    fecha_col = 'fecha_origen_recorrido' if 'fecha_origen_recorrido' in trips_work.columns else 'fecha_origen'
-    
-    # Convertir fecha a datetime
-    if not pd.api.types.is_datetime64_any_dtype(trips_work[fecha_col]):
-        trips_work[fecha_col] = pd.to_datetime(trips_work[fecha_col], errors='coerce')
-    
-    # Filtrar viajes hasta la fecha máxima permitida
-    trips_filtered = trips_work[
-        (trips_work[fecha_col].notna()) & 
-        (trips_work[fecha_col] <= max_allowed_date)
-    ].copy()
-    
-    # Split de viajes por fecha de origen
-    trips_train = trips_filtered[trips_filtered[fecha_col] <= train_end].copy()
-    trips_val = trips_filtered[
-        (trips_filtered[fecha_col] > train_end) & 
-        (trips_filtered[fecha_col] <= val_end)
-    ].copy()
-    trips_test = trips_filtered[
-        (trips_filtered[fecha_col] > val_end) & 
-        (trips_filtered[fecha_col] <= test_end)
-    ].copy()
-    
-    # =========================================================================
-    # INFORMACIÓN DEL SPLIT
-    # =========================================================================
-    
-    split_info = {
-        'fechas': {
-            'train_periodo': f"Inicio - {train_end_date}",
-            'val_periodo': f"{(train_end + pd.Timedelta(days=1)).strftime('%Y-%m-%d')} - {val_end_date}",
-            'test_periodo': f"{(val_end + pd.Timedelta(days=1)).strftime('%Y-%m-%d')} - {test_end_date}",
-            'restriccion_maxima': "2024-08-31"
-        },
-        'usuarios': {
-            'total_original': len(users_df),
-            'total_filtrado': len(users_filtered),
-            'descartados_por_fecha': len(users_df) - len(users_filtered),
-            'train': len(users_train),
-            'val': len(users_val), 
-            'test': len(users_test)
-        },
-        'viajes': {
-            'total_original': len(trips_df),
-            'total_filtrado': len(trips_filtered),
-            'descartados_por_fecha': len(trips_df) - len(trips_filtered),
-            'train': len(trips_train),
-            'val': len(trips_val),
-            'test': len(trips_test)
-        },
-        'rangos_temporales': {
-            'usuarios': {
-                'train': f"{users_train['fecha_alta'].min()} - {users_train['fecha_alta'].max()}" if len(users_train) > 0 else "Sin datos",
-                'val': f"{users_val['fecha_alta'].min()} - {users_val['fecha_alta'].max()}" if len(users_val) > 0 else "Sin datos", 
-                'test': f"{users_test['fecha_alta'].min()} - {users_test['fecha_alta'].max()}" if len(users_test) > 0 else "Sin datos"
-            },
-            'viajes': {
-                'train': f"{trips_train[fecha_col].min()} - {trips_train[fecha_col].max()}" if len(trips_train) > 0 else "Sin datos",
-                'val': f"{trips_val[fecha_col].min()} - {trips_val[fecha_col].max()}" if len(trips_val) > 0 else "Sin datos",
-                'test': f"{trips_test[fecha_col].min()} - {trips_test[fecha_col].max()}" if len(trips_test) > 0 else "Sin datos"
-            }
-        }
-    }
-    
-    # =========================================================================
-    # MOSTRAR INFORMACIÓN (SI VERBOSE=TRUE)
-    # =========================================================================
     
     if verbose:
-        print("\n📊 RESUMEN DEL SPLIT:")
-        print("-" * 30)
-        
-        print(f"\n👥 USUARIOS:")
-        print(f"   • Original: {split_info['usuarios']['total_original']:,}")
-        print(f"   • Filtrado (≤ ago 2024): {split_info['usuarios']['total_filtrado']:,}")
-        print(f"   • Descartados: {split_info['usuarios']['descartados_por_fecha']:,}")
-        print(f"   • Train: {split_info['usuarios']['train']:,} ({split_info['usuarios']['train']/split_info['usuarios']['total_filtrado']*100:.1f}%)")
-        print(f"   • Val: {split_info['usuarios']['val']:,} ({split_info['usuarios']['val']/split_info['usuarios']['total_filtrado']*100:.1f}%)")
-        print(f"   • Test: {split_info['usuarios']['test']:,} ({split_info['usuarios']['test']/split_info['usuarios']['total_filtrado']*100:.1f}%)")
-        
-        print(f"\n🚲 VIAJES:")
-        print(f"   • Original: {split_info['viajes']['total_original']:,}")
-        print(f"   • Filtrado (≤ ago 2024): {split_info['viajes']['total_filtrado']:,}")
-        print(f"   • Descartados: {split_info['viajes']['descartados_por_fecha']:,}")
-        print(f"   • Train: {split_info['viajes']['train']:,} ({split_info['viajes']['train']/split_info['viajes']['total_filtrado']*100:.1f}%)")
-        print(f"   • Val: {split_info['viajes']['val']:,} ({split_info['viajes']['val']/split_info['viajes']['total_filtrado']*100:.1f}%)")
-        print(f"   • Test: {split_info['viajes']['test']:,} ({split_info['viajes']['test']/split_info['viajes']['total_filtrado']*100:.1f}%)")
-        
-        print(f"\n📅 PERÍODOS TEMPORALES:")
-        print(f"   • Train: {split_info['fechas']['train_periodo']}")
-        print(f"   • Val: {split_info['fechas']['val_periodo']}")
-        print(f"   • Test: {split_info['fechas']['test_periodo']}")
-        
-        print("\n✅ Split completado exitosamente!")
-    
-    # =========================================================================
-    # RETORNAR RESULTADOS
-    # =========================================================================
+        print(f"👥 Usuarios: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
+        print(f"🚲 Viajes: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
     
     return {
         'users_train': users_train,
@@ -443,56 +359,11 @@ def split_data_until_august_2024(users_df: pd.DataFrame, trips_df: pd.DataFrame,
         'users_test': users_test,
         'trips_train': trips_train,
         'trips_val': trips_val,
-        'trips_test': trips_test,
-        'split_info': split_info
+        'trips_test': trips_test
     }
 
 
-# =============================================================================
-# FUNCIÓN PRINCIPAL REFACTORIZADA
-# =============================================================================
 
-def analyze_data_graphically(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
-                           save_plots: bool = False, output_dir: Optional[Path] = None, processed_users: Optional[Dict[str, Any]] = None, processed_trips: Optional[Dict[str, Any]] = None) -> None:
-    """
-    Realiza un análisis gráfico completo de los datos de usuarios y viajes de EcoBici.
-    
-    Args:
-        users_df: DataFrame con datos de usuarios
-        trips_df: DataFrame con datos de viajes
-        save_plots: Si guardar los gráficos como archivos
-        output_dir: Directorio donde guardar los gráficos
-    """
-    
-    if save_plots and output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("🎨 INICIANDO ANÁLISIS GRÁFICO DE DATOS ECOBICI")
-    print("=" * 60)
-    
-    # Preprocesar datos
-    print("🔄 Preprocesando datos...")
-
-    
-    # Generar visualizaciones
-    print("📊 Generando análisis de usuarios...")
-    plot_user_analysis(processed_users, save_plots, output_dir)
-    
-    print("📈 Generando análisis temporal...")
-    plot_temporal_analysis(processed_trips, save_plots, output_dir)
-    
-    print("🚉 Generando análisis de estaciones...")
-    plot_station_analysis(processed_trips, save_plots, output_dir)
-    
-    print("🔥 Generando heatmap de actividad...")
-    plot_activity_heatmap(processed_trips, save_plots, output_dir)
-    
-    # Mostrar estadísticas resumen
-    print_summary_statistics(users_df, processed_users, trips_df, processed_trips)
-    
-    print(f"\n✅ Análisis gráfico completado!")
-    if save_plots and output_dir:
-        print(f"📁 Gráficos guardados en: {output_dir}")
 
 
 
