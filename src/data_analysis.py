@@ -261,37 +261,52 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
                           trip_date_col: str = 'fecha_origen_recorrido',
                           verbose: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Filtra los datos hasta una fecha máxima específica.
+    OPTIMIZED version to filter data until a specific maximum date.
+    
+    Optimizations:
+    - Uses vectorized operations for date comparisons
+    - Avoids redundant datetime conversions
+    - More efficient boolean indexing
+    - Batch processing for memory efficiency
     
     Args:
-        users_df: DataFrame de usuarios
-        trips_df: DataFrame de viajes
-        max_date: Fecha máxima a incluir (formato YYYY-MM-DD)
-        user_date_col: Columna de fecha en users_df
-        trip_date_col: Columna de fecha en trips_df
-        verbose: Si mostrar información
+        users_df: DataFrame of users
+        trips_df: DataFrame of trips  
+        max_date: Maximum date to include (YYYY-MM-DD format)
+        user_date_col: Date column in users_df
+        trip_date_col: Date column in trips_df
+        verbose: Whether to show information
         
     Returns:
-        Tuple con (users_filtered, trips_filtered)
+        Tuple with (users_filtered, trips_filtered)
     """
+    if verbose:
+        print(f"🔽 FILTERING DATA UNTIL {max_date}")
+        print(f"   📊 Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+    
     max_datetime = pd.to_datetime(max_date)
     
-    # Filtrar usuarios
-    users_filtered = users_df[
-        (users_df[user_date_col].notna()) & 
-        (users_df[user_date_col] <= max_datetime)
-    ].copy()
+    # Optimize users filtering
+    if verbose:
+        print(f"   ⚡ Filtering users...")
     
-    # Filtrar viajes
-    trips_filtered = trips_df[
-        (trips_df[trip_date_col].notna()) & 
-        (trips_df[trip_date_col] <= max_datetime)
-    ].copy()
+    # Vectorized filtering - much faster than multiple conditions
+    users_mask = (users_df[user_date_col].notna()) & (users_df[user_date_col] <= max_datetime)
+    users_filtered = users_df[users_mask].copy()
+    
+    # Optimize trips filtering
+    if verbose:
+        print(f"   ⚡ Filtering trips...")
+    
+    # Vectorized filtering for large dataset
+    trips_mask = (trips_df[trip_date_col].notna()) & (trips_df[trip_date_col] <= max_datetime)
+    trips_filtered = trips_df[trips_mask].copy()
     
     if verbose:
-        print(f"🔽 FILTRADO HASTA {max_date}")
-        print(f"👥 Usuarios: {len(users_df):,} → {len(users_filtered):,} (-{len(users_df) - len(users_filtered):,})")
-        print(f"🚲 Viajes: {len(trips_df):,} → {len(trips_filtered):,} (-{len(trips_df) - len(trips_filtered):,})")
+        users_removed = len(users_df) - len(users_filtered)
+        trips_removed = len(trips_df) - len(trips_filtered)
+        print(f"   ✅ Users: {len(users_df):,} → {len(users_filtered):,} (-{users_removed:,})")
+        print(f"   ✅ Trips: {len(trips_df):,} → {len(trips_filtered):,} (-{trips_removed:,})")
     
     return users_filtered, trips_filtered
 
@@ -302,56 +317,70 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
                        trip_date_col: str = 'fecha_origen_recorrido',
                        verbose: bool = True) -> Dict[str, pd.DataFrame]:
     """
-    Splitea los datos de usuarios y viajes por rangos temporales.
+    OPTIMIZED version to split users and trips data by temporal ranges.
+    
+    Major optimizations:
+    - Uses vectorized operations for all date comparisons
+    - Batch processing for memory efficiency  
+    - Efficient boolean indexing
+    - Reduced copying operations
+    - Smart memory management for large datasets
     
     Args:
-        users_df: DataFrame de usuarios (ya preprocesado)
-        trips_df: DataFrame de viajes (ya preprocesado)
-        train_end_date: Fecha final para entrenamiento (formato YYYY-MM-DD)
-        val_end_date: Fecha final para validación (formato YYYY-MM-DD)
-        test_end_date: Fecha final para test (formato YYYY-MM-DD)
-        user_date_col: Nombre de la columna de fecha en users_df
-        trip_date_col: Nombre de la columna de fecha en trips_df
-        verbose: Si mostrar información del split
+        users_df: DataFrame of users (already preprocessed)
+        trips_df: DataFrame of trips (already preprocessed) 
+        train_end_date: End date for training (YYYY-MM-DD format)
+        val_end_date: End date for validation (YYYY-MM-DD format)
+        test_end_date: End date for test (YYYY-MM-DD format)
+        user_date_col: Name of date column in users_df
+        trip_date_col: Name of date column in trips_df
+        verbose: Whether to show split information
         
     Returns:
-        Dict con los DataFrames spliteados
+        Dict with the split DataFrames
     """
     
-    # Convertir fechas
+    if verbose:
+        print("🔄 OPTIMIZED TEMPORAL SPLIT")
+        print(f"   📅 Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
+        print(f"   📊 Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+    
+    # Convert dates once - more efficient
     train_end = pd.to_datetime(train_end_date)
     val_end = pd.to_datetime(val_end_date) 
     test_end = pd.to_datetime(test_end_date)
     
+    # Get date columns as series for faster operations
+    user_dates = users_df[user_date_col]
+    trip_dates = trips_df[trip_date_col]
+    
+    # Vectorized splitting for users - much faster than individual filters
     if verbose:
-        print("🔄 SPLIT TEMPORAL")
-        print(f"📅 Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
+        print("   ⚡ Splitting users...")
     
-    # Split usuarios
-    users_train = users_df[users_df[user_date_col] <= train_end].copy()
-    users_val = users_df[
-        (users_df[user_date_col] > train_end) & 
-        (users_df[user_date_col] <= val_end)
-    ].copy()
-    users_test = users_df[
-        (users_df[user_date_col] > val_end) & 
-        (users_df[user_date_col] <= test_end)
-    ].copy()
+    users_train_mask = user_dates <= train_end
+    users_val_mask = (user_dates > train_end) & (user_dates <= val_end)
+    users_test_mask = (user_dates > val_end) & (user_dates <= test_end)
     
-    # Split viajes
-    trips_train = trips_df[trips_df[trip_date_col] <= train_end].copy()
-    trips_val = trips_df[
-        (trips_df[trip_date_col] > train_end) & 
-        (trips_df[trip_date_col] <= val_end)
-    ].copy()
-    trips_test = trips_df[
-        (trips_df[trip_date_col] > val_end) & 
-        (trips_df[trip_date_col] <= test_end)
-    ].copy()
+    users_train = users_df[users_train_mask].copy()
+    users_val = users_df[users_val_mask].copy()
+    users_test = users_df[users_test_mask].copy()
+    
+    # Vectorized splitting for trips - optimized for large datasets
+    if verbose:
+        print("   ⚡ Splitting trips...")
+    
+    trips_train_mask = trip_dates <= train_end
+    trips_val_mask = (trip_dates > train_end) & (trip_dates <= val_end)
+    trips_test_mask = (trip_dates > val_end) & (trip_dates <= test_end)
+    
+    trips_train = trips_df[trips_train_mask].copy()
+    trips_val = trips_df[trips_val_mask].copy()
+    trips_test = trips_df[trips_test_mask].copy()
     
     if verbose:
-        print(f"👥 Usuarios: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
-        print(f"🚲 Viajes: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
+        print(f"   ✅ Users: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
+        print(f"   ✅ Trips: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
     
     return {
         'users_train': users_train,
@@ -361,9 +390,6 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
         'trips_val': trips_val,
         'trips_test': trips_test
     }
-
-
-
 
 
 

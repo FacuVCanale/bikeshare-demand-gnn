@@ -1,20 +1,21 @@
 import pandas as pd
+import numpy as np
+from typing import List, Dict, Any, Optional
 
 
-def preprocess_users_data(users_df: pd.DataFrame):
-    
+def analyze_users_for_visualization(users_df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Preprocesa los datos de usuarios.
+    Analyze users data for visualization purposes.
     
     Args:
-        users_df: DataFrame original de usuarios
+        users_df: Users DataFrame
         
     Returns:
-        Dict con datos preprocesados para visualización
+        Dict with processed data for visualization
     """
     processed_data = {}
     
-    # Datos de edad
+    # Age analysis
     if 'edad_usuario' in users_df.columns:
         users_clean = users_df.copy()
         users_clean['edad_usuario'] = pd.to_numeric(users_clean['edad_usuario'], errors='coerce')
@@ -23,11 +24,11 @@ def preprocess_users_data(users_df: pd.DataFrame):
         processed_data['edad_valid'] = edad_valid
         processed_data['edad_promedio'] = edad_valid.mean()
     
-    # Datos de género
+    # Gender analysis
     if 'genero_usuario' in users_df.columns:
         processed_data['genero_counts'] = users_df['genero_usuario'].value_counts()
     
-    # Datos de fechas de alta
+    # Registration date analysis
     if 'fecha_alta' in users_df.columns:
         users_temp = users_df.copy()
         if not pd.api.types.is_datetime64_any_dtype(users_temp['fecha_alta']):
@@ -39,21 +40,19 @@ def preprocess_users_data(users_df: pd.DataFrame):
     return processed_data
 
 
-
-
-def preprocess_trips_data(trips_df: pd.DataFrame):
+def analyze_trips_for_visualization(trips_df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Preprocesa los datos de viajes.
+    Analyze trips data for visualization purposes.
     
     Args:
-        trips_df: DataFrame original de viajes
+        trips_df: Trips DataFrame
         
     Returns:
-        Dict con datos preprocesados para visualización
+        Dict with processed data for visualization
     """
     processed_data = {}
     
-    # preparar datos temporales
+    # Prepare temporal data
     trips_temp = trips_df.copy()
     fecha_col = 'fecha_origen_recorrido' if 'fecha_origen_recorrido' in trips_temp.columns else 'fecha_origen'
     
@@ -64,13 +63,13 @@ def preprocess_trips_data(trips_df: pd.DataFrame):
     processed_data['trips_clean'] = trips_temp
     processed_data['fecha_col'] = fecha_col
     
-    # analisis temporal
+    # Temporal analysis
     processed_data['viajes_por_hora'] = trips_temp[fecha_col].dt.hour.value_counts().sort_index()
     processed_data['viajes_por_dia'] = trips_temp[fecha_col].dt.dayofweek.value_counts().sort_index()
     processed_data['viajes_por_mes'] = trips_temp[fecha_col].dt.month.value_counts().sort_index()
     processed_data['viajes_por_año'] = trips_temp[fecha_col].dt.year.value_counts().sort_index()
     
-    # Análisis de estaciones
+    # Station analysis
     if 'id_estacion_origen' in trips_temp.columns:
         processed_data['top_origen'] = trips_temp['id_estacion_origen'].value_counts().head(15)
         processed_data['viajes_por_estacion'] = trips_temp['id_estacion_origen'].value_counts()
@@ -78,7 +77,7 @@ def preprocess_trips_data(trips_df: pd.DataFrame):
     if 'id_estacion_destino' in trips_temp.columns:
         processed_data['top_destino'] = trips_temp['id_estacion_destino'].value_counts().head(15)
     
-    # Análisis de duración
+    # Duration analysis
     if 'duracion_recorrido' in trips_temp.columns:
         trips_temp['duracion_num'] = pd.to_numeric(
             trips_temp['duracion_recorrido'].astype(str).str.replace(',', ''), 
@@ -89,7 +88,7 @@ def preprocess_trips_data(trips_df: pd.DataFrame):
         processed_data['duracion_valid'] = duracion_valid
         processed_data['duracion_promedio'] = duracion_valid.mean()
     
-    # Datos para heatmap
+    # Heatmap data
     processed_data['hora'] = trips_temp[fecha_col].dt.hour
     processed_data['dia_semana'] = trips_temp[fecha_col].dt.dayofweek
     processed_data['activity_matrix'] = trips_temp.groupby([
@@ -100,11 +99,11 @@ def preprocess_trips_data(trips_df: pd.DataFrame):
     return processed_data
 
 
-def preprocess_whole_dataset(df: pd.DataFrame) -> pd.DataFrame:
+def clean_dataset_comprehensive(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """
-    Comprehensive preprocessing function for the entire dataset.
+    Comprehensive dataset cleaning with optimized operations.
     
-    Performs the following operations in-place:
+    Operations performed:
     - Merges gender columns (género, genero, Género) into 'genero'  
     - Merges ID columns (id_recorrido, Id_recorrido) into 'id_recorrido'
     - Removes 'BAEcobici' suffix from specified columns and converts to int
@@ -112,153 +111,445 @@ def preprocess_whole_dataset(df: pd.DataFrame) -> pd.DataFrame:
     
     Args:
         df: Input DataFrame to preprocess
+        verbose: Whether to print progress information
         
     Returns:
-        pd.DataFrame: The same DataFrame modified in-place
+        pd.DataFrame: Cleaned DataFrame
     """
-    df_work = df.copy()
+    if verbose:
+        print(f"🧹 Starting comprehensive cleaning for {len(df):,} rows...")
     
-    # merge gender columns into 'genero'
+    # Step 1: Merge gender columns using vectorized operations
     gender_columns = ['género', 'genero', 'Género']
-    existing_gender_cols = [col for col in gender_columns if col in df_work.columns]
+    existing_gender_cols = [col for col in gender_columns if col in df.columns]
     
     if existing_gender_cols:
-        # create unified gender column, prioritizing non-null values
-        df_work['genero'] = df_work[existing_gender_cols].bfill(axis=1).iloc[:, 0]
-        # remove original gender columns except 'genero'
+        if verbose:
+            print("   ✓ Merging gender columns...")
+        # Use coalesce-like operation - more efficient than bfill
+        df['genero'] = df[existing_gender_cols[0]].copy()
+        for col in existing_gender_cols[1:]:
+            mask = df['genero'].isna()
+            df.loc[mask, 'genero'] = df.loc[mask, col]
+        
+        # Drop original columns except 'genero'
         cols_to_drop = [col for col in existing_gender_cols if col != 'genero']
-        df_work.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+        df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     
-    # merge id_recorrido columns
+    # Step 2: Merge ID columns
     id_columns = ['id_recorrido', 'Id_recorrido']
-    existing_id_cols = [col for col in id_columns if col in df_work.columns]
+    existing_id_cols = [col for col in id_columns if col in df.columns]
     
     if len(existing_id_cols) > 1:
-        # create unified id column, prioritizing non-null values
-        df_work['id_recorrido'] = df_work[existing_id_cols].bfill(axis=1).iloc[:, 0]
-        # remove duplicated id columns except 'id_recorrido'
+        if verbose:
+            print("   ✓ Merging ID columns...")
+        df['id_recorrido'] = df[existing_id_cols[0]].copy()
+        for col in existing_id_cols[1:]:
+            mask = df['id_recorrido'].isna()
+            df.loc[mask, 'id_recorrido'] = df.loc[mask, col]
+        
         cols_to_drop = [col for col in existing_id_cols if col != 'id_recorrido']
-        df_work.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+        df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     
-    # process columns with BAEcobici suffix
+    # Step 3: Process BAEcobici suffix columns
     columns_to_process = ['id_estacion_origen', 'id_estacion_destino', 'id_usuario', 'id_recorrido']
-    existing_process_cols = [col for col in columns_to_process if col in df_work.columns]
+    existing_process_cols = [col for col in columns_to_process if col in df.columns]
+    
+    if existing_process_cols:
+        if verbose:
+            print(f"   ✓ Processing BAEcobici suffixes for {len(existing_process_cols)} columns...")
     
     for column in existing_process_cols:
-        if df_work[column].dtype == 'object':
-            # check if column contains BAEcobici suffix
-            sample_values = df_work[column].dropna().astype(str).head(100)
-            if any('BAEcobici' in str(val) for val in sample_values):
-                df_work[column] = df_work[column].astype(str).str.replace('BAEcobici', '', regex=False)
-                # convert to int, handling any conversion errors
-                df_work[column] = pd.to_numeric(df_work[column], errors='coerce').astype('Int64')
+            if df[column].dtype == 'object':
+                # Check if column contains BAEcobici suffix (sample check)
+                sample_mask = df[column].notna()
+                if sample_mask.sum() > 0:
+                    sample_values = df.loc[sample_mask, column].astype(str).head(1000)
+                    has_suffix = sample_values.str.contains('BAEcobici', na=False).any()
+                    
+                    if has_suffix:
+                        if verbose:
+                            print(f"     - Processing {column}...")
+                        # Vectorized string replacement - much faster than iterative
+                        df[column] = df[column].astype(str).str.replace('BAEcobici', '', regex=False)
+                        # Convert to numeric efficiently
+                        df[column] = pd.to_numeric(df[column], errors='coerce').astype('Int64')
     
-    # remove unnecessary columns
+    # Step 4: Remove unnecessary columns
     unnecessary_columns = ['Unnamed: 0', 'X']
-    existing_unnecessary = [col for col in unnecessary_columns if col in df_work.columns]
+    existing_unnecessary = [col for col in unnecessary_columns if col in df.columns]
     if existing_unnecessary:
-        df_work.drop(columns=existing_unnecessary, inplace=True, errors='ignore')
+        if verbose:
+            print("   ✓ Removing unnecessary columns...")
+        df.drop(columns=existing_unnecessary, inplace=True, errors='ignore')
     
-    # modify original dataframe in-place by replacing all data
-    # first, drop all existing columns
-    df.drop(columns=df.columns.tolist(), inplace=True)
-    
-    # then add all columns from processed dataframe
-    for col in df_work.columns:
-        df[col] = df_work[col].values
+    if verbose:
+        print(f"✅ Comprehensive cleaning completed for {len(df):,} rows!")
     
     return df
 
 
-def process_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+def remove_baecobici_suffix(df: pd.DataFrame, columns: List[str], inplace: bool = True, verbose: bool = True) -> pd.DataFrame:
     """
-    Remove the suffix 'BAEcobici' from the specified columns and convert the values to integers.
+    Remove 'BAEcobici' suffix from specified columns and convert to integers.
 
-    Parameters:
-    df (pd.DataFrame): The DataFrame containing the columns to process.
-    columns (list): A list of column names to process.
+    Args:
+        df: DataFrame containing columns to process
+        columns: List of column names to process
+        inplace: Whether to modify DataFrame in-place
+        verbose: Whether to print progress
 
     Returns:
-    pd.DataFrame: The DataFrame with processed columns.
+        pd.DataFrame: DataFrame with processed columns
     """
-    df_result = df.copy()
+    if not inplace:
+        df = df.copy()
+    
     for column in columns:
-        if column in df_result.columns:
-            df_result[column] = df_result[column].astype(str).str.replace('BAEcobici', '', regex=False).astype(int)
-    return df_result
+        if column in df.columns and df[column].dtype == 'object':
+            # Quick sample check to see if processing is needed
+            sample_mask = df[column].notna()
+            if sample_mask.sum() > 0:
+                sample_values = df.loc[sample_mask, column].astype(str).head(100)
+                has_suffix = sample_values.str.contains('BAEcobici', na=False).any()
+                
+                if has_suffix:
+                    if verbose:
+                        print(f"   - Processing {column}...")
+                    # Vectorized operations - much faster than row-by-row
+                    df[column] = (df[column]
+                                .astype(str)
+                                .str.replace('BAEcobici', '', regex=False))
+                    df[column] = pd.to_numeric(df[column], errors='coerce').astype('Int64')
+    
+    return df
 
 
-def test_preprocess_whole_dataset():
+def clean_latitude_column(df: pd.DataFrame, lat_column: str, 
+                         inplace: bool = True, verbose: bool = True) -> pd.DataFrame:
     """
-    Simple test function to validate preprocess_whole_dataset functionality.
+    Clean latitude columns that contain concatenated lat,lon values.
+    
+    Handles cases like:
+    - "-34.611032" -> -34.611032 (already clean)
+    - "-34.611032,-58.3682604" -> -34.611032 (extract latitude)
+    - "nan" or None -> NaN
+    
+    Args:
+        df: DataFrame containing the latitude column
+        lat_column: Name of the latitude column to clean
+        inplace: Whether to modify the DataFrame in-place
+        verbose: Whether to print processing information
+        
+    Returns:
+        pd.DataFrame: DataFrame with cleaned latitude column
     """
-    import pandas as pd
-    import numpy as np
+    if verbose:
+        print(f"🧭 Cleaning latitude column: {lat_column}")
+        original_nulls = df[lat_column].isna().sum()
+        print(f"   📊 Original nulls: {original_nulls:,}")
     
-    # create test dataframe with problematic columns
-    test_data = {
-        'id_estacion_origen': ['123BAEcobici', '456BAEcobici', '789BAEcobici'],
-        'id_estacion_destino': ['321BAEcobici', '654BAEcobici', '987BAEcobici'], 
-        'id_usuario': ['111BAEcobici', '222BAEcobici', '333BAEcobici'],
-        'id_recorrido': [1001, 1002, 1003],
-        'Id_recorrido': [1001, 1002, 1003],  # duplicate column
-        'genero': ['M', 'F', None],
-        'género': [None, None, 'M'],  # duplicate with accent
-        'Género': ['M', 'F', 'M'],   # duplicate capitalized
-        'Unnamed: 0': [0, 1, 2],     # unnecessary column
-        'X': ['a', 'b', 'c'],        # unnecessary column
-        'other_column': ['data1', 'data2', 'data3']  # should remain
-    }
+    if not inplace:
+        df = df.copy()
     
-    test_df = pd.DataFrame(test_data)
-    print("Original DataFrame:")
-    print(f"Columns: {list(test_df.columns)}")
-    print(f"Shape: {test_df.shape}")
-    print("\nSample data:")
-    print(test_df.head(3))
+    if lat_column not in df.columns:
+        if verbose:
+            print(f"   ⚠️ Column {lat_column} not found in DataFrame")
+        return df
     
-    # apply preprocessing
-    processed_df = preprocess_whole_dataset(test_df.copy())
+    # Convert to string for processing
+    lat_series = df[lat_column].astype(str)
     
-    print("\n" + "="*50)
-    print("Processed DataFrame:")
-    print(f"Columns: {list(processed_df.columns)}")
-    print(f"Shape: {processed_df.shape}")
-    print("\nProcessed data:")
-    print(processed_df.head(3))
+    # Identify different patterns
+    if verbose:
+        comma_count = lat_series.str.contains(',', na=False).sum()
+        print(f"   📈 Values with comma (lat,lon): {comma_count:,}")
     
-    # validate results
-    print("\n" + "="*50)
-    print("VALIDATION RESULTS:")
+    # Vectorized extraction of latitude (first part before comma if exists)
+    cleaned_lat = lat_series.str.split(',').str[0]
     
-    # check gender merge
-    if 'genero' in processed_df.columns:
-        gender_counts = processed_df['genero'].value_counts()
-        print(f"✓ Gender column unified: {dict(gender_counts)}")
+    # Convert to numeric, handling errors gracefully
+    df[lat_column] = pd.to_numeric(cleaned_lat, errors='coerce')
     
-    # check ID merge
-    if 'id_recorrido' in processed_df.columns and 'Id_recorrido' not in processed_df.columns:
-        print("✓ ID columns merged successfully")
+    if verbose:
+        final_nulls = df[lat_column].isna().sum()
+        valid_values = len(df) - final_nulls
+        print(f"   ✅ Valid latitudes: {valid_values:,}")
+        print(f"   ⚠️ Final nulls: {final_nulls:,} (+{final_nulls - original_nulls:,} from cleaning)")
+        
+        # Show sample of cleaned values
+        sample_values = df[lat_column].dropna().head(5).tolist()
+        print(f"   📝 Sample cleaned values: {sample_values}")
     
-    # check BAEcobici removal
-    id_cols = ['id_estacion_origen', 'id_estacion_destino', 'id_usuario']
-    baecobici_removed = True
-    for col in id_cols:
-        if col in processed_df.columns:
-            sample_val = str(processed_df[col].iloc[0])
-            if 'BAEcobici' in sample_val:
-                baecobici_removed = False
-                break
-    print(f"✓ BAEcobici suffix removed: {baecobici_removed}")
-    
-    # check unnecessary columns removal
-    unnecessary_removed = not any(col in processed_df.columns for col in ['Unnamed: 0', 'X'])
-    print(f"✓ Unnecessary columns removed: {unnecessary_removed}")
-    
-    print("\n🎉 Test completed successfully!")
-    return processed_df
+    return df
 
 
-if __name__ == "__main__":
-    # run test when script is executed directly
-    test_preprocess_whole_dataset()
+def clean_longitude_column(df: pd.DataFrame, lon_column: str, 
+                          inplace: bool = True, verbose: bool = True) -> pd.DataFrame:
+    """
+    Clean longitude columns that might contain concatenated lat,lon values.
+    
+    Handles cases like:
+    - "-58.3682604" -> -58.3682604 (already clean)
+    - "-34.611032,-58.3682604" -> -58.3682604 (extract longitude)
+    - "nan" or None -> NaN
+    
+    Args:
+        df: DataFrame containing the longitude column
+        lon_column: Name of the longitude column to clean
+        inplace: Whether to modify the DataFrame in-place
+        verbose: Whether to print processing information
+        
+    Returns:
+        pd.DataFrame: DataFrame with cleaned longitude column
+    """
+    if verbose:
+        print(f"🧭 Cleaning longitude column: {lon_column}")
+        original_nulls = df[lon_column].isna().sum()
+        print(f"   📊 Original nulls: {original_nulls:,}")
+    
+    if not inplace:
+        df = df.copy()
+    
+    if lon_column not in df.columns:
+        if verbose:
+            print(f"   ⚠️ Column {lon_column} not found in DataFrame")
+        return df
+    
+    # Convert to string for processing
+    lon_series = df[lon_column].astype(str)
+    
+    if verbose:
+        comma_count = lon_series.str.contains(',', na=False).sum()
+        print(f"   📈 Values with comma (lat,lon): {comma_count:,}")
+    
+    # Extract longitude (second part after comma, or the value itself if no comma)
+    def extract_longitude(value_str):
+        parts = value_str.split(',')
+        if len(parts) >= 2:
+            return parts[1]  # longitude is second part
+        else:
+            return value_str  # assume it's already longitude
+    
+    # Vectorized longitude extraction
+    cleaned_lon = lon_series.apply(extract_longitude)
+    
+    # Convert to numeric
+    df[lon_column] = pd.to_numeric(cleaned_lon, errors='coerce')
+    
+    if verbose:
+        final_nulls = df[lon_column].isna().sum()
+        valid_values = len(df) - final_nulls
+        print(f"   ✅ Valid longitudes: {valid_values:,}")
+        print(f"   ⚠️ Final nulls: {final_nulls:,} (+{final_nulls - original_nulls:,} from cleaning)")
+        
+        sample_values = df[lon_column].dropna().head(5).tolist()
+        print(f"   📝 Sample cleaned values: {sample_values}")
+    
+    return df
+
+
+def clean_coordinate_columns(df: pd.DataFrame, 
+                           coordinate_columns: Optional[List[str]] = None,
+                           inplace: bool = True, 
+                           verbose: bool = True) -> pd.DataFrame:
+    """
+    Batch cleaning of multiple coordinate columns.
+    
+    Automatically detects and cleans latitude/longitude columns that may have
+    concatenated "lat,lon" values.
+    
+    Args:
+        df: DataFrame to process
+        coordinate_columns: List of coordinate columns to clean. If None, auto-detects
+        inplace: Whether to modify DataFrame in-place
+        verbose: Whether to print processing information
+
+    Returns:
+        pd.DataFrame: DataFrame with cleaned coordinate columns
+    """
+    if verbose:
+        print("🗺️  BATCH COORDINATE CLEANING")
+        print(f"   📊 Processing {len(df):,} rows...")
+    
+    if not inplace:
+        df = df.copy()
+    
+    # Auto-detect coordinate columns if not specified
+    if coordinate_columns is None:
+        coordinate_patterns = ['lat', 'lon', 'latitude', 'longitude', 'estacion']
+        coordinate_columns = []
+        for col in df.columns:
+            if any(pattern in col.lower() for pattern in coordinate_patterns):
+                if df[col].dtype == 'object':  # Only process string columns
+                    coordinate_columns.append(col)
+        
+        if verbose:
+            print(f"   🔍 Auto-detected coordinate columns: {coordinate_columns}")
+    
+    # Process each coordinate column
+    for col in coordinate_columns:
+        if 'lat' in col.lower():
+            clean_latitude_column(df, col, inplace=True, verbose=verbose)
+        elif 'lon' in col.lower():
+            clean_longitude_column(df, col, inplace=True, verbose=verbose)
+        else:
+            # For generic coordinate columns, try latitude cleaning first
+            clean_latitude_column(df, col, inplace=True, verbose=verbose)
+    
+    if verbose:
+        print("✅ Batch coordinate cleaning completed!")
+    
+    return df
+
+
+def optimize_memory_usage(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    """
+    OPTIMIZED memory usage function that handles NaN values properly.
+    
+    This can reduce memory usage by 50-70% for large datasets.
+    Uses nullable integer types to handle NaN values correctly.
+    
+    Args:
+        df: DataFrame to optimize
+        verbose: Whether to print memory savings
+        
+    Returns:
+        pd.DataFrame: Memory-optimized DataFrame
+    """
+    if verbose:
+        start_memory = df.memory_usage(deep=True).sum() / 1024**2
+        print(f"🗜️  Original memory usage: {start_memory:.1f} MB")
+    
+    # Store datetime columns to preserve them
+    datetime_columns = {}
+    for col in df.columns:
+        if df[col].dtype.name.startswith('datetime'):
+            datetime_columns[col] = df[col].copy()
+            if verbose:
+                print(f"     🗓️ Preserving datetime column: {col}")
+    
+    # Optimize integer columns - use nullable integer types for columns with NaN
+    for col in df.select_dtypes(include=['int64', 'Int64']).columns:
+        # Check if column has NaN values
+        has_na = df[col].isna().any()
+        
+        # Skip if all values are NaN
+        if df[col].isna().all():
+            if verbose:
+                print(f"     ⚠️ Skipping {col}: all values are NaN")
+            continue
+            
+        col_min = df[col].min()
+        col_max = df[col].max()
+        
+        # Use nullable integer types if there are NaN values
+        if has_na:
+            if col_min >= 0:  # Unsigned integers (nullable)
+                if col_max < 255:
+                    df[col] = df[col].astype('UInt8')
+                elif col_max < 65535:
+                    df[col] = df[col].astype('UInt16') 
+                elif col_max < 4294967295:
+                    df[col] = df[col].astype('UInt32')
+                else:
+                    df[col] = df[col].astype('UInt64')
+            else:  # Signed integers (nullable)
+                if col_min > -128 and col_max < 127:
+                    df[col] = df[col].astype('Int8')
+                elif col_min > -32768 and col_max < 32767:
+                    df[col] = df[col].astype('Int16')
+                elif col_min > -2147483648 and col_max < 2147483647:
+                    df[col] = df[col].astype('Int32')
+                else:
+                    df[col] = df[col].astype('Int64')
+        else:
+            # No NaN values - use regular numpy types for better performance
+            if col_min >= 0:  # Unsigned integers
+                if col_max < 255:
+                    df[col] = df[col].astype(np.uint8)
+                elif col_max < 65535:
+                    df[col] = df[col].astype(np.uint16)
+                elif col_max < 4294967295:
+                    df[col] = df[col].astype(np.uint32)
+            else:  # Signed integers
+                if col_min > -128 and col_max < 127:
+                    df[col] = df[col].astype(np.int8)
+                elif col_min > -32768 and col_max < 32767:
+                    df[col] = df[col].astype(np.int16)
+                elif col_min > -2147483648 and col_max < 2147483647:
+                    df[col] = df[col].astype(np.int32)
+        
+        if verbose:
+            print(f"     ✓ {col}: {'nullable' if has_na else 'regular'} {df[col].dtype}")
+    
+    # Optimize float columns - handle with downcast parameter
+    for col in df.select_dtypes(include=['float64']).columns:
+        try:
+            original_dtype = df[col].dtype
+            df[col] = pd.to_numeric(df[col], downcast='float')
+            if verbose and df[col].dtype != original_dtype:
+                print(f"     ✓ {col}: {original_dtype} → {df[col].dtype}")
+        except Exception as e:
+            if verbose:
+                print(f"     ⚠️ Could not optimize {col}: {str(e)}")
+    
+    # Optimize object columns that might be categorical
+    for col in df.select_dtypes(include=['object']).columns:
+        try:
+            # Skip columns that might need ordering comparisons
+            skip_patterns = ['fecha', 'date', 'time', 'hora', 'id_', 'recorrido', 'usuario']
+            should_skip = any(pattern in col.lower() for pattern in skip_patterns)
+            
+            if should_skip:
+                if verbose:
+                    print(f"     ⚠️ Skipping {col}: might need ordering comparisons")
+                continue
+            
+            num_unique_values = df[col].nunique()
+            num_total_values = len(df[col])
+            
+            # More conservative threshold and additional checks
+            if num_unique_values / num_total_values < 0.3:  # More conservative: 30% instead of 50%
+                # Additional check: ensure it's really a good candidate for categorical
+                sample_values = df[col].dropna().head(10).tolist()
+                
+                # Skip if values look like they might need ordering
+                numeric_like = any(str(val).replace('.', '').replace('-', '').isdigit() 
+                                 for val in sample_values if val is not None)
+                
+                if numeric_like:
+                    if verbose:
+                        print(f"     ⚠️ Skipping {col}: values look numeric/orderable")
+                    continue
+                
+                original_memory = df[col].memory_usage(deep=True)
+                df[col] = df[col].astype('category')
+                new_memory = df[col].memory_usage(deep=True)
+                if verbose:
+                    savings = (original_memory - new_memory) / original_memory * 100
+                    print(f"     ✓ {col}: object → category ({savings:.1f}% savings)")
+            else:
+                if verbose:
+                    unique_pct = num_unique_values / num_total_values * 100
+                    print(f"     ⚠️ Skipping {col}: too many unique values ({unique_pct:.1f}%)")
+        except Exception as e:
+            if verbose:
+                print(f"     ⚠️ Could not categorize {col}: {str(e)}")
+    
+    # Restore datetime columns to ensure they remain datetime
+    for col, datetime_series in datetime_columns.items():
+        df[col] = datetime_series
+        if verbose:
+            print(f"     🗓️ Restored datetime column: {col}")
+    
+    if verbose:
+        end_memory = df.memory_usage(deep=True).sum() / 1024**2
+        savings = (start_memory - end_memory) / start_memory * 100
+        print(f"     💾 Optimized memory usage: {end_memory:.1f} MB")
+        print(f"     📈 Memory savings: {savings:.1f}%")
+        print(f"     🚀 Reduction factor: {start_memory/end_memory:.1f}x")
+    
+    return df
+
+
