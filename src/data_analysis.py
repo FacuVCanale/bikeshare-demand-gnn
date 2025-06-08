@@ -268,6 +268,7 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     - Avoids redundant datetime conversions
     - More efficient boolean indexing
     - Batch processing for memory efficiency
+    - Robust date type handling for both string and datetime columns
     
     Args:
         users_df: DataFrame of users
@@ -290,16 +291,26 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     if verbose:
         print(f"   Filtering users...")
     
+    # ensure date column is properly converted to datetime
+    users_date_series = users_df[user_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(users_date_series):
+        users_date_series = pd.to_datetime(users_date_series, errors='coerce')
+    
     # Vectorized filtering - much faster than multiple conditions
-    users_mask = (users_df[user_date_col].notna()) & (users_df[user_date_col] <= max_datetime)
+    users_mask = (users_date_series.notna()) & (users_date_series <= max_datetime)
     users_filtered = users_df[users_mask].copy()
     
     # Optimize trips filtering
     if verbose:
         print(f"   Filtering trips...")
     
+    # ensure date column is properly converted to datetime
+    trips_date_series = trips_df[trip_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(trips_date_series):
+        trips_date_series = pd.to_datetime(trips_date_series, errors='coerce')
+    
     # Vectorized filtering for large dataset
-    trips_mask = (trips_df[trip_date_col].notna()) & (trips_df[trip_date_col] <= max_datetime)
+    trips_mask = (trips_date_series.notna()) & (trips_date_series <= max_datetime)
     trips_filtered = trips_df[trips_mask].copy()
     
     if verbose:
@@ -325,6 +336,7 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     - Efficient boolean indexing
     - Reduced copying operations
     - Smart memory management for large datasets
+    - Robust date type handling for both string and datetime columns
     
     Args:
         users_df: DataFrame of users (already preprocessed)
@@ -350,9 +362,14 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     val_end = pd.to_datetime(val_end_date) 
     test_end = pd.to_datetime(test_end_date)
     
-    # Get date columns as series for faster operations
+    # Get date columns as series and ensure proper datetime conversion
     user_dates = users_df[user_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(user_dates):
+        user_dates = pd.to_datetime(user_dates, errors='coerce')
+    
     trip_dates = trips_df[trip_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(trip_dates):
+        trip_dates = pd.to_datetime(trip_dates, errors='coerce')
     
     # Vectorized splitting for users - much faster than individual filters
     if verbose:

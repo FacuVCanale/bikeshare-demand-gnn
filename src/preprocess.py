@@ -85,7 +85,7 @@ def analyze_trips_for_visualization(trips_df: pd.DataFrame) -> Dict[str, Any]:
             errors='coerce'
         )
         duracion_valid = trips_temp['duracion_num'].dropna()
-        duracion_valid = duracion_valid[(duracion_valid > 0) & (duracion_valid < 7200)]
+        duracion_valid = duracion_valid[(duracion_valid > 120) & (duracion_valid < 7200)]  # filter: >2 min, <2 hours
         processed_data['duracion_valid'] = duracion_valid
         processed_data['duracion_promedio'] = duracion_valid.mean()
     
