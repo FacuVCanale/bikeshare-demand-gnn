@@ -62,13 +62,6 @@ def load_all_raw_data(raw_dir: Path, save_dir: Path = None, verbose: bool = Fals
 
 
 
-
-
-
-
-
-
-
 def compute_counts(df: pd.DataFrame, dt_minutes: int = 30) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Devuelve dos DataFrames con conteos de partidas y arribos por estación."""
     df = df.copy()

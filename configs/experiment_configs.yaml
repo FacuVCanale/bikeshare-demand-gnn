@@ -17,8 +17,8 @@ base:
   
   training:
     epochs: 50                 # Épocas suficientes para convergencia
-    batch_size: 32             # Batch size balanceado
-    learning_rate: 0.001       # Learning rate estándar
+    batch_size: 128            # Batch size aumentado para SGD
+    learning_rate: 0.01        # Learning rate más alto para SGD
     patience: 10               # Early stopping patience
     experiment_name: "EcoBici_RNN_Base"
 
@@ -41,8 +41,8 @@ small_fast:
   
   training:
     epochs: 20                 # Menos épocas para pruebas rápidas
-    batch_size: 64             # Batch más grande para velocidad
-    learning_rate: 0.002       # Learning rate más alto
+    batch_size: 128            # Batch size estándar
+    learning_rate: 0.02        # Learning rate más alto para SGD
     patience: 5                # Menos paciencia
     experiment_name: "EcoBici_RNN_SmallFast"
 
@@ -65,8 +65,8 @@ large_deep:
   
   training:
     epochs: 100                # Más épocas para convergencia
-    batch_size: 16             # Batch más pequeño para modelos grandes
-    learning_rate: 0.0005      # Learning rate más conservador
+    batch_size: 128            # Batch size estándar
+    learning_rate: 0.005       # Learning rate para SGD con modelo grande
     patience: 15               # Más paciencia para convergencia
     experiment_name: "EcoBici_RNN_LargeDeep"
 
@@ -89,8 +89,8 @@ short_window:
   
   training:
     epochs: 60                 # Más épocas por mayor granularidad
-    batch_size: 32
-    learning_rate: 0.001
+    batch_size: 128            # Batch size estándar
+    learning_rate: 0.01        # Learning rate para SGD
     patience: 12
     experiment_name: "EcoBici_RNN_ShortWindow"
 
@@ -113,8 +113,8 @@ long_window:
   
   training:
     epochs: 40                 # Menos épocas por menor granularidad
-    batch_size: 32
-    learning_rate: 0.001
+    batch_size: 128            # Batch size estándar
+    learning_rate: 0.01        # Learning rate para SGD
     patience: 8
     experiment_name: "EcoBici_RNN_LongWindow"
 
@@ -137,8 +137,8 @@ experimental:
   
   training:
     epochs: 75
-    batch_size: 24            # Batch size intermedio
-    learning_rate: 0.0008     # Learning rate intermedio
+    batch_size: 128            # Batch size estándar
+    learning_rate: 0.008       # Learning rate para SGD
     patience: 12
     experiment_name: "EcoBici_RNN_Experimental"
 
@@ -161,8 +161,8 @@ production:
   
   training:
     epochs: 80                # Más épocas para mejor convergencia
-    batch_size: 32
-    learning_rate: 0.0008     # Learning rate optimizado
+    batch_size: 128           # Batch size estándar
+    learning_rate: 0.008      # Learning rate para SGD
     patience: 15              # Más paciencia para mejor modelo
     experiment_name: "EcoBici_RNN_Production"
 
@@ -185,8 +185,8 @@ debug:
   
   training:
     epochs: 5                 # Muy pocas épocas para testing
-    batch_size: 8             # Batch pequeño
-    learning_rate: 0.01       # Learning rate alto para convergencia rápida
+    batch_size: 128           # Batch size estándar incluso para debug
+    learning_rate: 0.05       # Learning rate alto para SGD y convergencia rápida
     patience: 2
     experiment_name: "EcoBici_RNN_Debug"
 
@@ -210,7 +210,7 @@ memory_optimized:
   
   training:
     epochs: 30                # Épocas moderadas
-    batch_size: 8             # Batch muy pequeño para RAM limitada
-    learning_rate: 0.002      # Learning rate moderado
+    batch_size: 128           # Batch size estándar
+    learning_rate: 0.02       # Learning rate para SGD
     patience: 5               # Paciencia limitada
     experiment_name: "EcoBici_RNN_MemoryOptimized" 

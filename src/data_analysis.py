@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -23,7 +23,7 @@ def plot_user_analysis(processed_users: Dict[str, Any], save_plots: bool = False
     """Genera gráficos de análisis de usuarios."""
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('👥 ANÁLISIS DE USUARIOS ECOBICI', fontsize=16, fontweight='bold')
+    fig.suptitle('ANÁLISIS DE USUARIOS ECOBICI', fontsize=16, fontweight='bold')
     
     # 1.1 Distribución de edades
     if 'edad_valid' in processed_users:
@@ -78,7 +78,7 @@ def plot_temporal_analysis(processed_trips: Dict[str, Any], save_plots: bool = F
     """Genera gráficos de análisis temporal de viajes."""
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('🚲 ANÁLISIS TEMPORAL DE VIAJES', fontsize=16, fontweight='bold')
+    fig.suptitle('ANÁLISIS TEMPORAL DE VIAJES', fontsize=16, fontweight='bold')
     
     # 2.1 Viajes por hora del día
     if 'viajes_por_hora' in processed_trips:
@@ -133,7 +133,7 @@ def plot_station_analysis(processed_trips: Dict[str, Any], save_plots: bool = Fa
     """Genera gráficos de análisis de estaciones."""
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('🚉 ANÁLISIS DE ESTACIONES', fontsize=16, fontweight='bold')
+    fig.suptitle('ANÁLISIS DE ESTACIONES', fontsize=16, fontweight='bold')
     
     # 3.1 Top 15 estaciones de origen
     if 'top_origen' in processed_trips:
@@ -367,12 +367,16 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
 
 
 
-def load_combined_data(combined_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_combined_data(combined_dir: Union[str, Path]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Carga los datasets combinados desde archivos parquet."""
     print("=== CARGANDO DATASETS COMBINADOS DESDE PARQUET ===")
     
+    # Convert to Path if string
+    combined_dir = Path(combined_dir)
+    
     users_file = combined_dir / "users.parquet"
     trips_file = combined_dir / "trips.parquet"
+    stations_file = combined_dir / "station_info.parquet"
     
     if not users_file.exists():
         raise FileNotFoundError(f"No se encontró: {users_file}")
@@ -387,4 +391,12 @@ def load_combined_data(combined_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     trips_df = pd.read_parquet(trips_file)
     print(f"✅ Viajes cargados: {len(trips_df):,} registros")
     
-    return users_df, trips_df 
+    if stations_file.exists():
+        print("Cargando información de estaciones desde parquet...")
+        station_info = pd.read_parquet(stations_file)
+        print(f"✅ Estaciones cargadas: {len(station_info):,} registros")
+    else:
+        print("⚠️ Archivo de estaciones no encontrado, creando DataFrame vacío")
+        station_info = pd.DataFrame()
+    
+    return users_df, trips_df, station_info 
