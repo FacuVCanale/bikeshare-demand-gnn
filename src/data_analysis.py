@@ -167,10 +167,15 @@ def plot_station_analysis(processed_trips: Dict[str, Any], save_plots: bool = Fa
         duracion_valid = processed_trips['duracion_valid']
         duracion_promedio = processed_trips['duracion_promedio']
         
+        # calculate dynamic range based on actual data
+        duracion_min_minutos = (duracion_valid / 60).min()
+        duracion_max_minutos = (duracion_valid / 60).max()
+        print(duracion_min_minutos, duracion_max_minutos)
         axes[1, 1].hist(duracion_valid / 60, bins=50, edgecolor='black', alpha=0.7, color='orange')
         axes[1, 1].set_title('Distribución de Duración de Viajes')
         axes[1, 1].set_xlabel('Duración (minutos)')
         axes[1, 1].set_ylabel('Frecuencia')
+        axes[1, 1].set_xlim(duracion_min_minutos, duracion_max_minutos)  # dynamic range based on data
         axes[1, 1].axvline(duracion_promedio / 60, color='red', linestyle='--', 
                           label=f'Media: {duracion_promedio / 60:.1f} min')
         axes[1, 1].legend()
