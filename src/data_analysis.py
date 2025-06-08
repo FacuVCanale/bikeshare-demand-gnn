@@ -194,7 +194,7 @@ def plot_activity_heatmap(processed_trips: Dict[str, Any], save_plots: bool = Fa
                     yticklabels=['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'],
                     cmap='YlOrRd', 
                     cbar_kws={'label': 'Número de Viajes'})
-        plt.title('🔥 HEATMAP DE ACTIVIDAD: Viajes por Hora y Día de la Semana', 
+        plt.title('HEATMAP DE ACTIVIDAD: Viajes por Hora y Día de la Semana', 
                  fontsize=14, fontweight='bold')
         plt.xlabel('Hora del Día')
         plt.ylabel('Día de la Semana')
@@ -208,11 +208,11 @@ def print_summary_statistics(users_df: pd.DataFrame, processed_users: Dict[str, 
                            trips_df: pd.DataFrame, processed_trips: Dict[str, Any]) -> None:
     """Imprime estadísticas resumen."""
     
-    print("\n📊 ESTADÍSTICAS RESUMEN")
+    print("\nESTADÍSTICAS RESUMEN")
     print("=" * 40)
     
     # Usuarios
-    print(f"👥 USUARIOS:")
+    print(f"USUARIOS:")
     print(f"   • Total usuarios: {len(users_df):,}")
     
     if 'edad_promedio' in processed_users:
@@ -228,7 +228,7 @@ def print_summary_statistics(users_df: pd.DataFrame, processed_users: Dict[str, 
             print(f"     - {genero}: {count:,} ({pct:.1f}%)")
     
     # Viajes
-    print(f"\n🚲 VIAJES:")
+    print(f"\nVIAJES:")
     print(f"   • Total viajes: {len(trips_df):,}")
     
     if 'trips_clean' in processed_trips and 'fecha_col' in processed_trips:
@@ -281,14 +281,14 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
         Tuple with (users_filtered, trips_filtered)
     """
     if verbose:
-        print(f"🔽 FILTERING DATA UNTIL {max_date}")
-        print(f"   📊 Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+        print(f"FILTERING DATA UNTIL {max_date}")
+        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
     
     max_datetime = pd.to_datetime(max_date)
     
     # Optimize users filtering
     if verbose:
-        print(f"   ⚡ Filtering users...")
+        print(f"   Filtering users...")
     
     # Vectorized filtering - much faster than multiple conditions
     users_mask = (users_df[user_date_col].notna()) & (users_df[user_date_col] <= max_datetime)
@@ -296,7 +296,7 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     
     # Optimize trips filtering
     if verbose:
-        print(f"   ⚡ Filtering trips...")
+        print(f"   Filtering trips...")
     
     # Vectorized filtering for large dataset
     trips_mask = (trips_df[trip_date_col].notna()) & (trips_df[trip_date_col] <= max_datetime)
@@ -305,8 +305,8 @@ def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     if verbose:
         users_removed = len(users_df) - len(users_filtered)
         trips_removed = len(trips_df) - len(trips_filtered)
-        print(f"   ✅ Users: {len(users_df):,} → {len(users_filtered):,} (-{users_removed:,})")
-        print(f"   ✅ Trips: {len(trips_df):,} → {len(trips_filtered):,} (-{trips_removed:,})")
+        print(f"   Users: {len(users_df):,} → {len(users_filtered):,} (-{users_removed:,})")
+        print(f"   Trips: {len(trips_df):,} → {len(trips_filtered):,} (-{trips_removed:,})")
     
     return users_filtered, trips_filtered
 
@@ -341,9 +341,9 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     """
     
     if verbose:
-        print("🔄 OPTIMIZED TEMPORAL SPLIT")
-        print(f"   📅 Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
-        print(f"   📊 Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+        print("OPTIMIZED TEMPORAL SPLIT")
+        print(f"   Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
+        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
     
     # Convert dates once - more efficient
     train_end = pd.to_datetime(train_end_date)
@@ -356,7 +356,7 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     
     # Vectorized splitting for users - much faster than individual filters
     if verbose:
-        print("   ⚡ Splitting users...")
+        print("   Splitting users...")
     
     users_train_mask = user_dates <= train_end
     users_val_mask = (user_dates > train_end) & (user_dates <= val_end)
@@ -368,7 +368,7 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     
     # Vectorized splitting for trips - optimized for large datasets
     if verbose:
-        print("   ⚡ Splitting trips...")
+        print("   Splitting trips...")
     
     trips_train_mask = trip_dates <= train_end
     trips_val_mask = (trip_dates > train_end) & (trip_dates <= val_end)
@@ -379,8 +379,8 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     trips_test = trips_df[trips_test_mask].copy()
     
     if verbose:
-        print(f"   ✅ Users: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
-        print(f"   ✅ Trips: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
+        print(f"   Users: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
+        print(f"   Trips: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
     
     return {
         'users_train': users_train,
@@ -392,37 +392,3 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     }
 
 
-
-def load_combined_data(combined_dir: Union[str, Path]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Carga los datasets combinados desde archivos parquet."""
-    print("=== CARGANDO DATASETS COMBINADOS DESDE PARQUET ===")
-    
-    # Convert to Path if string
-    combined_dir = Path(combined_dir)
-    
-    users_file = combined_dir / "users.parquet"
-    trips_file = combined_dir / "trips.parquet"
-    stations_file = combined_dir / "station_info.parquet"
-    
-    if not users_file.exists():
-        raise FileNotFoundError(f"No se encontró: {users_file}")
-    if not trips_file.exists():
-        raise FileNotFoundError(f"No se encontró: {trips_file}")
-    
-    print("Cargando usuarios desde parquet...")
-    users_df = pd.read_parquet(users_file)
-    print(f"✅ Usuarios cargados: {len(users_df):,} registros")
-    
-    print("Cargando viajes desde parquet...")
-    trips_df = pd.read_parquet(trips_file)
-    print(f"✅ Viajes cargados: {len(trips_df):,} registros")
-    
-    if stations_file.exists():
-        print("Cargando información de estaciones desde parquet...")
-        station_info = pd.read_parquet(stations_file)
-        print(f"✅ Estaciones cargadas: {len(station_info):,} registros")
-    else:
-        print("⚠️ Archivo de estaciones no encontrado, creando DataFrame vacío")
-        station_info = pd.DataFrame()
-    
-    return users_df, trips_df, station_info 

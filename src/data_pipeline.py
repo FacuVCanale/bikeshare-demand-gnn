@@ -3,268 +3,422 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
+# =============================================================================
+# DATA STRUCTURE MAPPINGS BY YEAR
+# =============================================================================
 
-def load_csv_files(input_dir: Path, parse_dates: Optional[List[str]] = None, dayfirst: bool = True) -> pd.DataFrame:
-    """
-    OPTIMIZED function to load all CSV files from a directory into a single DataFrame.
+TRIPS_COLUMN_MAPPINGS = {
+    2020: {
+        "structure": ["", "Id_recorrido", "duracion_recorrido", "fecha_origen_recorrido", 
+                     "id_estacion_origen", "nombre_estacion_origen", "direccion_estacion_origen",
+                     "long_estacion_origen", "lat_estacion_origen", "fecha_destino_recorrido",
+                     "id_estacion_destino", "nombre_estacion_destino", "direccion_estacion_destino",
+                     "long_estacion_destino", "lat_estacion_destino", "id_usuario", "modelo_bicicleta", "género"],
+        "normalize": {
+            "": None,  # Drop
+            "Id_recorrido": "id_recorrido",
+            "género": "genero",
+        },
+        "has_baecobici": True,
+        "has_comma_decimals": True,
+        "has_concatenated_coords": True  # lat_estacion_destino has "lat,lon" format
+    },
+    2021: {
+        "structure": ["", "Id_recorrido", "duracion_recorrido", "fecha_origen_recorrido",
+                     "id_estacion_origen", "nombre_estacion_origen", "direccion_estacion_origen",
+                     "long_estacion_origen", "lat_estacion_origen", "fecha_destino_recorrido",
+                     "id_estacion_destino", "nombre_estacion_destino", "direccion_estacion_destino",
+                     "long_estacion_destino", "lat_estacion_destino", "id_usuario", "modelo_bicicleta", 
+                     "género", "Género"],
+        "normalize": {
+            "": None,  # Drop
+            "Id_recorrido": "id_recorrido",
+            "género": "genero",
+            "Género": None,  # Drop this one - will merge it later
+        },
+        "has_baecobici": True,
+        "has_comma_decimals": True,
+        "has_concatenated_coords": True  # lat_estacion_destino has "lat,lon" format
+    },
+    2022: {
+        "structure": ["", "X", "Id_recorrido", "duracion_recorrido", "fecha_origen_recorrido",
+                     "id_estacion_origen", "nombre_estacion_origen", "direccion_estacion_origen",
+                     "long_estacion_origen", "lat_estacion_origen", "fecha_destino_recorrido",
+                     "id_estacion_destino", "nombre_estacion_destino", "direccion_estacion_destino",
+                     "long_estacion_destino", "lat_estacion_destino", "id_usuario", "modelo_bicicleta", "Género"],
+        "normalize": {
+            "": None,  # Drop
+            "X": None,  # Drop
+            "Id_recorrido": "id_recorrido", 
+            "Género": "genero",
+        },
+        "has_baecobici": True,
+        "has_comma_decimals": True,
+        "has_concatenated_coords": False  # No concatenated coordinates in 2022
+    },
+    2023: {
+        "structure": ["", "Id_recorrido", "duracion_recorrido", "fecha_origen_recorrido",
+                     "id_estacion_origen", "nombre_estacion_origen", "direccion_estacion_origen",
+                     "long_estacion_origen", "lat_estacion_origen", "fecha_destino_recorrido",
+                     "id_estacion_destino", "nombre_estacion_destino", "direccion_estacion_destino",
+                     "long_estacion_destino", "lat_estacion_destino", "id_usuario", "modelo_bicicleta", "género"],
+        "normalize": {
+            "": None,  # Drop
+            "Id_recorrido": "id_recorrido",
+            "género": "genero",
+        },
+        "has_baecobici": True,
+        "has_comma_decimals": True,
+        "has_concatenated_coords": False  # No concatenated coordinates in 2023
+    },
+    2024: {
+        "structure": ["id_recorrido", "duracion_recorrido", "fecha_origen_recorrido",
+                     "id_estacion_origen", "nombre_estacion_origen", "direccion_estacion_origen",
+                     "long_estacion_origen", "lat_estacion_origen", "fecha_destino_recorrido",
+                     "id_estacion_destino", "nombre_estacion_destino", "direccion_estacion_destino",
+                     "long_estacion_destino", "lat_estacion_destino", "id_usuario", "modelo_bicicleta", "genero"],
+        "normalize": {},  # Already normalized
+        "has_baecobici": False,
+        "has_comma_decimals": False,
+        "has_concatenated_coords": False
+    }
+}
+
+USERS_COLUMN_MAPPINGS = {
+    2020: {
+        "structure": ["ID_usuario", "genero_usuario", "edad_usuario", "fecha_alta", "hora_alta", "Customer.Has.Dni..Yes...No."],
+        "normalize": {
+            "ID_usuario": "id_usuario",
+            "Customer.Has.Dni..Yes...No.": None  # Drop
+        }
+    },
+    2021: {
+        "structure": ["ID_usuario", "genero_usuario", "edad_usuario", "fecha_alta", "hora_alta", "Customer.Has.Dni..Yes...No."],
+        "normalize": {
+            "ID_usuario": "id_usuario",
+            "Customer.Has.Dni..Yes...No.": None  # Drop
+        }
+    },
+    2022: {
+        "structure": ["ID_usuario", "genero_usuario", "edad_usuario", "fecha_alta", "hora_alta", "Customer.Has.Dni..Yes...No."],
+        "normalize": {
+            "ID_usuario": "id_usuario",
+            "Customer.Has.Dni..Yes...No.": None  # Drop
+        }
+    },
+    2023: {
+        "structure": ["ID_usuario", "genero_usuario", "edad_usuario", "fecha_alta", "hora_alta", "Customer.Has.Dni..Yes...No."],
+        "normalize": {
+            "ID_usuario": "id_usuario",
+            "Customer.Has.Dni..Yes...No.": None  # Drop
+        }
+    },
+    2024: {
+        "structure": ["id_usuario", "genero_usuario", "edad_usuario", "fecha_alta", "hora_alta"],
+        "normalize": {}  # Already normalized
+    }
+}
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def extract_year_from_filename(file_path: Path) -> int:
+    """Extract year from filename safely."""
+    filename = str(file_path.name)
+    for year in [2020, 2021, 2022, 2023, 2024]:
+        if str(year) in filename:
+            return year
+    raise ValueError(f"Could not extract year from filename: {filename}")
+
+def normalize_column_names(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    """Normalize column names using the provided mapping."""
+    df_normalized = df.copy()
     
-    Optimizations:
-    - Efficient data type inference and optimization
-    - Better memory management for large files
-    - Optimized pandas reading parameters
-    - Progress tracking for large datasets
-    """
+    # Remove quotes from all column names first
+    df_normalized.columns = df_normalized.columns.str.strip('"')
+    
+    # Apply mappings
+    columns_to_drop = []
+    for old_name, new_name in mapping.items():
+        if old_name in df_normalized.columns:
+            if new_name is None:
+                columns_to_drop.append(old_name)
+            else:
+                df_normalized = df_normalized.rename(columns={old_name: new_name})
+    
+    # Drop unwanted columns
+    if columns_to_drop:
+        df_normalized = df_normalized.drop(columns=columns_to_drop, errors='ignore')
+    
+    return df_normalized
+
+
+
+
+def clean_baecobici_suffixes(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Remove BAEcobici suffixes from specified columns."""
+    for col in columns:
+        if col in df.columns and df[col].dtype == 'object':
+            # Check if any values have the suffix
+            sample_vals = df[col].dropna().astype(str).head(100)
+            if len(sample_vals) > 0:
+                # Convert to boolean explicitly to avoid ambiguity
+                has_suffix_series = sample_vals.str.contains('BAEcobici', na=False)
+                has_suffix = bool(has_suffix_series.any())
+                if has_suffix:
+                    df[col] = df[col].astype(str).str.replace('BAEcobici', '', regex=False)
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+
+def fix_comma_decimals(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Fix comma decimal separators in specified columns."""
+    for col in columns:
+        if col in df.columns and df[col].dtype == 'object':
+            df[col] = df[col].astype(str).str.replace(',', '.')
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+
+def separate_concatenated_coordinates(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+    """Separate concatenated coordinates in lat/long columns."""
+    
+    # Only process lat_estacion_destino which has concatenated coords in 2020-2021
+    if 'lat_estacion_destino' in df.columns and df['lat_estacion_destino'].dtype == 'object':
+        # Check if this column has concatenated coordinates (format: "lat,lon")
+        sample_vals = df['lat_estacion_destino'].dropna().astype(str).head(100)
+        has_concatenated = False
+        
+        if len(sample_vals) > 0:
+            # Check if values contain comma (indicating concatenated coordinates)
+            has_concatenated = sample_vals.str.contains(',', na=False).any()
+        
+        if has_concatenated:
+            if verbose:
+                print("Found concatenated coordinates, separating...")
+            
+            # Store original concatenated values before splitting
+            concatenated_coords = df['lat_estacion_destino'].astype(str)
+            
+            # Extract latitude (first part before comma)
+            df['lat_estacion_destino'] = concatenated_coords.str.split(',').str[0]
+            
+            # Extract longitude (second part after comma) and store in long_estacion_destino
+            df['long_estacion_destino'] = concatenated_coords.str.split(',').str[1]
+    
+    # Convert coordinate columns to numeric
+    coord_columns = ['lat_estacion_destino', 'long_estacion_destino', 
+                    'lat_estacion_origen', 'long_estacion_origen']
+    
+    for col in coord_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    return df
+
+
+# =============================================================================
+# MAIN PREPROCESSING FUNCTIONS
+# =============================================================================
+
+def preprocess_trips_by_year(df: pd.DataFrame, year: int, verbose: bool = False) -> pd.DataFrame:
+    """Preprocess trips data based on the specific year's characteristics."""
+    if year not in TRIPS_COLUMN_MAPPINGS:
+        raise ValueError(f"Year {year} not supported")
+    
+    config = TRIPS_COLUMN_MAPPINGS[year]
+    
+    # Step 1: Handle gender column merging for specific years BEFORE normalization
+    if year == 2021:  # Has both "género" and "Género"
+        # Remove quotes from both columns first
+        gender_col1 = 'género'
+        gender_col2 = 'Género'
+        
+        # Check if these columns exist (with quotes)
+        if f'"{gender_col1}"' in df.columns:
+            gender_col1 = f'"{gender_col1}"'
+        if f'"{gender_col2}"' in df.columns:
+            gender_col2 = f'"{gender_col2}"'
+            
+        if gender_col1 in df.columns and gender_col2 in df.columns:
+            # Merge the two gender columns before normalization
+            df[gender_col1] = df[gender_col1].fillna(df[gender_col2])
+            df = df.drop(columns=[gender_col2])
+    
+    # Step 2: Normalize column names
+    df = normalize_column_names(df, config["normalize"])
+    
+    # Step 3: Handle BAEcobici suffixes
+    if config["has_baecobici"]:
+        baecobici_columns = ['id_recorrido', 'id_estacion_origen', 'id_estacion_destino', 'id_usuario']
+        df = clean_baecobici_suffixes(df, baecobici_columns)
+    
+    # Step 4: Fix comma decimal separators
+    if config["has_comma_decimals"]:
+        df = fix_comma_decimals(df, ['duracion_recorrido'])
+    
+    # Step 5: Handle concatenated coordinates
+    if config["has_concatenated_coords"]:
+        df = separate_concatenated_coordinates(df, verbose)
+    
+    # Step 6: Remove unwanted columns that appear across all years
+    columns_to_remove = ['Unnamed: 0']
+    for col in columns_to_remove:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    
+    return df
+
+
+def preprocess_users_by_year(df: pd.DataFrame, year: int, verbose: bool = False) -> pd.DataFrame:
+    """Preprocess users data based on the specific year's characteristics."""
+    if year not in USERS_COLUMN_MAPPINGS:
+        raise ValueError(f"Year {year} not supported")
+    
+    config = USERS_COLUMN_MAPPINGS[year]
+    
+    # Step 1: Normalize column names
+    df = normalize_column_names(df, config["normalize"])
+    
+    return df
+
+
+def load_and_preprocess_csv(file_path: Path, data_type: str, verbose: bool = False) -> pd.DataFrame:
+    """Load and preprocess a single CSV file."""
+    year = extract_year_from_filename(file_path)
+    
+    # Read CSV
+    df = pd.read_csv(file_path, low_memory=False, engine="c")
+    
+    # Preprocess based on data type and year
+    if data_type == "trips":
+        df = preprocess_trips_by_year(df, year, verbose)
+    elif data_type == "users":
+        df = preprocess_users_by_year(df, year, verbose)
+    else:
+        raise ValueError(f"Unknown data type: {data_type}")
+    
+    return df
+
+
+def load_csv_files(input_dir: Path, data_type: str, parse_dates: Optional[List[str]] = None, verbose: bool = False) -> pd.DataFrame:
+    """Load all CSV files from a directory and concatenate them."""
     files = sorted(input_dir.glob('*.csv'))
     if not files:
-        raise FileNotFoundError("No se encontraron CSV en " + str(input_dir))
+        raise FileNotFoundError(f"No CSV files found in {input_dir}")
     
     dfs = []
     total_rows = 0
     
-    for f in files:
-        print(f"Cargando: {f.name}")
+    for file_path in files:
+        if verbose:
+            print(f"Cargando: {file_path.name}")
         start_time = time.time()
         
-        # Optimized reading parameters for large datasets
-        read_kwargs = {
-            "low_memory": False,
-            "engine": "c",  # Use C engine for speed
-            "memory_map": True,  # Memory mapping for large files
-        }
+        # Load and preprocess
+        df = load_and_preprocess_csv(file_path, data_type, verbose)
         
+        # Handle date parsing if specified
         if parse_dates:
-            # Check which date columns exist without reading full file
-            sample_df = pd.read_csv(f, nrows=0)
-            existing_date_cols = [col for col in parse_dates if col in sample_df.columns]
-            if existing_date_cols:
-                        read_kwargs.update({
-            "parse_dates": existing_date_cols, 
-            "dayfirst": dayfirst,
-            "date_format": "ISO8601"  # Faster date parsing
-        })
+            for date_col in parse_dates:
+                if date_col in df.columns:
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
         
-        # Read the CSV with optimized parameters
-        df = pd.read_csv(f, **read_kwargs)
-        
-        # Basic memory optimization during load
+        # Basic memory optimization
         for col in df.select_dtypes(include=['object']).columns:
-            if col not in (existing_date_cols if parse_dates else []):
-                # Convert object columns to category if they have low cardinality
+            if col not in (parse_dates or []):
                 if df[col].nunique() / len(df) < 0.5:
                     df[col] = df[col].astype('category')
         
         dfs.append(df)
         total_rows += len(df)
         
-        load_time = time.time() - start_time
-        print(f"   ✓ {len(df):,} filas cargadas en {load_time:.2f}s")
+        if verbose:
+            load_time = time.time() - start_time
+            print(f"   {len(df):,} filas cargadas en {load_time:.2f}s")
     
-    print(f"🔗 Concatenando {len(dfs)} archivos con {total_rows:,} filas totales...")
+    if verbose:
+        print(f"Concatenando {len(dfs)} archivos con {total_rows:,} filas totales...")
     concat_start = time.time()
     
-    # Efficient concatenation with optimized parameters
+    # Concatenate - all DataFrames should now have consistent column names
     result_df = pd.concat(dfs, ignore_index=True, copy=False)
     
-    concat_time = time.time() - concat_start
-    print(f"   ✓ Concatenación completada en {concat_time:.2f}s")
+    if verbose:
+        concat_time = time.time() - concat_start
+        print(f"   Concatenacion completada en {concat_time:.2f}s")
     
     return result_df
 
 
-def load_users(input_dir: Path) -> pd.DataFrame:
-    """
-    OPTIMIZED function to load all user CSV files into a single DataFrame.
+def load_users(input_dir: Path, verbose: bool = False) -> pd.DataFrame:
+    """Load all user CSV files into a single DataFrame."""
+    if verbose:
+        print("Cargando datos de usuarios...")
+
     
-    Optimizations:
-    - Uses optimized CSV loading
-    - Better memory management for user data
-    """
-    print("👥 Cargando datos de usuarios...")
-    start_time = time.time()
-    
-    users_df = load_csv_files(input_dir)
+    users_df = load_csv_files(input_dir, "users", verbose=verbose)
     
     # Additional optimizations for users data
     if 'edad_usuario' in users_df.columns:
-        users_df['edad_usuario'] = pd.to_numeric(users_df['edad_usuario'], errors='coerce', downcast='integer')
+        users_df['edad_usuario'] = pd.to_numeric(users_df['edad_usuario'], errors='coerce')
     
-    load_time = time.time() - start_time
-    print(f"   ⏱️ Usuarios cargados en {load_time:.2f} segundos")
+
     
     return users_df
 
 
-def load_trips(input_dir: Path) -> pd.DataFrame:
-    """
-    OPTIMIZED function to load all trip CSV files into a single DataFrame.
+def load_trips(input_dir: Path, verbose: bool = False) -> pd.DataFrame:
+    """Load all trip CSV files into a single DataFrame."""
+    if verbose:
+        print("Cargando datos de viajes...")
+
     
-    Optimizations:
-    - Uses optimized CSV loading with proper date parsing
-    - Memory-efficient handling of large trip datasets
-    - Optimized data types for trip-specific columns
-    """
-    print("🚲 Cargando datos de viajes...")
-    start_time = time.time()
+    # Date columns for parsing
+    date_columns = ["fecha_origen_recorrido", "fecha_destino_recorrido"]
     
-    # Date columns that might exist in trip files
-    date_columns = ["fecha_origen", "fecha_destino", "fecha_origen_recorrido", "fecha_destino_recorrido"]
+    trips_df = load_csv_files(input_dir, "trips", parse_dates=date_columns, verbose=verbose)
     
-    # Use dayfirst=False because dates are in ISO format (YYYY-MM-DD)
-    trips_df = load_csv_files(input_dir, parse_dates=date_columns, dayfirst=False)
-    
-    # Additional optimizations for trips data
-    # Optimize numeric columns that are commonly integers
-    int_columns = ['id_estacion_origen', 'id_estacion_destino', 'id_usuario', 'duracion_recorrido']
-    for col in int_columns:
-        if col in trips_df.columns:
-            trips_df[col] = pd.to_numeric(trips_df[col], errors='coerce', downcast='integer')
-    
-    # Optimize coordinate columns
-    float_columns = ['lat_estacion_origen', 'long_estacion_origen', 'lat_estacion_destino', 'long_estacion_destino']
-    for col in float_columns:
-        if col in trips_df.columns:
-            trips_df[col] = pd.to_numeric(trips_df[col], errors='coerce', downcast='float')
-    
-    load_time = time.time() - start_time
-    print(f"   ⏱️ Viajes cargados en {load_time:.2f} segundos")
+
     
     return trips_df
 
 
 def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    OPTIMIZED function to load all raw datasets (users and trips) from data/raw directory.
-    
-    Major optimizations:
-    - Parallel-like loading with progress tracking
-    - Memory-optimized data type handling
-    - Better progress reporting and timing
-    - Efficient memory usage during load process
-    """
-    print("🚀 INICIANDO CARGA OPTIMIZADA DE DATOS RAW")
-    print("=" * 50)
-    total_start = time.time()
-    
+    """Load all raw datasets (users and trips) from data/raw directory."""
+    if verbose:
+        print("INICIANDO CARGA OPTIMIZADA DE DATOS RAW")
+        print("=" * 50)
     users_dir = raw_dir / "users"
     trips_dir = raw_dir / "trips"
     
-    # Verify directories exist
+
     if not users_dir.exists():
         raise FileNotFoundError(f"Directorio de usuarios no encontrado: {users_dir}")
     if not trips_dir.exists():
         raise FileNotFoundError(f"Directorio de viajes no encontrado: {trips_dir}")
     
-    # Load users with optimized function
+    users_df = load_users(users_dir, verbose)
+
+    
     if verbose:
-        print("=== CARGANDO DATASETS DE USUARIOS ===")
+        print(f"Total usuarios: {len(users_df):,} registros")
+        print(f"Columnas usuarios: {list(users_df.columns)}")
+
+        print()
     
-    users_df = load_users(users_dir)
-    users_memory = users_df.memory_usage(deep=True).sum() / 1024**2
+    trips_df = load_trips(trips_dir, verbose)
     
-    print(f"✅ Total usuarios: {len(users_df):,} registros")
-    print(f"📊 Columnas usuarios: {list(users_df.columns)}")
-    print(f"💾 Memoria usuarios: {users_memory:.1f} MB")
-    print()
     
-    # Load trips with optimized function
     if verbose:
-        print("=== CARGANDO DATASETS DE VIAJES ===")
+        print(f"Total viajes: {len(trips_df):,} registros")
+        print(f"Columnas viajes: {list(trips_df.columns)}")
+        print()
     
-    trips_df = load_trips(trips_dir)
-    trips_memory = trips_df.memory_usage(deep=True).sum() / 1024**2
-    
-    print(f"✅ Total viajes: {len(trips_df):,} registros")
-    print(f"📊 Columnas viajes: {list(trips_df.columns)}")
-    print(f"💾 Memoria viajes: {trips_memory:.1f} MB")
-    print()
-    
-    total_time = time.time() - total_start
-    total_memory = users_memory + trips_memory
-    
-    print(f"🎉 CARGA OPTIMIZADA COMPLETADA!")
-    print(f"⏱️ Tiempo total de carga: {total_time:.2f} segundos")
-    print(f"💾 Memoria total utilizada: {total_memory:.1f} MB")
-    print(f"📈 Velocidad promedio: {(len(users_df) + len(trips_df)) / total_time:,.0f} filas/segundo")
+ 
     
     return users_df, trips_df
 
-
-def compute_counts(df: pd.DataFrame, dt_minutes: int = 30) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    OPTIMIZED function to compute dispatch and arrival counts by station.
-    
-    Optimizations:
-    - More efficient groupby operations
-    - Better memory management
-    - Vectorized time window calculations
-    """
-    print(f"📊 Computando conteos por ventanas de {dt_minutes} minutos...")
-    start_time = time.time()
-    
-    # Work with copy to avoid modifying original
-    df_work = df.copy()
-    
-    # Vectorized time window calculation - more efficient than individual operations
-    df_work["window_dispatch"] = df_work["fecha_origen"].dt.floor(f"{dt_minutes}min")
-    df_work["window_arrival"] = df_work["fecha_destino"].dt.floor(f"{dt_minutes}min")
-
-    # Optimized groupby with efficient aggregation
-    dispatch = (
-        df_work.groupby(["window_dispatch", "estacion_origen_id"], sort=False)
-        .size()
-        .reset_index(name="dispatch_count")
-        .rename(columns={"window_dispatch": "timestamp", "estacion_origen_id": "station_id"})
-    )
-
-    arrival = (
-        df_work.groupby(["window_arrival", "estacion_destino_id"], sort=False)
-        .size()
-        .reset_index(name="arrival_count")
-        .rename(columns={"window_arrival": "timestamp", "estacion_destino_id": "station_id"})
-    )
-    
-    compute_time = time.time() - start_time
-    print(f"   ✓ Conteos computados en {compute_time:.2f}s")
-    print(f"   📈 Dispatch: {len(dispatch):,} registros, Arrival: {len(arrival):,} registros")
-
-    return dispatch, arrival
-
-
-def main(input_dir: str, output_dir: str, dt_minutes: int = 30) -> None:
-    """
-    OPTIMIZED main function with better error handling and progress tracking.
-    """
-    print("🏃 Ejecutando pipeline principal optimizado...")
-    
-    input_path = Path(input_dir)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Load trips with optimized function
-    trips = load_trips(input_path)
-    
-    # Compute counts with optimized function
-    dispatch, arrival = compute_counts(trips, dt_minutes=dt_minutes)
-
-    # Save results with progress tracking
-    print("💾 Guardando resultados...")
-    save_start = time.time()
-    
-    dispatch.to_parquet(output_path / "dispatch_counts.parquet", compression='snappy')
-    arrival.to_parquet(output_path / "arrival_counts.parquet", compression='snappy')
-    
-    save_time = time.time() - save_start
-    print(f"   ✓ Archivos guardados en {save_time:.2f}s")
-    print(f"📁 Ubicación: {output_path}")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pipeline optimizado de procesamiento de EcoBici")
-    parser.add_argument("--input_dir", type=str, required=True, help="Directorio con CSV crudos")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directorio destino para parquet")
-    parser.add_argument("--dt_minutes", type=int, default=30, help="Ventana de tiempo en minutos")
-    args = parser.parse_args()
-
-    main(args.input_dir, args.output_dir, dt_minutes=args.dt_minutes)

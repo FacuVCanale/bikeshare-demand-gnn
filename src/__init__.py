@@ -11,14 +11,12 @@ __all__ = [
     "load_csv_files",
     "load_users", 
     "load_trips",
-    "compute_counts",
     "preprocess_trips_data",
     "preprocess_whole_dataset", 
     "process_columns",
     "test_preprocess_whole_dataset",
     
     # data analysis
-    "load_combined_data",
     "filter_data_until_date",
     "temporal_split_data",
     
