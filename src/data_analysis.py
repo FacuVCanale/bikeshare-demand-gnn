@@ -164,20 +164,61 @@ def plot_station_analysis(processed_trips: Dict[str, Any], save_plots: bool = Fa
     
     # 3.4 Duración de viajes
     if 'duracion_valid' in processed_trips:
-        duracion_valid = processed_trips['duracion_valid']
+        # choose which duration range to display
+        duration_range = 'extended'  # options: 'reasonable', 'extended', 'full'
+        
+        if duration_range == 'reasonable' and 'duracion_valid' in processed_trips:
+            duracion_data = processed_trips['duracion_valid']
+            title_suffix = "(Filtrado: 2min - 4h)"
+        elif duration_range == 'extended' and 'duracion_extended' in processed_trips:
+            duracion_data = processed_trips['duracion_extended'] 
+            title_suffix = "(Extendido: 1min - 12h)"
+        elif duration_range == 'full' and 'duracion_full' in processed_trips:
+            duracion_data = processed_trips['duracion_full']
+            title_suffix = "(Completo - hasta 1 semana)"
+        else:
+            duracion_data = processed_trips['duracion_valid']
+            title_suffix = "(Filtrado: 2min - 4h)"
+        
         duracion_promedio = processed_trips['duracion_promedio']
         
-        # calculate dynamic range based on actual data
-        duracion_min_minutos = (duracion_valid / 60).min()
-        duracion_max_minutos = (duracion_valid / 60).max()
-        print(duracion_min_minutos, duracion_max_minutos)
-        axes[1, 1].hist(duracion_valid / 60, bins=50, edgecolor='black', alpha=0.7, color='orange')
-        axes[1, 1].set_title('Distribución de Duración de Viajes')
+        # convert to minutes for better readability
+        duracion_minutos = duracion_data / 60
+        
+        # calculate display range based on data characteristics
+        if duration_range == 'full':
+            # for full range, use 99th percentile to avoid extreme outliers
+            display_max = duracion_minutos.quantile(0.99)
+            bins = 100
+        elif duration_range == 'extended':
+            # for extended range, show most of the data but cap at 95th percentile if too spread
+            q95 = duracion_minutos.quantile(0.95)
+            display_max = min(duracion_minutos.max(), q95 * 1.2)  # allow some extra room
+            bins = 60
+        else:
+            # for reasonable range, show all data with good resolution
+            display_max = duracion_minutos.max()
+            bins = 60
+        
+        axes[1, 1].hist(duracion_minutos, bins=bins, edgecolor='black', alpha=0.7, color='orange', range=(0, display_max))
+        axes[1, 1].set_title(f'Distribución de Duración de Viajes {title_suffix}')
         axes[1, 1].set_xlabel('Duración (minutos)')
         axes[1, 1].set_ylabel('Frecuencia')
-        axes[1, 1].set_xlim(duracion_min_minutos, duracion_max_minutos)  # dynamic range based on data
         axes[1, 1].axvline(duracion_promedio / 60, color='red', linestyle='--', 
                           label=f'Media: {duracion_promedio / 60:.1f} min')
+        
+        # add statistics if available
+        if 'duracion_stats' in processed_trips:
+            stats = processed_trips['duracion_stats']
+            textstr = f'Mediana: {stats["median"]/60:.1f}min\nP95: {stats["q95"]/60:.1f}min\nP99: {stats["q99"]/60:.1f}min'
+            axes[1, 1].text(0.75, 0.95, textstr, transform=axes[1, 1].transAxes, 
+                           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        # add data info
+        data_info = f'N = {len(duracion_data):,} viajes\nRango: {duracion_minutos.min():.1f} - {display_max:.1f} min'
+        axes[1, 1].text(0.05, 0.95, data_info, transform=axes[1, 1].transAxes, 
+                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+        
         axes[1, 1].legend()
     
     plt.tight_layout()

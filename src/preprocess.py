@@ -85,9 +85,31 @@ def analyze_trips_for_visualization(trips_df: pd.DataFrame) -> Dict[str, Any]:
             errors='coerce'
         )
         duracion_valid = trips_temp['duracion_num'].dropna()
-        duracion_valid = duracion_valid[(duracion_valid > 120) & (duracion_valid < 60 * 60 * 12)]  # filter: >2 min, <12 hours
-        processed_data['duracion_valid'] = duracion_valid
-        processed_data['duracion_promedio'] = duracion_valid.mean()
+        
+        # create different duration ranges for analysis
+        # 1. reasonable trips: >2 min, <12 hours (original filter)  
+        duracion_reasonable = duracion_valid[(duracion_valid > 120) & (duracion_valid < 60 * 60 * 24)]
+        
+        # 2. extended range for visualization: >1 min, <24 hours
+        duracion_extended = duracion_valid[(duracion_valid > 60) & (duracion_valid < 60 * 60 * 24)]
+        
+        # 3. full range (for outlier analysis)
+        duracion_full = duracion_valid[duracion_valid > 0]
+        
+        # store all ranges for flexible analysis
+        processed_data['duracion_valid'] = duracion_reasonable  # default for compatibility
+        processed_data['duracion_extended'] = duracion_extended  # extended range
+        processed_data['duracion_full'] = duracion_full  # full range including outliers
+        processed_data['duracion_promedio'] = duracion_reasonable.mean()
+        
+        # add percentile information
+        processed_data['duracion_stats'] = {
+            'q99': duracion_full.quantile(0.99),
+            'q95': duracion_full.quantile(0.95),
+            'q90': duracion_full.quantile(0.90),
+            'median': duracion_full.median(),
+            'mean': duracion_full.mean()
+        }
     
     # Heatmap data
     processed_data['hora'] = trips_temp[fecha_col].dt.hour

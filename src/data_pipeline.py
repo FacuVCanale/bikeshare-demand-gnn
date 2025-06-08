@@ -5,6 +5,8 @@ import numpy as np
 import time
 from typing import List, Optional, Dict, Any
 
+
+
 # =============================================================================
 # DATA STRUCTURE MAPPINGS BY YEAR
 # =============================================================================
@@ -175,10 +177,20 @@ def clean_baecobici_suffixes(df: pd.DataFrame, columns: List[str]) -> pd.DataFra
 
 
 def fix_comma_decimals(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    """Fix comma decimal separators in specified columns."""
+    """
+    Fix comma separators in duration columns for EcoBici data.
+    
+    In EcoBici data (2020-2023), commas in duracion_recorrido are thousands separators,
+    not decimal separators. For example:
+    - "1,582" means 1582 seconds (not 1.582 seconds)
+    - "2,026" means 2026 seconds (not 2.026 seconds)
+    
+    This was a critical bug causing duration values to be divided by ~1000.
+    """
     for col in columns:
         if col in df.columns and df[col].dtype == 'object':
-            df[col] = df[col].astype(str).str.replace(',', '.')
+            # Remove commas (thousands separators) from duration values
+            df[col] = df[col].astype(str).str.replace(',', '', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 
@@ -418,7 +430,101 @@ def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: b
         print(f"Columnas viajes: {list(trips_df.columns)}")
         print()
     
+    # process station IDs to extract first 3 digits
+    if verbose:
+        print("Procesando IDs de estacion (extrayendo primeros 3 digitos)...")
+    trips_df = process_station_ids_to_3_digits(trips_df, verbose)
+    
+    # ensure user IDs are integers in both dataframes
+    if verbose:
+        print("Procesando IDs de usuario (convirtiendo a enteros)...")
+    
+    if 'id_usuario' in users_df.columns:
+        users_df['id_usuario'] = users_df['id_usuario'].astype('Int64')
+        if verbose:
+            print(f"  users_df id_usuario type: {users_df['id_usuario'].dtype}")
+    
+    if 'id_usuario' in trips_df.columns:
+        trips_df['id_usuario'] = trips_df['id_usuario'].astype('Int64')
+        if verbose:
+            print(f"  trips_df id_usuario type: {trips_df['id_usuario'].dtype}")
+    
+    if verbose:
+        print("Procesamiento de IDs completado")
+        print()
  
     
     return users_df, trips_df
 
+# =============================================================================
+# UTILITY FUNCTIONS FOR STATION ID PROCESSING
+# =============================================================================
+
+def extract_first_3_digits_station_id(station_id):
+    """
+    Extract the first 3 digits from station_id
+    
+    Args:
+        station_id: Station ID (can be int, float, or string)
+        
+    Returns:
+        int: First 3 digits of the station ID, or original if less than 3 digits
+    """
+    if pd.isna(station_id):
+        return station_id
+    
+    # convert to string and remove decimal points if float
+    station_str = str(int(float(station_id)))
+    
+    # extract first 3 digits
+    if len(station_str) >= 3:
+        return int(station_str[:3])
+    else:
+        return int(station_str)
+
+def process_station_ids_to_3_digits(df, verbose: bool = False):
+    """
+    Process both origin and destination station IDs to extract first 3 digits
+    
+    Args:
+        df: DataFrame with station ID columns
+        verbose: Print processing information
+        
+    Returns:
+        DataFrame with processed station IDs as integers
+    """
+    df_processed = df.copy()
+    
+    # process origin station IDs
+    if 'id_estacion_origen' in df_processed.columns:
+        if verbose:
+            print("Processing id_estacion_origen...")
+        original_count = df_processed['id_estacion_origen'].nunique()
+        df_processed['id_estacion_origen'] = df_processed['id_estacion_origen'].apply(extract_first_3_digits_station_id)
+        # ensure the column is integer type
+        df_processed['id_estacion_origen'] = df_processed['id_estacion_origen'].astype('Int64')  # nullable integer
+        new_count = df_processed['id_estacion_origen'].nunique()
+        if verbose:
+            print(f"  Original unique origin stations: {original_count}")
+            print(f"  New unique origin stations: {new_count}")
+            print(f"  Data type: {df_processed['id_estacion_origen'].dtype}")
+            if original_count != new_count:
+                print(f"  Reduction: {original_count - new_count} stations")
+    
+    # process destination station IDs
+    if 'id_estacion_destino' in df_processed.columns:
+        if verbose:
+            print("Processing id_estacion_destino...")
+        original_count = df_processed['id_estacion_destino'].nunique()
+        df_processed['id_estacion_destino'] = df_processed['id_estacion_destino'].apply(extract_first_3_digits_station_id)
+        # ensure the column is integer type
+        df_processed['id_estacion_destino'] = df_processed['id_estacion_destino'].astype('Int64')  # nullable integer
+        new_count = df_processed['id_estacion_destino'].nunique()
+        if verbose:
+            print(f"  Original unique destination stations: {original_count}")
+            print(f"  New unique destination stations: {new_count}")
+            print(f"  Data type: {df_processed['id_estacion_destino'].dtype}")
+            if original_count != new_count:
+                print(f"  Reduction: {original_count - new_count} stations")
+    
+    return df_processed
