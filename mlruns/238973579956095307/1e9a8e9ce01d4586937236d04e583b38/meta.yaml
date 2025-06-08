@@ -1,0 +1,16 @@
+artifact_uri: /Users/juanfra/Documents/Facultad/3er año - 1er Cuatri/Aprendizaje
+  Automatico/TPs/EcoBici-AI/notebooks/../mlruns/238973579956095307/1e9a8e9ce01d4586937236d04e583b38/artifacts
+end_time: 1749344385022
+entry_point_name: ''
+experiment_id: '238973579956095307'
+lifecycle_stage: active
+run_id: 1e9a8e9ce01d4586937236d04e583b38
+run_name: memory_optimized_20250607_215501
+run_uuid: 1e9a8e9ce01d4586937236d04e583b38
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1749344101488
+status: 4
+tags: []
+user_id: juanfra

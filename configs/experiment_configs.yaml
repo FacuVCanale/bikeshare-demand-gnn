@@ -1,0 +1,216 @@
+# configuración Base 
+base:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31" 
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30                 # Ventana temporal de 30 minutos
+    sequence_length: 12         # 6 horas de contexto (12 * 30min)
+    hidden_size: 128           # Tamaño de capa oculta balanceado
+    num_layers: 2              # 2 capas LSTM
+    dropout: 0.2               # Regularización moderada
+    device: "auto"             # Detectar automáticamente CPU/CUDA
+  
+  training:
+    epochs: 50                 # Épocas suficientes para convergencia
+    batch_size: 32             # Batch size balanceado
+    learning_rate: 0.001       # Learning rate estándar
+    patience: 10               # Early stopping patience
+    experiment_name: "EcoBici_RNN_Base"
+
+# configuración Rápida
+small_fast:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30
+    sequence_length: 6          # Solo 3 horas de contexto
+    hidden_size: 64            # Modelo más pequeño
+    num_layers: 1              # Una sola capa LSTM
+    dropout: 0.1               # Menos regularización
+    device: "auto"
+  
+  training:
+    epochs: 20                 # Menos épocas para pruebas rápidas
+    batch_size: 64             # Batch más grande para velocidad
+    learning_rate: 0.002       # Learning rate más alto
+    patience: 5                # Menos paciencia
+    experiment_name: "EcoBici_RNN_SmallFast"
+
+# configuración Profunda
+large_deep:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30
+    sequence_length: 24         # 12 horas de contexto
+    hidden_size: 256           # Modelo grande
+    num_layers: 3              # Más capas para complejidad
+    dropout: 0.3               # Más regularización
+    device: "auto"
+  
+  training:
+    epochs: 100                # Más épocas para convergencia
+    batch_size: 16             # Batch más pequeño para modelos grandes
+    learning_rate: 0.0005      # Learning rate más conservador
+    patience: 15               # Más paciencia para convergencia
+    experiment_name: "EcoBici_RNN_LargeDeep"
+
+# configuración Ventana Corta
+short_window:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 15                # Ventanas de 15 minutos
+    sequence_length: 24        # 6 horas de contexto (24 * 15min)
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    device: "auto"
+  
+  training:
+    epochs: 60                 # Más épocas por mayor granularidad
+    batch_size: 32
+    learning_rate: 0.001
+    patience: 12
+    experiment_name: "EcoBici_RNN_ShortWindow"
+
+# configuración Ventana Larga
+long_window:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 60                # Ventanas de 1 hora
+    sequence_length: 24        # 24 horas de contexto 
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+    device: "auto"
+  
+  training:
+    epochs: 40                 # Menos épocas por menor granularidad
+    batch_size: 32
+    learning_rate: 0.001
+    patience: 8
+    experiment_name: "EcoBici_RNN_LongWindow"
+
+# configuración Experimental
+experimental:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30
+    sequence_length: 18        # Ventana intermedia
+    hidden_size: 192          # Tamaño intermedio
+    num_layers: 3
+    dropout: 0.25             # Regularización intermedia
+    device: "auto"
+  
+  training:
+    epochs: 75
+    batch_size: 24            # Batch size intermedio
+    learning_rate: 0.0008     # Learning rate intermedio
+    patience: 12
+    experiment_name: "EcoBici_RNN_Experimental"
+
+# configuración Optimizada
+production:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30
+    sequence_length: 12
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.15             # Menos dropout para producción
+    device: "auto"
+  
+  training:
+    epochs: 80                # Más épocas para mejor convergencia
+    batch_size: 32
+    learning_rate: 0.0008     # Learning rate optimizado
+    patience: 15              # Más paciencia para mejor modelo
+    experiment_name: "EcoBici_RNN_Production"
+
+# configuración de Debug
+debug:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+  
+  model:
+    delta_t: 30
+    sequence_length: 4         # Secuencia muy corta para debug
+    hidden_size: 32           # Modelo muy pequeño
+    num_layers: 1
+    dropout: 0.0              # Sin dropout para simplicidad
+    device: "auto"
+  
+  training:
+    epochs: 5                 # Muy pocas épocas para testing
+    batch_size: 8             # Batch pequeño
+    learning_rate: 0.01       # Learning rate alto para convergencia rápida
+    patience: 2
+    experiment_name: "EcoBici_RNN_Debug"
+
+# configuración Memory Optimized para hardware limitado
+memory_optimized:
+  data:
+    data_dir: "data/raw/combined"
+    max_date: "2024-08-31"
+    train_end_date: "2023-06-30"
+    val_end_date: "2023-12-31"
+    test_end_date: "2024-08-31"
+    sample_fraction: 0.1       # Usar solo 10% de los datos
+  
+  model:
+    delta_t: 60               # Ventanas más grandes reducen dimensionalidad
+    sequence_length: 6        # Secuencia corta para menos memoria
+    hidden_size: 32           # Modelo muy pequeño
+    num_layers: 1             # Una sola capa
+    dropout: 0.1              # Dropout mínimo
+    device: "cpu"             # Forzar CPU
+  
+  training:
+    epochs: 30                # Épocas moderadas
+    batch_size: 8             # Batch muy pequeño para RAM limitada
+    learning_rate: 0.002      # Learning rate moderado
+    patience: 5               # Paciencia limitada
+    experiment_name: "EcoBici_RNN_MemoryOptimized" 
