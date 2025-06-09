@@ -3,3 +3,7 @@ polars
 scikit-learn
 pyarrow
 xgboost
+# weather data dependencies
+openmeteo-requests
+requests-cache
+retry-requests

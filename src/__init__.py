@@ -20,6 +20,9 @@ __all__ = [
     "filter_data_until_date",
     "temporal_split_data",
     
+    # weather data
+    "WeatherDataCollector",
+    
     # models
     "EcoBiciTimeSeriesPredictor",
     "BikeStationLSTM",
