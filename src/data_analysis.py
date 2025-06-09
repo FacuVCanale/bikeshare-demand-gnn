@@ -1,301 +1,8 @@
 import pandas as pd
+from typing import Tuple, Dict
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Union
-import warnings
-warnings.filterwarnings('ignore')
-
-# Configuración de estilo para las visualizaciones
-plt.style.use('default')
-sns.set_palette("husl")
-
-
-
-
-# =============================================================================
-# FUNCIONES DE VISUALIZACIÓN
-# =============================================================================
-
-def plot_user_analysis(processed_users: Dict[str, Any], save_plots: bool = False, 
-                      output_dir: Optional[Path] = None) -> None:
-    """Genera gráficos de análisis de usuarios."""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('ANÁLISIS DE USUARIOS ECOBICI', fontsize=16, fontweight='bold')
-    
-    # 1.1 Distribución de edades
-    if 'edad_valid' in processed_users:
-        edad_valid = processed_users['edad_valid']
-        edad_promedio = processed_users['edad_promedio']
-        
-        axes[0, 0].hist(edad_valid, bins=30, edgecolor='black', alpha=0.7, color='skyblue')
-        axes[0, 0].set_title('Distribución de Edades')
-        axes[0, 0].set_xlabel('Edad (años)')
-        axes[0, 0].set_ylabel('Frecuencia')
-        axes[0, 0].axvline(edad_promedio, color='red', linestyle='--', 
-                          label=f'Media: {edad_promedio:.1f} años')
-        axes[0, 0].legend()
-    
-    # 1.2 Distribución de géneros
-    if 'genero_counts' in processed_users:
-        genero_counts = processed_users['genero_counts']
-        axes[0, 1].pie(genero_counts.values, labels=genero_counts.index, autopct='%1.1f%%',
-                      startangle=90, colors=['lightcoral', 'lightblue', 'lightgreen'])
-        axes[0, 1].set_title('Distribución por Género')
-    
-    # 1.3 Registros por año
-    if 'registros_por_año' in processed_users:
-        registros_por_año = processed_users['registros_por_año']
-        axes[1, 0].bar(registros_por_año.index, registros_por_año.values, color='lightgreen')
-        axes[1, 0].set_title('Registros de Usuarios por Año')
-        axes[1, 0].set_xlabel('Año')
-        axes[1, 0].set_ylabel('Nuevos Usuarios')
-        axes[1, 0].tick_params(axis='x', rotation=45)
-    
-    # 1.4 Registros por mes
-    if 'registros_por_mes' in processed_users:
-        registros_por_mes = processed_users['registros_por_mes']
-        meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 
-                'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
-        axes[1, 1].bar(range(1, 13), [registros_por_mes.get(i, 0) for i in range(1, 13)], 
-                      color='orange')
-        axes[1, 1].set_title('Registros por Mes')
-        axes[1, 1].set_xlabel('Mes')
-        axes[1, 1].set_ylabel('Registros')
-        axes[1, 1].set_xticks(range(1, 13))
-        axes[1, 1].set_xticklabels(meses, rotation=45)
-    
-    plt.tight_layout()
-    if save_plots and output_dir:
-        plt.savefig(output_dir / 'usuarios_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_temporal_analysis(processed_trips: Dict[str, Any], save_plots: bool = False, 
-                          output_dir: Optional[Path] = None) -> None:
-    """Genera gráficos de análisis temporal de viajes."""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('ANÁLISIS TEMPORAL DE VIAJES', fontsize=16, fontweight='bold')
-    
-    # 2.1 Viajes por hora del día
-    if 'viajes_por_hora' in processed_trips:
-        viajes_por_hora = processed_trips['viajes_por_hora']
-        axes[0, 0].plot(viajes_por_hora.index, viajes_por_hora.values, marker='o', linewidth=2, color='blue')
-        axes[0, 0].set_title('Viajes por Hora del Día')
-        axes[0, 0].set_xlabel('Hora')
-        axes[0, 0].set_ylabel('Número de Viajes')
-        axes[0, 0].grid(True, alpha=0.3)
-        axes[0, 0].set_xticks(range(0, 24, 2))
-    
-    # 2.2 Viajes por día de la semana
-    if 'viajes_por_dia' in processed_trips:
-        dias_semana = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
-        viajes_por_dia = processed_trips['viajes_por_dia']
-        axes[0, 1].bar(range(7), [viajes_por_dia.get(i, 0) for i in range(7)], color='green')
-        axes[0, 1].set_title('Viajes por Día de la Semana')
-        axes[0, 1].set_xlabel('Día')
-        axes[0, 1].set_ylabel('Número de Viajes')
-        axes[0, 1].set_xticks(range(7))
-        axes[0, 1].set_xticklabels(dias_semana)
-    
-    # 2.3 Viajes por mes
-    if 'viajes_por_mes' in processed_trips:
-        viajes_por_mes = processed_trips['viajes_por_mes']
-        meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 
-                'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
-        axes[1, 0].bar(range(1, 13), [viajes_por_mes.get(i, 0) for i in range(1, 13)], color='purple')
-        axes[1, 0].set_title('Viajes por Mes')
-        axes[1, 0].set_xlabel('Mes')
-        axes[1, 0].set_ylabel('Número de Viajes')
-        axes[1, 0].set_xticks(range(1, 13))
-        axes[1, 0].set_xticklabels(meses, rotation=45)
-    
-    # 2.4 Tendencia por año
-    if 'viajes_por_año' in processed_trips:
-        viajes_por_año = processed_trips['viajes_por_año']
-        axes[1, 1].plot(viajes_por_año.index, viajes_por_año.values, marker='o', linewidth=3, color='red')
-        axes[1, 1].set_title('Tendencia de Viajes por Año')
-        axes[1, 1].set_xlabel('Año')
-        axes[1, 1].set_ylabel('Número de Viajes')
-        axes[1, 1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    if save_plots and output_dir:
-        plt.savefig(output_dir / 'viajes_temporal.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_station_analysis(processed_trips: Dict[str, Any], save_plots: bool = False, 
-                         output_dir: Optional[Path] = None) -> None:
-    """Genera gráficos de análisis de estaciones."""
-    
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('ANÁLISIS DE ESTACIONES', fontsize=16, fontweight='bold')
-    
-    # 3.1 Top 15 estaciones de origen
-    if 'top_origen' in processed_trips:
-        top_origen = processed_trips['top_origen']
-        axes[0, 0].barh(range(len(top_origen)), top_origen.values, color='lightblue')
-        axes[0, 0].set_title('Top 15 Estaciones de Origen')
-        axes[0, 0].set_xlabel('Número de Viajes')
-        axes[0, 0].set_yticks(range(len(top_origen)))
-        axes[0, 0].set_yticklabels([str(x)[:20] for x in top_origen.index], fontsize=8)
-    
-    # 3.2 Top 15 estaciones de destino
-    if 'top_destino' in processed_trips:
-        top_destino = processed_trips['top_destino']
-        axes[0, 1].barh(range(len(top_destino)), top_destino.values, color='lightcoral')
-        axes[0, 1].set_title('Top 15 Estaciones de Destino')
-        axes[0, 1].set_xlabel('Número de Viajes')
-        axes[0, 1].set_yticks(range(len(top_destino)))
-        axes[0, 1].set_yticklabels([str(x)[:20] for x in top_destino.index], fontsize=8)
-    
-    # 3.3 Distribución de viajes por estación
-    if 'viajes_por_estacion' in processed_trips:
-        viajes_por_estacion = processed_trips['viajes_por_estacion']
-        axes[1, 0].hist(viajes_por_estacion.values, bins=50, edgecolor='black', alpha=0.7, color='green')
-        axes[1, 0].set_title('Distribución de Viajes por Estación')
-        axes[1, 0].set_xlabel('Número de Viajes')
-        axes[1, 0].set_ylabel('Número de Estaciones')
-        axes[1, 0].set_yscale('log')
-    
-    # 3.4 Duración de viajes
-    if 'duracion_valid' in processed_trips:
-        # choose which duration range to display
-        duration_range = 'extended'  # options: 'reasonable', 'extended', 'full'
-        
-        if duration_range == 'reasonable' and 'duracion_valid' in processed_trips:
-            duracion_data = processed_trips['duracion_valid']
-            title_suffix = "(Filtrado: 2min - 4h)"
-        elif duration_range == 'extended' and 'duracion_extended' in processed_trips:
-            duracion_data = processed_trips['duracion_extended'] 
-            title_suffix = "(Extendido: 1min - 12h)"
-        elif duration_range == 'full' and 'duracion_full' in processed_trips:
-            duracion_data = processed_trips['duracion_full']
-            title_suffix = "(Completo - hasta 1 semana)"
-        else:
-            duracion_data = processed_trips['duracion_valid']
-            title_suffix = "(Filtrado: 2min - 4h)"
-        
-        duracion_promedio = processed_trips['duracion_promedio']
-        
-        # convert to minutes for better readability
-        duracion_minutos = duracion_data / 60
-        
-        # calculate display range based on data characteristics
-        if duration_range == 'full':
-            # for full range, use 99th percentile to avoid extreme outliers
-            display_max = duracion_minutos.quantile(0.99)
-            bins = 100
-        elif duration_range == 'extended':
-            # for extended range, show most of the data but cap at 95th percentile if too spread
-            q95 = duracion_minutos.quantile(0.95)
-            display_max = min(duracion_minutos.max(), q95 * 1.2)  # allow some extra room
-            bins = 60
-        else:
-            # for reasonable range, show all data with good resolution
-            display_max = duracion_minutos.max()
-            bins = 60
-        
-        axes[1, 1].hist(duracion_minutos, bins=bins, edgecolor='black', alpha=0.7, color='orange', range=(0, display_max))
-        axes[1, 1].set_title(f'Distribución de Duración de Viajes {title_suffix}')
-        axes[1, 1].set_xlabel('Duración (minutos)')
-        axes[1, 1].set_ylabel('Frecuencia')
-        axes[1, 1].axvline(duracion_promedio / 60, color='red', linestyle='--', 
-                          label=f'Media: {duracion_promedio / 60:.1f} min')
-        
-        # add statistics if available
-        if 'duracion_stats' in processed_trips:
-            stats = processed_trips['duracion_stats']
-            textstr = f'Mediana: {stats["median"]/60:.1f}min\nP95: {stats["q95"]/60:.1f}min\nP99: {stats["q99"]/60:.1f}min'
-            axes[1, 1].text(0.75, 0.95, textstr, transform=axes[1, 1].transAxes, 
-                           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        # add data info
-        data_info = f'N = {len(duracion_data):,} viajes\nRango: {duracion_minutos.min():.1f} - {display_max:.1f} min'
-        axes[1, 1].text(0.05, 0.95, data_info, transform=axes[1, 1].transAxes, 
-                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-        
-        axes[1, 1].legend()
-    
-    plt.tight_layout()
-    if save_plots and output_dir:
-        plt.savefig(output_dir / 'estaciones_analysis.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-
-def plot_activity_heatmap(processed_trips: Dict[str, Any], save_plots: bool = False, 
-                         output_dir: Optional[Path] = None) -> None:
-    """Genera heatmap de actividad."""
-    
-    if 'activity_matrix' in processed_trips:
-        activity_matrix = processed_trips['activity_matrix']
-        
-        plt.figure(figsize=(15, 8))
-        sns.heatmap(activity_matrix, 
-                    xticklabels=range(24),
-                    yticklabels=['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'],
-                    cmap='YlOrRd', 
-                    cbar_kws={'label': 'Número de Viajes'})
-        plt.title('HEATMAP DE ACTIVIDAD: Viajes por Hora y Día de la Semana', 
-                 fontsize=14, fontweight='bold')
-        plt.xlabel('Hora del Día')
-        plt.ylabel('Día de la Semana')
-        
-        if save_plots and output_dir:
-            plt.savefig(output_dir / 'heatmap_actividad.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-
-def print_summary_statistics(users_df: pd.DataFrame, processed_users: Dict[str, Any], 
-                           trips_df: pd.DataFrame, processed_trips: Dict[str, Any]) -> None:
-    """Imprime estadísticas resumen."""
-    
-    print("\nESTADÍSTICAS RESUMEN")
-    print("=" * 40)
-    
-    # Usuarios
-    print(f"USUARIOS:")
-    print(f"   • Total usuarios: {len(users_df):,}")
-    
-    if 'edad_promedio' in processed_users:
-        edad_promedio = processed_users['edad_promedio']
-        if not pd.isna(edad_promedio):
-            print(f"   • Edad promedio: {edad_promedio:.1f} años")
-    
-    if 'genero_counts' in processed_users:
-        genero_counts = processed_users['genero_counts']
-        print(f"   • Distribución de género:")
-        for genero, count in genero_counts.items():
-            pct = count / len(users_df) * 100
-            print(f"     - {genero}: {count:,} ({pct:.1f}%)")
-    
-    # Viajes
-    print(f"\nVIAJES:")
-    print(f"   • Total viajes: {len(trips_df):,}")
-    
-    if 'trips_clean' in processed_trips and 'fecha_col' in processed_trips:
-        trips_clean = processed_trips['trips_clean']
-        fecha_col = processed_trips['fecha_col']
-        
-        print(f"   • Período: {trips_clean[fecha_col].min()} - {trips_clean[fecha_col].max()}")
-        days_diff = (trips_clean[fecha_col].max() - trips_clean[fecha_col].min()).days + 1
-        print(f"   • Promedio viajes/día: {len(trips_df) / days_diff:,.0f}")
-        
-        if 'top_origen' in processed_trips:
-            print(f"   • Estaciones únicas (origen): {len(processed_trips['viajes_por_estacion']):,}")
-        if 'top_destino' in processed_trips:
-            estaciones_destino = len(processed_trips['top_destino'])
-            print(f"   • Estaciones únicas (destino): {estaciones_destino:,}")
-    
-    if 'duracion_promedio' in processed_trips:
-        duracion_promedio = processed_trips['duracion_promedio']
-        if not pd.isna(duracion_promedio):
-            print(f"   • Duración promedio: {duracion_promedio / 60:.1f} minutos")
-
+from datetime import timedelta
+from sklearn.neighbors import NearestNeighbors
 
 # =============================================================================
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
@@ -455,3 +162,146 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     }
 
 
+def engineer_ecobici_features(df_raw: pd.DataFrame,
+                              dt_minutes: int = 30,
+                              n_neighbors: int = 5) -> pd.DataFrame:
+    """
+    Realiza feature-engineering para predicción de arribos de bicicletas.
+    
+    Parameters
+    ----------
+    df_raw : pd.DataFrame
+        Dataset crudo con viajes + clima en las columnas descritas.
+    dt_minutes : int, default 30
+        Granularidad de la ventana temporal ΔT (en minutos).
+    n_neighbors : int, default 5
+        Nº de estaciones más cercanas para sumar partidas vecinas.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Tabla agregada con una fila por (station_id, ts_start) que incluye:
+        - features temporales, meteorológicas y demográficas
+        - lags de demanda y demanda vecina
+        - target: y_arrivals_next_ΔT
+    """
+    # --------------------- helpers --------------------- #
+    def floor_dt(series: pd.Series, freq: str) -> pd.Series:
+        """Redondea timestamps hacia abajo a múltiplo de freq."""
+        return (series.dt.floor(freq))
+    
+    def haversine(lon1, lat1, lon2, lat2):
+        """Calcula distancia grande-círculo entre 2 pts."""
+        # convertir a radianes
+        lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+        c = 2 * np.arcsin(np.sqrt(a))
+        return 6371 * c  # km
+    
+    # ------------- 1. Normalización de fechas ------------- #
+    df = df_raw.copy()
+    df["fecha_origen_recorrido"] = pd.to_datetime(df["fecha_origen_recorrido"])
+    df["fecha_destino_recorrido"] = pd.to_datetime(df["fecha_destino_recorrido"])
+    df["date"] = df["fecha_origen_recorrido"]
+    
+    # Ventana ΔT
+    freq = f"{dt_minutes}min"
+    df["ts_dep"] = floor_dt(df["fecha_origen_recorrido"], freq)
+    df["ts_arr"] = floor_dt(df["fecha_destino_recorrido"], freq)
+    
+    # ------------- 2. Censo de partidas y arribos ------------- #
+    dep = (
+        df.groupby(["id_estacion_origen", "ts_dep"])
+          .agg(dep_last_DT=("id_recorrido", "size"),
+               male_cnt=("genero", lambda x: (x == "MALE").sum()))
+          .reset_index()
+          .rename(columns={"id_estacion_origen": "station_id",
+                           "ts_dep": "ts_start"})
+    )
+    arr = (
+        df.groupby(["id_estacion_destino", "ts_arr"])
+          .size()
+          .reset_index(name="arrivals")
+          .rename(columns={"id_estacion_destino": "station_id",
+                           "ts_arr": "ts_start"})
+    )
+    
+    # ratio de género
+    dep["share_male"] = dep["male_cnt"] / dep["dep_last_DT"].clip(lower=1)
+    dep = dep.drop(columns="male_cnt")
+    
+    # ------------- 3. Lags de demanda ------------- #
+    dep = dep.sort_values(["station_id", "ts_start"])
+    for k in range(1, 7):  # lags 1…6
+        dep[f"dep_lag_{k}"] = (
+            dep.groupby("station_id")["dep_last_DT"].shift(k)
+        )
+    
+    # ------------- 4. Target: arrivals en próxima ventana ------------- #
+    arr_next = arr.copy()
+    arr_next["ts_start"] = arr_next["ts_start"] - timedelta(minutes=dt_minutes)
+    arr_next = arr_next.rename(columns={"arrivals": "y_arrivals_next_DT"})
+    
+    df_feat = dep.merge(arr_next, on=["station_id", "ts_start"], how="left")
+    
+    # ------------- 5. Merge con clima ------------- #
+    weather = (
+        df[["date"] + [c for c in df.columns if c.endswith("_2m") or c in
+                       ["precipitation", "rain", "weather_code", "wind_speed_10m",
+                        "wind_direction_10m", "cloud_cover", "sunshine_duration", "is_day",
+                        "direct_radiation"]]]
+        .drop_duplicates("date")
+    )
+    weather = weather.rename(columns={"date": "ts_start"})
+    df_feat = df_feat.merge(weather, on="ts_start", how="left")
+    
+    # ------------- 6. Features temporales ------------ #
+    df_feat["hour"] = df_feat["ts_start"].dt.hour
+    df_feat["dow"] = df_feat["ts_start"].dt.dayofweek
+    df_feat["month"] = df_feat["ts_start"].dt.month
+    df_feat["sin_hour"] = np.sin(2 * np.pi * df_feat["hour"] / 24)
+    df_feat["cos_hour"] = np.cos(2 * np.pi * df_feat["hour"] / 24)
+    df_feat["is_weekend"] = df_feat["dow"].isin([5, 6]).astype("int8")
+    
+    # ------------- 7. Join con metadata de estaciones ------------- #
+    stations = (
+        df[["id_estacion_origen", "nombre_estacion_origen",
+            "long_estacion_origen", "lat_estacion_origen"]]
+        .drop_duplicates("id_estacion_origen")
+        .rename(columns={"id_estacion_origen": "station_id",
+                         "nombre_estacion_origen": "station_name",
+                         "long_estacion_origen": "lon",
+                         "lat_estacion_origen": "lat"})
+    )
+    df_feat = df_feat.merge(stations, on="station_id", how="left")
+    
+    # ------------- 8. Demanda vecina ------------- #
+    # pre-computamos vecinos
+    coords = stations[["lat", "lon"]].dropna()
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors + 1,
+                            algorithm="ball_tree",
+                            metric=lambda a, b: haversine(a[1], a[0], b[1], b[0]))
+    nbrs.fit(coords[["lat", "lon"]])
+    indices = nbrs.kneighbors(coords[["lat", "lon"]], return_distance=False)
+    neighbor_map = dict(zip(stations["station_id"], indices))
+    
+    def sum_neighbor_dep(row):
+        neigh_idx = neighbor_map.get(row["station_id"], [])  # incluye itself
+        neigh_ids = stations.iloc[neigh_idx]["station_id"].values[1:]  # descartar propia
+        return df_feat.loc[(df_feat["ts_start"] == row["ts_start"]) &
+                           (df_feat["station_id"].isin(neigh_ids)),
+                           "dep_last_DT"].sum()
+    
+    df_feat["near_dep_sum_DT"] = df_feat.apply(sum_neighbor_dep, axis=1)
+    
+    # ------------- 9. Limpieza final ------------- #
+    # Rellenar NaNs de lags y target con 0 (opcional)
+    lag_cols = [c for c in df_feat.columns if c.startswith("dep_lag_")]
+    df_feat[lag_cols] = df_feat[lag_cols].fillna(0)
+    df_feat["y_arrivals_next_DT"] = df_feat["y_arrivals_next_DT"].fillna(0)
+    
+    return df_feat
+
+print("Función `engineer_ecobici_features` definida con éxito!")

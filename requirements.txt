@@ -3,6 +3,8 @@ polars
 scikit-learn
 pyarrow
 xgboost
+lightgbm
+numpy
 # weather data dependencies
 openmeteo-requests
 requests-cache
