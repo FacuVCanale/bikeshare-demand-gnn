@@ -1,8 +1,12 @@
+from __future__ import annotations
 import pandas as pd
 from typing import Tuple, Dict
 import numpy as np
+import polars as pl
 from datetime import timedelta
+import math
 from sklearn.neighbors import NearestNeighbors
+import os
 
 # =============================================================================
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
@@ -162,146 +166,314 @@ def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame,
     }
 
 
-def engineer_ecobici_features(df_raw: pd.DataFrame,
-                              dt_minutes: int = 30,
-                              n_neighbors: int = 5) -> pd.DataFrame:
+def _haversine_np(lon1, lat1, lon2, lat2):
     """
-    Realiza feature-engineering para predicción de arribos de bicicletas.
-    
+    Haversine vectorizado (km) – usado como métrica en NearestNeighbors.
+    """
+    # convertir a radianes
+    lon1, lat1, lon2, lat2 = map(
+        np.radians, [lon1, lat1, lon2, lat2]
+    )
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arcsin(np.sqrt(a))
+    return 6371.0 * c
+
+
+def _build_skeleton(stations_df: pl.DataFrame, start_ts: pl.Series,
+                    end_ts: pl.Series, freq: str) -> pl.DataFrame:
+    """
+    Devuelve un DataFrame con todas las combinaciones (station_id, ts_start)
+    entre start y end inclusive al paso indicado.
+    """
+    ts_range = pl.datetime_range(
+        start=start_ts,
+        end=end_ts,
+        interval=freq,
+        eager=True,
+        time_unit="us"
+    ).alias("ts_start")
+    skeleton = stations_df.select(["station_id"]).join(
+        ts_range.to_frame(),
+        how="cross"
+    )
+    return skeleton
+
+
+def engineer_ecobici_features(
+    df_raw: pd.DataFrame,
+    dt_minutes: int = 30,
+    n_neighbors: int = 5
+) -> pd.DataFrame:
+    """
+    Pipeline de feature-engineering optimizado con Polars para predicción
+    de arribos de bicicletas en Ecobici.
+
     Parameters
     ----------
     df_raw : pd.DataFrame
-        Dataset crudo con viajes + clima en las columnas descritas.
+        Tabla original con viajes + clima (columnas enumeradas).
     dt_minutes : int, default 30
-        Granularidad de la ventana temporal ΔT (en minutos).
+        Granularidad de la ventana temporal.
     n_neighbors : int, default 5
-        Nº de estaciones más cercanas para sumar partidas vecinas.
-    
+        Nº de estaciones más cercanas consideradas para la demanda vecina.
+
     Returns
     -------
     pd.DataFrame
-        Tabla agregada con una fila por (station_id, ts_start) que incluye:
-        - features temporales, meteorológicas y demográficas
-        - lags de demanda y demanda vecina
-        - target: y_arrivals_next_ΔT
+        Dataset final con una fila por (station_id, ts_start).
     """
-    # --------------------- helpers --------------------- #
-    def floor_dt(series: pd.Series, freq: str) -> pd.Series:
-        """Redondea timestamps hacia abajo a múltiplo de freq."""
-        return (series.dt.floor(freq))
-    
-    def haversine(lon1, lat1, lon2, lat2):
-        """Calcula distancia grande-círculo entre 2 pts."""
-        # convertir a radianes
-        lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
-        dlon = lon2 - lon1
-        dlat = lat2 - lat1
-        a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-        c = 2 * np.arcsin(np.sqrt(a))
-        return 6371 * c  # km
-    
-    # ------------- 1. Normalización de fechas ------------- #
-    df = df_raw.copy()
-    df["fecha_origen_recorrido"] = pd.to_datetime(df["fecha_origen_recorrido"])
-    df["fecha_destino_recorrido"] = pd.to_datetime(df["fecha_destino_recorrido"])
-    df["date"] = df["fecha_origen_recorrido"]
-    
-    # Ventana ΔT
-    freq = f"{dt_minutes}min"
-    df["ts_dep"] = floor_dt(df["fecha_origen_recorrido"], freq)
-    df["ts_arr"] = floor_dt(df["fecha_destino_recorrido"], freq)
-    
-    # ------------- 2. Censo de partidas y arribos ------------- #
-    dep = (
-        df.groupby(["id_estacion_origen", "ts_dep"])
-          .agg(dep_last_DT=("id_recorrido", "size"),
-               male_cnt=("genero", lambda x: (x == "MALE").sum()))
-          .reset_index()
-          .rename(columns={"id_estacion_origen": "station_id",
-                           "ts_dep": "ts_start"})
-    )
-    arr = (
-        df.groupby(["id_estacion_destino", "ts_arr"])
-          .size()
-          .reset_index(name="arrivals")
-          .rename(columns={"id_estacion_destino": "station_id",
-                           "ts_arr": "ts_start"})
-    )
-    
-    # ratio de género
-    dep["share_male"] = dep["male_cnt"] / dep["dep_last_DT"].clip(lower=1)
-    dep = dep.drop(columns="male_cnt")
-    
-    # ------------- 3. Lags de demanda ------------- #
-    dep = dep.sort_values(["station_id", "ts_start"])
-    for k in range(1, 7):  # lags 1…6
-        dep[f"dep_lag_{k}"] = (
-            dep.groupby("station_id")["dep_last_DT"].shift(k)
-        )
-    
-    # ------------- 4. Target: arrivals en próxima ventana ------------- #
-    arr_next = arr.copy()
-    arr_next["ts_start"] = arr_next["ts_start"] - timedelta(minutes=dt_minutes)
-    arr_next = arr_next.rename(columns={"arrivals": "y_arrivals_next_DT"})
-    
-    df_feat = dep.merge(arr_next, on=["station_id", "ts_start"], how="left")
-    
-    # ------------- 5. Merge con clima ------------- #
-    weather = (
-        df[["date"] + [c for c in df.columns if c.endswith("_2m") or c in
-                       ["precipitation", "rain", "weather_code", "wind_speed_10m",
-                        "wind_direction_10m", "cloud_cover", "sunshine_duration", "is_day",
-                        "direct_radiation"]]]
-        .drop_duplicates("date")
-    )
-    weather = weather.rename(columns={"date": "ts_start"})
-    df_feat = df_feat.merge(weather, on="ts_start", how="left")
-    
-    # ------------- 6. Features temporales ------------ #
-    df_feat["hour"] = df_feat["ts_start"].dt.hour
-    df_feat["dow"] = df_feat["ts_start"].dt.dayofweek
-    df_feat["month"] = df_feat["ts_start"].dt.month
-    df_feat["sin_hour"] = np.sin(2 * np.pi * df_feat["hour"] / 24)
-    df_feat["cos_hour"] = np.cos(2 * np.pi * df_feat["hour"] / 24)
-    df_feat["is_weekend"] = df_feat["dow"].isin([5, 6]).astype("int8")
-    
-    # ------------- 7. Join con metadata de estaciones ------------- #
-    stations = (
-        df[["id_estacion_origen", "nombre_estacion_origen",
-            "long_estacion_origen", "lat_estacion_origen"]]
-        .drop_duplicates("id_estacion_origen")
-        .rename(columns={"id_estacion_origen": "station_id",
-                         "nombre_estacion_origen": "station_name",
-                         "long_estacion_origen": "lon",
-                         "lat_estacion_origen": "lat"})
-    )
-    df_feat = df_feat.merge(stations, on="station_id", how="left")
-    
-    # ------------- 8. Demanda vecina ------------- #
-    # pre-computamos vecinos
-    coords = stations[["lat", "lon"]].dropna()
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors + 1,
-                            algorithm="ball_tree",
-                            metric=lambda a, b: haversine(a[1], a[0], b[1], b[0]))
-    nbrs.fit(coords[["lat", "lon"]])
-    indices = nbrs.kneighbors(coords[["lat", "lon"]], return_distance=False)
-    neighbor_map = dict(zip(stations["station_id"], indices))
-    
-    def sum_neighbor_dep(row):
-        neigh_idx = neighbor_map.get(row["station_id"], [])  # incluye itself
-        neigh_ids = stations.iloc[neigh_idx]["station_id"].values[1:]  # descartar propia
-        return df_feat.loc[(df_feat["ts_start"] == row["ts_start"]) &
-                           (df_feat["station_id"].isin(neigh_ids)),
-                           "dep_last_DT"].sum()
-    
-    df_feat["near_dep_sum_DT"] = df_feat.apply(sum_neighbor_dep, axis=1)
-    
-    # ------------- 9. Limpieza final ------------- #
-    # Rellenar NaNs de lags y target con 0 (opcional)
-    lag_cols = [c for c in df_feat.columns if c.startswith("dep_lag_")]
-    df_feat[lag_cols] = df_feat[lag_cols].fillna(0)
-    df_feat["y_arrivals_next_DT"] = df_feat["y_arrivals_next_DT"].fillna(0)
-    
-    return df_feat
+    print("🚴‍♂️  Iniciando feature-engineering…")
 
-print("Función `engineer_ecobici_features` definida con éxito!")
+    # --- Checkpointing setup ---
+    checkpoint_dir = "feature_checkpoints"
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    print(f"  Intermediate results will be saved to '{checkpoint_dir}/'")
+    print(f"  Input raw data shape: {df_raw.shape}")
+
+    # ------------------------------------------------------------------
+    # 0. Conversión inicial a Polars y normalización de fechas
+    # ------------------------------------------------------------------
+    print("\n[Step 0/9] Converting to Polars and normalizing dates...")
+    df = pl.from_pandas(df_raw)
+
+    # Ensure station ID columns are the same integer type for joins
+    df = df.with_columns([
+        pl.col("id_estacion_origen").cast(pl.Int64),
+        pl.col("id_estacion_destino").cast(pl.Int64),
+    ])
+
+    for col in ("fecha_origen_recorrido", "fecha_destino_recorrido"):
+        if col in df.columns:
+            if df[col].dtype == pl.String:
+                df = df.with_columns(
+                    pl.col(col).str.to_datetime(time_unit="us")
+                )
+            else:
+                df = df.with_columns(pl.col(col).cast(pl.Datetime("us")))
+
+    freq = f"{dt_minutes}m"
+
+    df = df.with_columns(
+        ts_dep=pl.col("fecha_origen_recorrido").dt.truncate(freq),
+        ts_arr=pl.col("fecha_destino_recorrido").dt.truncate(freq)
+    )
+    print("  Conversion and date normalization complete.")
+
+    # ------------------------------------------------------------------
+    # 1. Tabla de partidas (dep) con lags y proporción de género
+    # ------------------------------------------------------------------
+    print("\n[Step 1/9] Creating departures table with lags...")
+    dep_path = os.path.join(checkpoint_dir, "dep.parquet")
+    if os.path.exists(dep_path):
+        print(f"  -> Loading from checkpoint: {dep_path}")
+        dep = pl.read_parquet(dep_path)
+    else:
+        dep = (
+            df.group_by(["id_estacion_origen", "ts_dep"])
+              .agg([
+                  pl.len().alias("dep_last_DT"),
+                  (pl.col("genero") == "MALE").sum().alias("male_cnt")
+              ])
+              .rename({"id_estacion_origen": "station_id",
+                       "ts_dep": "ts_start"})
+              .sort(["station_id", "ts_start"])
+              .with_columns(
+                  share_male=pl.when(pl.col("dep_last_DT") > 0)
+                               .then(pl.col("male_cnt") / pl.col("dep_last_DT"))
+                               .otherwise(0.0)
+              )
+              .drop("male_cnt")
+        )
+        # lags 1…6
+        dep = dep.with_columns([
+            pl.col("dep_last_DT").shift(k).over("station_id").alias(f"dep_lag_{k}")
+            for k in range(1, 7)
+        ])
+        print(f"  -> Saving checkpoint: {dep_path}")
+        dep.write_parquet(dep_path)
+
+    print(f"  -> Departures table shape: {dep.shape}")
+
+    # ------------------------------------------------------------------
+    # 2. Tabla de arribos desplazada → target
+    # ------------------------------------------------------------------
+    print("\n[Step 2/9] Creating shifted arrivals table for target...")
+    arr_next_path = os.path.join(checkpoint_dir, "arr_next.parquet")
+    if os.path.exists(arr_next_path):
+        print(f"  -> Loading from checkpoint: {arr_next_path}")
+        arr_next = pl.read_parquet(arr_next_path)
+    else:
+        arr = (
+            df.group_by(["id_estacion_destino", "ts_arr"])
+              .agg(pl.len().alias("arrivals"))
+              .rename({"id_estacion_destino": "station_id",
+                       "ts_arr": "ts_start"})
+        )
+        arr_next = (
+            arr.with_columns(
+                (pl.col("ts_start") - timedelta(minutes=dt_minutes)).alias("ts_start")
+            ).rename({"arrivals": "y_arrivals_next_DT"})
+        )
+        print(f"  -> Saving checkpoint: {arr_next_path}")
+        arr_next.write_parquet(arr_next_path)
+
+    print(f"  -> Arrivals target table shape: {arr_next.shape}")
+
+    # ------------------------------------------------------------------
+    # 3. Tabla de clima (una fila por ts_start)
+    # ------------------------------------------------------------------
+    print("\n[Step 3/9] Creating weather table...")
+    weather_cols = [c for c in df.columns if (
+        c.endswith("_2m") or c in [
+            "precipitation", "rain", "weather_code", "pressure_msl",
+            "surface_pressure", "cloud_cover", "sunshine_duration",
+            "is_day", "direct_radiation", "wind_speed_10m",
+            "wind_direction_10m"
+        ])]
+
+    if weather_cols:
+        weather = (
+            df.select(["ts_dep"] + weather_cols)
+              .unique(subset=["ts_dep"], keep="first")
+              .rename({"ts_dep": "ts_start"})
+        )
+        print(f"  -> Weather table shape: {weather.shape}")
+    else:
+        weather = None
+        print("  -> No weather table created.")
+
+    # ------------------------------------------------------------------
+    # 4. Metadatos de estaciones
+    # ------------------------------------------------------------------
+    print("\n[Step 4/9] Creating station metadata table...")
+    stations = (
+        df.select([
+            "id_estacion_origen",
+            "nombre_estacion_origen",
+            "long_estacion_origen",
+            "lat_estacion_origen"
+        ]).unique("id_estacion_origen", keep="first")
+          .rename({
+              "id_estacion_origen": "station_id",
+              "nombre_estacion_origen": "station_name",
+              "long_estacion_origen": "lon",
+              "lat_estacion_origen": "lat"
+          })
+    )
+    print(f"  -> Stations metadata table shape: {stations.shape}")
+
+    # ------------------------------------------------------------------
+    # 5. Esqueleto estación × tiempo completo
+    # ------------------------------------------------------------------
+    print("\n[Step 5/9] Building full station x time skeleton...")
+    df_feat_path = os.path.join(checkpoint_dir, "df_feat_skeleton.parquet")
+    if os.path.exists(df_feat_path):
+        print(f"  -> Loading from checkpoint: {df_feat_path}")
+        df_feat = pl.read_parquet(df_feat_path)
+    else:
+        min_ts = df["ts_dep"].min()
+        max_ts = df["ts_dep"].max() + timedelta(minutes=dt_minutes)
+        skeleton = _build_skeleton(stations, min_ts, max_ts, freq)
+        print(f"  -> Full data skeleton shape: {skeleton.shape}")
+
+    # ------------------------------------------------------------------
+    # 6. Joins en orden LEFT para no perder filas
+    # ------------------------------------------------------------------
+    print("\n[Step 6/9] Joining data onto skeleton...")
+    df_feat = (skeleton
+               .join(dep, on=["station_id", "ts_start"], how="left")
+               .join(arr_next, on=["station_id", "ts_start"], how="left"))
+    print(f"  -> Saving checkpoint: {df_feat_path}")
+    df_feat.write_parquet(df_feat_path)
+
+    print(f"  -> Shape after joining departures and arrivals: {df_feat.shape}")
+
+    if weather is not None:
+        df_feat = df_feat.join(weather, on="ts_start", how="left")
+        print(f"  -> Shape after joining weather: {df_feat.shape}")
+
+    # ------------------------------------------------------------------
+    # 7. Features temporales
+    # ------------------------------------------------------------------
+    print("\n[Step 7/9] Engineering temporal features...")
+    df_feat = df_feat.with_columns(
+        hour=pl.col("ts_start").dt.hour(),
+        dow=pl.col("ts_start").dt.weekday(),
+        month=pl.col("ts_start").dt.month(),
+    ).with_columns(
+        sin_hour=(pl.col("hour") * 2 * math.pi / 24).sin(),
+        cos_hour=(pl.col("hour") * 2 * math.pi / 24).cos(),
+        is_weekend=(pl.col("dow") >= 6).cast(pl.Int8)
+    )
+    print(f"  -> Shape after adding temporal features: {df_feat.shape}")
+
+    # ------------------------------------------------------------------
+    # 8. Fusión con coords + demanda vecina
+    # ------------------------------------------------------------------
+    print("\n[Step 8/9] Calculating neighbor demand...")
+    df_feat_final_path = os.path.join(checkpoint_dir, "df_feat_final.parquet")
+    if os.path.exists(df_feat_final_path):
+        print(f"  -> Loading from checkpoint: {df_feat_final_path}")
+        df_feat = pl.read_parquet(df_feat_final_path)
+    else:
+        df_feat = df_feat.join(stations.select(["station_id", "lat", "lon"]),
+                               on="station_id", how="left")
+
+        if n_neighbors > 0 and stations.height > 0:
+            coords_pd = stations.drop_nulls(subset=["lat", "lon"]).to_pandas()
+            print(f"  -> Found {len(coords_pd)} stations with coordinates for neighbor calculation.")
+
+            nbrs = NearestNeighbors(
+                n_neighbors=min(n_neighbors + 1, len(coords_pd)),
+                algorithm="ball_tree",
+                metric=lambda a, b: _haversine_np(a[1], a[0], b[1], b[0])
+            )
+            nbrs.fit(coords_pd[["lat", "lon"]].to_numpy())
+            _, ind = nbrs.kneighbors(coords_pd[["lat", "lon"]].to_numpy())
+
+            neighbor_map = pl.DataFrame({
+                "station_id": np.repeat(coords_pd["station_id"].values,
+                                        ind.shape[1] - 1),
+                "neighbor_id": coords_pd["station_id"].values[ind[:, 1:].ravel()]
+            })
+
+            neighbor_dep = (
+                df_feat.select(["ts_start", "station_id", "dep_last_DT"])
+                       .rename({"station_id": "neighbor_id",
+                                "dep_last_DT": "neighbor_dep"})
+            )
+
+            near_sum = (
+                neighbor_map.join(neighbor_dep, on="neighbor_id", how="inner")
+                             .group_by(["station_id", "ts_start"])
+                            .agg(pl.sum("neighbor_dep").alias("near_dep_sum_DT"))
+            )
+
+            df_feat = df_feat.join(near_sum, on=["station_id", "ts_start"], how="left")
+
+        # ------------------------------------------------------------------
+        # 9. Relleno de nulos y limpieza final
+        # ------------------------------------------------------------------
+        print("\n[Step 9/9] Filling nulls and final cleanup...")
+        lag_cols = [c for c in df_feat.columns if c.startswith("dep_lag_")]
+        fill_zero = ["dep_last_DT", "y_arrivals_next_DT", "near_dep_sum_DT"] + lag_cols
+        existing_fill = [c for c in fill_zero if c in df_feat.columns]
+        df_feat = df_feat.with_columns([pl.col(existing_fill).fill_null(0)])
+
+        # clima: rellenar con forward-fill por columna (opcional), o media
+        if weather_cols:
+            df_feat = df_feat.sort("ts_start")
+            df_feat = df_feat.with_columns([
+                pl.col(c).fill_null(strategy="forward") for c in weather_cols
+            ])
+
+        # descartar columnas gps si no se usan en el modelo
+        df_feat = df_feat.drop(["lon", "lat"], strict=False)
+
+        print(f"  -> Saving final checkpoint: {df_feat_final_path}")
+        df_feat.write_parquet(df_feat_final_path)
+
+    print("✅  Feature-engineering finalizado -> shape:", df_feat.shape)
