@@ -238,8 +238,21 @@ def clear_feature_checkpoints(checkpoint_dir: str = "feature_checkpoints"):
 
 
 def _create_temporal_features(df_feat: pl.DataFrame, checkpoint_dir: str, temporal_path: str, holiday_dates: list) -> pl.DataFrame:
-    """Create temporal features with memory-efficient operations."""
+    """Create temporal features with memory-efficient operations.
+    
+    Changes:
+      • Processes data in time windows to reduce memory pressure
+      • Uses smaller data types (Int8, Float32) to save memory
+      • Uses streaming operations for all heavy computations
+      • Saves intermediate results to disk
+      • Uses aggressive compression
+    """
     print("  -> Creating temporal features with memory optimization...")
+    
+    # Get time range for windowing
+    min_ts = df_feat["ts_start"].min()
+    max_ts = df_feat["ts_start"].max()
+    time_window = timedelta(days=7)  # Process one week at a time
     
     # Feriados de Argentina - handle safely
     try:
@@ -252,101 +265,115 @@ def _create_temporal_features(df_feat: pl.DataFrame, checkpoint_dir: str, tempor
         print(f"  -> Warning: Could not load holidays: {e}. Using empty holidays list.")
         holiday_dates = []
     
-    # Step 8a: Basic temporal features
-    print("  -> Adding basic temporal features...")
+    # Process in time windows
+    temp_chunk_dir = os.path.join(checkpoint_dir, "temp_temporal_chunks")
+    os.makedirs(temp_chunk_dir, exist_ok=True)
+    
+    current_ts = min_ts
+    chunk_paths = []
+    
+    while current_ts < max_ts:
+        window_end = min(current_ts + time_window, max_ts)
+        chunk_path = os.path.join(temp_chunk_dir, f"temporal_{current_ts.strftime('%Y%m%d')}.parquet")
+        chunk_paths.append(chunk_path)
+        
+        print(f"  -> Processing window: {current_ts} to {window_end}")
+        
+        # Get data for this time window
+        window_df = df_feat.filter(
+            (pl.col("ts_start") >= current_ts) & 
+            (pl.col("ts_start") < window_end)
+        )
+        
+        if not window_df.is_empty():
+            try:
+                # Basic temporal features (all Int8 to save memory)
+                window_df = window_df.with_columns([
+                    pl.col("ts_start").dt.hour().alias("hour").cast(pl.Int8),
+                    pl.col("ts_start").dt.weekday().alias("dow").cast(pl.Int8),
+                    pl.col("ts_start").dt.month().alias("month").cast(pl.Int8),
+                    pl.col("ts_start").dt.day().alias("day").cast(pl.Int8),
+                    pl.col("ts_start").dt.date().is_in(holiday_dates).alias("is_holiday_ar").cast(pl.Int8),
+                ])
+                
+                # Cyclic encodings (Float32 to save memory)
+                window_df = window_df.with_columns([
+                    (pl.col("hour") * 2 * math.pi / 24).sin().alias("sin_hour").cast(pl.Float32),
+                    (pl.col("hour") * 2 * math.pi / 24).cos().alias("cos_hour").cast(pl.Float32),
+                    (pl.col("dow") * 2 * math.pi / 7).sin().alias("sin_dow").cast(pl.Float32),
+                    (pl.col("dow") * 2 * math.pi / 7).cos().alias("cos_dow").cast(pl.Float32),
+                    (pl.col("month") * 2 * math.pi / 12).sin().alias("sin_month").cast(pl.Float32),
+                    (pl.col("month") * 2 * math.pi / 12).cos().alias("cos_month").cast(pl.Float32),
+                ])
+                
+                # First, create independent binary flags that don't depend on others
+                window_df = window_df.with_columns([
+                    # In Polars, weekday() returns 0-6 where 0 is Monday and 6 is Sunday
+                    pl.col("dow").is_in([5, 6]).alias("is_weekend").cast(pl.Int8),  # 5=Saturday, 6=Sunday
+                    pl.col("day").is_in([1, 15]).alias("payday_flag").cast(pl.Int8),
+                    pl.col("month").is_in([1, 7]).alias("vacation_season").cast(pl.Int8),
+                ])
+
+                # Peak commute depends on the newly-created is_weekend flag, so add it in a second pass
+                window_df = window_df.with_columns(
+                    ((pl.col("hour").is_in([7, 8, 9, 17, 18, 19])) & (pl.col("is_weekend") == 0))
+                        .cast(pl.Int8)
+                        .alias("peak_commute")
+                )
+                
+                # Save window to disk immediately
+                window_df.write_parquet(
+                    chunk_path,
+                    compression="zstd",
+                    compression_level=3,
+                    row_group_size=5_000
+                )
+                
+            except Exception as e:
+                print(f"  -> Error processing window {current_ts}: {e}")
+                # Create empty chunk to maintain order
+                window_df.select(["ts_start", "station_id"]).write_parquet(chunk_path)
+        
+        current_ts = window_end
+        gc.collect()
+        _log_memory_usage(f"processed window until {window_end}")
+    
+    print("  -> Combining all temporal windows...")
+    # Combine all windows using streaming
+    df_feat_final = pl.concat(
+        [pl.scan_parquet(f) for f in chunk_paths],
+        how="vertical"
+    ).collect()
+    
+    # Clean up temp files
+    print("  -> Cleaning up temporary files...")
+    for f in chunk_paths:
+        try:
+            os.remove(f)
+        except:
+            pass
     try:
-        df_feat = df_feat.with_columns([
-            pl.col("ts_start").dt.hour().alias("hour"),
-            pl.col("ts_start").dt.weekday().alias("dow"),
-            pl.col("ts_start").dt.month().alias("month"),
-            pl.col("ts_start").dt.day().alias("day"),
-            pl.col("ts_start").dt.date().is_in(holiday_dates).alias("is_holiday_ar").cast(pl.Int8),
-        ])
-    except Exception as e:
-        print(f"  -> Error adding basic temporal features: {e}")
-        # Fallback: add features one by one
-        df_feat = df_feat.with_columns(pl.col("ts_start").dt.hour().alias("hour"))
-        df_feat = df_feat.with_columns(pl.col("ts_start").dt.weekday().alias("dow"))
-        df_feat = df_feat.with_columns(pl.col("ts_start").dt.month().alias("month"))
-        df_feat = df_feat.with_columns(pl.col("ts_start").dt.day().alias("day"))
-        df_feat = df_feat.with_columns(pl.lit(0).alias("is_holiday_ar").cast(pl.Int8))  # Skip holidays if problematic
+        os.rmdir(temp_chunk_dir)
+    except:
+        pass
     
-    _log_memory_usage("basic temporal")
-    gc.collect()
+    # Final sort
+    print("  -> Final sort by timestamp...")
+    df_feat_final = df_feat_final.sort(["ts_start", "station_id"])
     
-    # Step 8b: Cyclic encodings
-    print("  -> Adding cyclic encodings...")
+    # Save final result
+    print(f"  -> Saving checkpoint: {temporal_path}")
     try:
-        df_feat = df_feat.with_columns([
-            (pl.col("hour") * 2 * math.pi / 24).sin().alias("sin_hour"),
-            (pl.col("hour") * 2 * math.pi / 24).cos().alias("cos_hour"),
-            (pl.col("dow") * 2 * math.pi / 7).sin().alias("sin_dow"),
-            (pl.col("dow") * 2 * math.pi / 7).cos().alias("cos_dow"),
-            (pl.col("month") * 2 * math.pi / 12).sin().alias("sin_month"),
-            (pl.col("month") * 2 * math.pi / 12).cos().alias("cos_month"),
-        ])
-    except Exception as e:
-        print(f"  -> Error adding cyclic encodings: {e}")
-        # Fallback: add features one by one
-        df_feat = df_feat.with_columns((pl.col("hour") * 2 * math.pi / 24).sin().alias("sin_hour"))
-        df_feat = df_feat.with_columns((pl.col("hour") * 2 * math.pi / 24).cos().alias("cos_hour"))
-        df_feat = df_feat.with_columns((pl.col("dow") * 2 * math.pi / 7).sin().alias("sin_dow"))
-        df_feat = df_feat.with_columns((pl.col("dow") * 2 * math.pi / 7).cos().alias("cos_dow"))
-        df_feat = df_feat.with_columns((pl.col("month") * 2 * math.pi / 12).sin().alias("sin_month"))
-        df_feat = df_feat.with_columns((pl.col("month") * 2 * math.pi / 12).cos().alias("cos_month"))
-    
-    _log_memory_usage("cyclic encodings")
-    gc.collect()
-    
-    # Step 8c: Binary flags
-    print("  -> Adding binary flags...")
-    try:
-        df_feat = df_feat.with_columns([
-            pl.col("dow").is_in([6, 7]).alias("is_weekend").cast(pl.Int8),
-            pl.col("day").is_in([1, 15]).alias("payday_flag").cast(pl.Int8),
-            pl.col("month").is_in([1, 7]).alias("vacation_season").cast(pl.Int8)
-        ])
-    except Exception as e:
-        print(f"  -> Error adding binary flags: {e}")
-        # Fallback: add features one by one
-        df_feat = df_feat.with_columns(pl.col("dow").is_in([6, 7]).alias("is_weekend").cast(pl.Int8))
-        df_feat = df_feat.with_columns(pl.col("day").is_in([1, 15]).alias("payday_flag").cast(pl.Int8))
-        df_feat = df_feat.with_columns(pl.col("month").is_in([1, 7]).alias("vacation_season").cast(pl.Int8))
-    
-    _log_memory_usage("binary flags")
-    gc.collect()
-    
-    # Step 8d: Peak commute hours
-    print("  -> Adding peak commute indicator...")
-    try:
-        df_feat = df_feat.with_columns(
-            peak_commute=((pl.col("hour").is_in([7, 8, 9, 17, 18, 19])) & (pl.col("is_weekend") == 0)).cast(pl.Int8)
+        df_feat_final.write_parquet(
+            temporal_path,
+            compression="zstd",
+            compression_level=3,
+            row_group_size=5_000
         )
     except Exception as e:
-        print(f"  -> Error adding peak commute: {e}")
-        # Fallback
-        df_feat = df_feat.with_columns(pl.lit(0).alias("peak_commute").cast(pl.Int8))
+        print(f"  -> Error with write: {e}")
     
-    _log_memory_usage("peak commute")
-    gc.collect()
-    
-    # Memory-efficient parquet writing using streaming
-    print(f"  -> Saving checkpoint using streaming write: {temporal_path}")
-    try:
-        # Use lazy evaluation and streaming sink to reduce memory usage
-        df_feat.lazy().sink_parquet(temporal_path, compression="snappy", row_group_size=10000)
-        print("  -> Successfully saved temporal features checkpoint")
-    except Exception as e:
-        print(f"  -> Error saving with streaming: {e}")
-        # Try with smaller row groups
-        try:
-            df_feat.lazy().sink_parquet(temporal_path, compression="snappy", row_group_size=5000)
-            print("  -> Successfully saved temporal features checkpoint (smaller chunks)")
-        except Exception as e2:
-            print(f"  -> Failed to save checkpoint: {e2}")
-            print("  -> Continuing without checkpoint (will recreate if needed)")
-    
-    return df_feat
+    return df_feat_final
 
 
 # =============================================================================
@@ -737,16 +764,19 @@ def step_09_temporal_features(df_feat: pl.DataFrame, holiday_dates: list, checkp
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ensure_full_thread_pool():
-    """Force Polars to use every logical core unless the user explicitly set
-    POLARS_MAX_THREADS. This prevents the 20 %‑CPU bottleneck the user hit."""
+def _ensure_safe_thread_pool():
+    """Configure Polars to use a safe number of threads to prevent system overload.
+    Uses at most 75% of available cores, with a maximum of 4 threads."""
     if os.getenv("POLARS_MAX_THREADS") is None:
         try:
-            pl.Config.set_global_pool_size(os.cpu_count())
+            # Use at most 75% of cores, but never more than 4
+            safe_cores = min(4, max(1, int(os.cpu_count() * 0.75)))
+            pl.Config.set_global_pool_size(safe_cores)
+            print(f"  -> Using {safe_cores} CPU cores for Polars operations")
         except AttributeError:  # older Polars (<0.19) fallback silently
             pass
 
-_ensure_full_thread_pool()
+_ensure_safe_thread_pool()
 
 # ---------------------------------------------------------------------------
 # Step‑10 feature engineering (rolling demand stats)
@@ -756,93 +786,170 @@ def step_10_rolling_features(
     df_feat: pl.DataFrame,
     dt_minutes: int,
     checkpoint_dir: str,
+    chunk_size: int = 1,  # Process one station at a time by default
 ) -> pl.DataFrame:
-    """Step 10 – create 24‑h rolling mean / std and ratio for each station.
-
-    Changes vs. the slow original version:
-      • Uses all CPU cores (see helper above).
-      • Keeps execution in **non‑streaming** mode so Polars parallelises.
-      • New columns stored as *Float32* → ½ the RAM.
-      • Writes Parquet with larger row‑groups (250 k) for faster future reads.
-    """
-
+    """Step 10 – create 24‑h rolling mean / std and ratio for each station."""
     print("[Step 10/11] Engineering expanded demand history features…")
 
     checkpoint_path = os.path.join(checkpoint_dir, "step10_rolling.parquet")
 
-    # ------------------------------------------------------------------
-    # Fast‑path – return cached Parquet if it exists
-    # ------------------------------------------------------------------
+    # Check for cached result
     df_cached = _load_checkpoint_if_exists(checkpoint_path, "rolling features")
     if df_cached is not None:
         return df_cached
 
-    # ------------------------------------------------------------------
-    # Compute fresh features
-    # ------------------------------------------------------------------
-    tasks = [
-        "Computing window size",
-        "Sorting data",
-        "Adding rolling mean/std",
-        "Adding ratio feature",
-        "Writing checkpoint",
-    ]
-
-    with tqdm(total=len(tasks), desc="Step 10", leave=False) as pbar:
-        # 1️⃣ window size (rows that cover 24 h)
-        pbar.set_description(tasks[0])
-        window = (24 * 60) // dt_minutes  # e.g. 48 for 30‑min deltas
-        pbar.update(1)
-
-        # 2️⃣ full sort to ensure window continuity per station
-        pbar.set_description(tasks[1])
-        df_feat = df_feat.sort(["station_id", "ts_start"])
-        pbar.update(1)
-
-        # 3️⃣ rolling mean / std – cast to Float32 first to save RAM
-        pbar.set_description(tasks[2])
-        base_col = pl.col("dep_last_DT").cast(pl.Float32)
-        df_feat = df_feat.with_columns([
-            base_col.rolling_mean(window, min_periods=1)
-                    .over("station_id")
-                    .alias("dep_ma_24h"),
-            base_col.rolling_std(window, min_periods=1)
-                    .over("station_id")
-                    .alias("dep_std_24h"),
+    # Verify required columns exist
+    required_cols = ["station_id", "ts_start", "dep_last_DT"]
+    missing_cols = [col for col in required_cols if col not in df_feat.columns]
+    if missing_cols:
+        print(f"  -> Error: Missing required columns: {missing_cols}")
+        print("  -> Creating empty rolling features...")
+        return df_feat.with_columns([
+            pl.lit(None).alias("dep_ma_24h").cast(pl.Float32),
+            pl.lit(None).alias("dep_std_24h").cast(pl.Float32),
+            pl.lit(None).alias("dep_ratio_DT_24h").cast(pl.Float32)
         ])
-        pbar.update(1)
 
-        # 4️⃣ ratio feature (also Float32)
-        pbar.set_description(tasks[3])
-        df_feat = df_feat.with_columns(
-            dep_ratio_DT_24h=(pl.col("dep_last_DT") / (pl.col("dep_ma_24h") + 1.0))
-            .cast(pl.Float32)
-        )
-        pbar.update(1)
+    print("  -> Computing window size...")
+    window = (24 * 60) // dt_minutes  # e.g. 48 for 30‑min deltas
+    
+    print("  -> Getting unique stations...")
+    unique_stations = df_feat["station_id"].unique().to_list()
+    n_stations = len(unique_stations)
+    print(f"  -> Processing {n_stations} stations one at a time")
+    
+    # Get time range for windowing
+    min_ts = df_feat["ts_start"].min()
+    max_ts = df_feat["ts_start"].max()
+    time_window = timedelta(days=7)  # Process one week at a time
+    
+    # Process stations one at a time
+    temp_chunk_dir = os.path.join(checkpoint_dir, "temp_chunks")
+    os.makedirs(temp_chunk_dir, exist_ok=True)
+    
+    for i, station_id in enumerate(tqdm(unique_stations, desc="Processing stations", leave=False)):
+        try:
+            # Filter to current station
+            station_df = df_feat.filter(pl.col("station_id") == station_id)
+            
+            # Process in time windows
+            current_ts = min_ts
+            station_chunks = []
+            
+            while current_ts < max_ts:
+                window_end = min(current_ts + time_window, max_ts)
 
-        # 5️⃣ write checkpoint – **streaming=False** keeps full parallelism
-        pbar.set_description(tasks[4])
-        (
-            df_feat.lazy()
-                   .sink_parquet(
-                       checkpoint_path,
-                       compression="snappy",
-                       row_group_size=250_000,
-                       streaming=False,
-                   )
-        )
-        pbar.update(1)
+                # Get data for this time window
+                window_df = station_df.filter(
+                    (pl.col("ts_start") >= current_ts) & 
+                    (pl.col("ts_start") < window_end)
+                ).sort("ts_start")
+                
+                if not window_df.is_empty():
+                    # Apply rolling features to window using streaming operations
+                    # Cast to Float32 to save memory
+                    base_col = pl.col("dep_last_DT").cast(pl.Float32)
+                    rolling_features = window_df.with_columns([
+                        base_col.rolling_mean(window, min_periods=1)
+                            .alias("dep_ma_24h"),
+                        base_col.rolling_std(window, min_periods=1)
+                            .alias("dep_std_24h"),
+                    ])
 
-    # ------------------------------------------------------------------
-    # Housekeeping
-    # ------------------------------------------------------------------
+                    # Add ratio feature (also Float32)
+                    rolling_features = rolling_features.with_columns(
+                        dep_ratio_DT_24h=(pl.col("dep_last_DT") / (pl.col("dep_ma_24h") + 1.0))
+                            .cast(pl.Float32)
+                    )
+                    
+                    station_chunks.append(rolling_features)
+                
+                current_ts = window_end
+                
+                # Force garbage collection after each time window
+                gc.collect()
+            
+            if station_chunks:
+                # Combine chunks for this station
+                station_df = pl.concat(station_chunks)
+
+                # Save station data to disk immediately with aggressive compression
+                chunk_path = os.path.join(temp_chunk_dir, f"chunk_{station_id}.parquet")
+                station_df.write_parquet(
+                    chunk_path,
+                    compression="zstd",
+                    compression_level=3,
+                    row_group_size=5_000
+                )
+            
+            # Clear from memory
+            del station_df, station_chunks
+            gc.collect()
+            
+            # Log progress
+            if (i + 1) % 10 == 0:
+                _log_memory_usage(f"processed {i + 1}/{n_stations} stations")
+            
+        except Exception as e:
+            print(f"  -> Error processing station {station_id}: {e}")
+            continue
+    
+    print("  -> Combining all station chunks...")
+    # Read and combine chunks using streaming
+    chunk_files = [os.path.join(temp_chunk_dir, f) for f in os.listdir(temp_chunk_dir) if f.endswith('.parquet')]
+    
+    if not chunk_files:
+        print("  -> No chunks were created. Creating empty rolling features...")
+        return df_feat.with_columns([
+            pl.lit(None).alias("dep_ma_24h").cast(pl.Float32),
+            pl.lit(None).alias("dep_std_24h").cast(pl.Float32),
+            pl.lit(None).alias("dep_ratio_DT_24h").cast(pl.Float32)
+        ])
+    
+    # Combine chunks in streaming mode with small batches
+    df_feat_final = pl.concat(
+        [pl.scan_parquet(f) for f in chunk_files],
+        how="vertical"
+    ).collect()
+    
+    # Clean up temp files
+    print("  -> Cleaning up temporary files...")
+    for f in chunk_files:
+        try:
+            os.remove(f)
+        except:
+            pass
     try:
-        _log_memory_usage("rolling features")
-    except NameError:
-        pass  # caller may not have the helper; ignore
+        os.rmdir(temp_chunk_dir)
+    except:
+        pass
+    
+    # Final sort to ensure proper ordering
+    print("  -> Final sort by timestamp...")
+    df_feat_final = df_feat_final.sort(["ts_start", "station_id"])
+    
+    # Ensure all original columns are present
+    missing_cols = set(df_feat.columns) - set(df_feat_final.columns)
+    if missing_cols:
+        print(f"  -> Adding back missing columns: {missing_cols}")
+        df_feat_final = df_feat_final.join(
+            df_feat.select(list(missing_cols) + ["ts_start", "station_id"]),
+            on=["ts_start", "station_id"],
+            how="left"
+        )
+    
+    print("  -> Saving checkpoint...")
+    try:
+        df_feat_final.write_parquet(
+            checkpoint_path,
+            compression="zstd",
+            compression_level=3,
+            row_group_size=5_000
+        )
+    except Exception as e:
+        print(f"  -> Error saving checkpoint: {e}")
 
-    gc.collect()
-    return df_feat
+    return df_feat_final
 
 
 def _calculate_safe_neighbor_limit(n_stations: int, requested_neighbors: int) -> int:
@@ -1050,7 +1157,8 @@ def engineer_ecobici_features(
     df_raw: pd.DataFrame,
     dt_minutes: int = 30,
     n_neighbors: int = 5,
-    clear_checkpoints: bool = False
+    clear_checkpoints: bool = False,
+    rolling_chunk_size: int = 50
 ) -> pd.DataFrame:
     """
     Parametrized pipeline for feature-engineering optimized with Polars.
@@ -1068,6 +1176,8 @@ def engineer_ecobici_features(
         Number of nearest neighbor stations for demand features
     clear_checkpoints : bool, default False
         Whether to clear all checkpoints and start fresh
+    rolling_chunk_size : int, default 50
+        Number of stations to process at once in step 10 to avoid memory issues
 
     Returns
     -------
@@ -1123,7 +1233,7 @@ def engineer_ecobici_features(
     # Continue with feature assembly
     df_feat = step_08_join_base_features(checkpoint_dir, has_weather)
     df_feat = step_09_temporal_features(df_feat, holiday_dates=[], checkpoint_dir=checkpoint_dir)
-    df_feat = step_10_rolling_features(df_feat, dt_minutes, checkpoint_dir)
+    df_feat = step_10_rolling_features(df_feat, dt_minutes, checkpoint_dir, rolling_chunk_size)
     df_feat = step_11_neighbor_features(df_feat, n_neighbors, checkpoint_dir, bike_models)
     
     # Save final result
