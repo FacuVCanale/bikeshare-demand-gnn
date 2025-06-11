@@ -5,8 +5,9 @@ pyarrow
 xgboost
 lightgbm
 numpy
-# weather data dependencies
 openmeteo-requests
 requests-cache
 retry-requests
 polars
+holidays
+psutil

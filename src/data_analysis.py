@@ -7,6 +7,10 @@ from datetime import timedelta
 import math
 from sklearn.neighbors import NearestNeighbors
 import os
+import holidays
+import gc
+import psutil
+from tqdm import tqdm
 
 # =============================================================================
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
@@ -201,279 +205,1072 @@ def _build_skeleton(stations_df: pl.DataFrame, start_ts: pl.Series,
     return skeleton
 
 
-def engineer_ecobici_features(
-    df_raw: pd.DataFrame,
-    dt_minutes: int = 30,
-    n_neighbors: int = 5
-) -> pd.DataFrame:
-    """
-    Pipeline de feature-engineering optimizado con Polars para predicción
-    de arribos de bicicletas en Ecobici.
+def _log_memory_usage(step_name: str):
+    """Log current memory usage for debugging kernel crashes."""
+    try:
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        print(f"  -> Memory usage after {step_name}: {memory_mb:.1f} MB")
+    except Exception:
+        pass  # Silently fail if psutil is not available
 
-    Parameters
-    ----------
-    df_raw : pd.DataFrame
-        Tabla original con viajes + clima (columnas enumeradas).
-    dt_minutes : int, default 30
-        Granularidad de la ventana temporal.
-    n_neighbors : int, default 5
-        Nº de estaciones más cercanas consideradas para la demanda vecina.
 
-    Returns
-    -------
-    pd.DataFrame
-        Dataset final con una fila por (station_id, ts_start).
-    """
-    print("🚴‍♂️  Iniciando feature-engineering…")
-
-    # --- Checkpointing setup ---
-    checkpoint_dir = "feature_checkpoints"
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-    print(f"  Intermediate results will be saved to '{checkpoint_dir}/'")
-    print(f"  Input raw data shape: {df_raw.shape}")
-
-    # ------------------------------------------------------------------
-    # 0. Conversión inicial a Polars y normalización de fechas
-    # ------------------------------------------------------------------
-    print("\n[Step 0/9] Converting to Polars and normalizing dates...")
-    df = pl.from_pandas(df_raw)
-
-    # Ensure station ID columns are the same integer type for joins
-    df = df.with_columns([
-        pl.col("id_estacion_origen").cast(pl.Int64),
-        pl.col("id_estacion_destino").cast(pl.Int64),
-    ])
-
-    for col in ("fecha_origen_recorrido", "fecha_destino_recorrido"):
-        if col in df.columns:
-            if df[col].dtype == pl.String:
-                df = df.with_columns(
-                    pl.col(col).str.to_datetime(time_unit="us")
-                )
-            else:
-                df = df.with_columns(pl.col(col).cast(pl.Datetime("us")))
-
-    freq = f"{dt_minutes}m"
-
-    df = df.with_columns(
-        ts_dep=pl.col("fecha_origen_recorrido").dt.truncate(freq),
-        ts_arr=pl.col("fecha_destino_recorrido").dt.truncate(freq)
-    )
-    print("  Conversion and date normalization complete.")
-
-    # ------------------------------------------------------------------
-    # 1. Tabla de partidas (dep) con lags y proporción de género
-    # ------------------------------------------------------------------
-    print("\n[Step 1/9] Creating departures table with lags...")
-    dep_path = os.path.join(checkpoint_dir, "dep.parquet")
-    if os.path.exists(dep_path):
-        print(f"  -> Loading from checkpoint: {dep_path}")
-        dep = pl.read_parquet(dep_path)
+def clear_feature_checkpoints(checkpoint_dir: str = "feature_checkpoints"):
+    """Clear all feature engineering checkpoints to force recreation."""
+    import glob
+    import os
+    
+    if os.path.exists(checkpoint_dir):
+        checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "*.parquet"))
+        if checkpoint_files:
+            print(f"Clearing {len(checkpoint_files)} checkpoint files...")
+            for file in checkpoint_files:
+                try:
+                    os.remove(file)
+                    print(f"  -> Removed: {os.path.basename(file)}")
+                except Exception as e:
+                    print(f"  -> Error removing {file}: {e}")
+            print("✅ Checkpoints cleared!")
+        else:
+            print("No checkpoint files found.")
     else:
+        print("Checkpoint directory does not exist.")
+
+
+def _create_temporal_features(df_feat: pl.DataFrame, checkpoint_dir: str, temporal_path: str, holiday_dates: list) -> pl.DataFrame:
+    """Create temporal features with memory-efficient operations."""
+    print("  -> Creating temporal features with memory optimization...")
+    
+    # Feriados de Argentina - handle safely
+    try:
+        if not holiday_dates:  # Only compute if not provided
+            min_year = df_feat["ts_start"].dt.year().min()
+            max_year = df_feat["ts_start"].dt.year().max()
+            ar_holidays = holidays.AR(years=range(min_year, max_year + 1))
+            holiday_dates = [pd.to_datetime(date).date() for date in ar_holidays.keys()]
+    except Exception as e:
+        print(f"  -> Warning: Could not load holidays: {e}. Using empty holidays list.")
+        holiday_dates = []
+    
+    # Step 8a: Basic temporal features
+    print("  -> Adding basic temporal features...")
+    try:
+        df_feat = df_feat.with_columns([
+            pl.col("ts_start").dt.hour().alias("hour"),
+            pl.col("ts_start").dt.weekday().alias("dow"),
+            pl.col("ts_start").dt.month().alias("month"),
+            pl.col("ts_start").dt.day().alias("day"),
+            pl.col("ts_start").dt.date().is_in(holiday_dates).alias("is_holiday_ar").cast(pl.Int8),
+        ])
+    except Exception as e:
+        print(f"  -> Error adding basic temporal features: {e}")
+        # Fallback: add features one by one
+        df_feat = df_feat.with_columns(pl.col("ts_start").dt.hour().alias("hour"))
+        df_feat = df_feat.with_columns(pl.col("ts_start").dt.weekday().alias("dow"))
+        df_feat = df_feat.with_columns(pl.col("ts_start").dt.month().alias("month"))
+        df_feat = df_feat.with_columns(pl.col("ts_start").dt.day().alias("day"))
+        df_feat = df_feat.with_columns(pl.lit(0).alias("is_holiday_ar").cast(pl.Int8))  # Skip holidays if problematic
+    
+    _log_memory_usage("basic temporal")
+    gc.collect()
+    
+    # Step 8b: Cyclic encodings
+    print("  -> Adding cyclic encodings...")
+    try:
+        df_feat = df_feat.with_columns([
+            (pl.col("hour") * 2 * math.pi / 24).sin().alias("sin_hour"),
+            (pl.col("hour") * 2 * math.pi / 24).cos().alias("cos_hour"),
+            (pl.col("dow") * 2 * math.pi / 7).sin().alias("sin_dow"),
+            (pl.col("dow") * 2 * math.pi / 7).cos().alias("cos_dow"),
+            (pl.col("month") * 2 * math.pi / 12).sin().alias("sin_month"),
+            (pl.col("month") * 2 * math.pi / 12).cos().alias("cos_month"),
+        ])
+    except Exception as e:
+        print(f"  -> Error adding cyclic encodings: {e}")
+        # Fallback: add features one by one
+        df_feat = df_feat.with_columns((pl.col("hour") * 2 * math.pi / 24).sin().alias("sin_hour"))
+        df_feat = df_feat.with_columns((pl.col("hour") * 2 * math.pi / 24).cos().alias("cos_hour"))
+        df_feat = df_feat.with_columns((pl.col("dow") * 2 * math.pi / 7).sin().alias("sin_dow"))
+        df_feat = df_feat.with_columns((pl.col("dow") * 2 * math.pi / 7).cos().alias("cos_dow"))
+        df_feat = df_feat.with_columns((pl.col("month") * 2 * math.pi / 12).sin().alias("sin_month"))
+        df_feat = df_feat.with_columns((pl.col("month") * 2 * math.pi / 12).cos().alias("cos_month"))
+    
+    _log_memory_usage("cyclic encodings")
+    gc.collect()
+    
+    # Step 8c: Binary flags
+    print("  -> Adding binary flags...")
+    try:
+        df_feat = df_feat.with_columns([
+            pl.col("dow").is_in([6, 7]).alias("is_weekend").cast(pl.Int8),
+            pl.col("day").is_in([1, 15]).alias("payday_flag").cast(pl.Int8),
+            pl.col("month").is_in([1, 7]).alias("vacation_season").cast(pl.Int8)
+        ])
+    except Exception as e:
+        print(f"  -> Error adding binary flags: {e}")
+        # Fallback: add features one by one
+        df_feat = df_feat.with_columns(pl.col("dow").is_in([6, 7]).alias("is_weekend").cast(pl.Int8))
+        df_feat = df_feat.with_columns(pl.col("day").is_in([1, 15]).alias("payday_flag").cast(pl.Int8))
+        df_feat = df_feat.with_columns(pl.col("month").is_in([1, 7]).alias("vacation_season").cast(pl.Int8))
+    
+    _log_memory_usage("binary flags")
+    gc.collect()
+    
+    # Step 8d: Peak commute hours
+    print("  -> Adding peak commute indicator...")
+    try:
+        df_feat = df_feat.with_columns(
+            peak_commute=((pl.col("hour").is_in([7, 8, 9, 17, 18, 19])) & (pl.col("is_weekend") == 0)).cast(pl.Int8)
+        )
+    except Exception as e:
+        print(f"  -> Error adding peak commute: {e}")
+        # Fallback
+        df_feat = df_feat.with_columns(pl.lit(0).alias("peak_commute").cast(pl.Int8))
+    
+    _log_memory_usage("peak commute")
+    gc.collect()
+    
+    # Memory-efficient parquet writing using streaming
+    print(f"  -> Saving checkpoint using streaming write: {temporal_path}")
+    try:
+        # Use lazy evaluation and streaming sink to reduce memory usage
+        df_feat.lazy().sink_parquet(temporal_path, compression="snappy", row_group_size=10000)
+        print("  -> Successfully saved temporal features checkpoint")
+    except Exception as e:
+        print(f"  -> Error saving with streaming: {e}")
+        # Try with smaller row groups
+        try:
+            df_feat.lazy().sink_parquet(temporal_path, compression="snappy", row_group_size=5000)
+            print("  -> Successfully saved temporal features checkpoint (smaller chunks)")
+        except Exception as e2:
+            print(f"  -> Failed to save checkpoint: {e2}")
+            print("  -> Continuing without checkpoint (will recreate if needed)")
+    
+    return df_feat
+
+
+# =============================================================================
+# PARAMETRIZED FEATURE ENGINEERING PIPELINE
+# =============================================================================
+
+def _load_checkpoint_if_exists(path: str, description: str) -> pl.DataFrame:
+    """Load checkpoint if exists, return None otherwise."""
+    if os.path.exists(path):
+        print(f"  -> Loading {description} from checkpoint: {os.path.basename(path)}")
+        return pl.read_parquet(path)
+    return None
+
+
+def _save_checkpoint(df: pl.DataFrame, path: str, description: str, use_streaming: bool = True):
+    """Save checkpoint with error handling."""
+    try:
+        if use_streaming:
+            df.lazy().sink_parquet(path, compression="snappy", row_group_size=10000)
+        else:
+            df.write_parquet(path)
+        print(f"  -> Saved {description} checkpoint: {os.path.basename(path)}")
+    except Exception as e:
+        if use_streaming:
+            try:
+                df.lazy().sink_parquet(path, compression="snappy", row_group_size=5000)
+                print(f"  -> Saved {description} checkpoint with smaller chunks: {os.path.basename(path)}")
+            except Exception as e2:
+                print(f"  -> Failed to save {description} checkpoint: {e2}")
+        else:
+            print(f"  -> Failed to save {description} checkpoint: {e}")
+
+
+def step_01_convert_to_polars(df_raw: pd.DataFrame, dt_minutes: int, checkpoint_dir: str) -> tuple[pl.DataFrame, list]:
+    """Step 1: Convert to Polars and normalize dates."""
+    print("[Step 1/11] Converting to Polars and normalizing dates...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step01_polars_conversion.parquet")
+    df_cached = _load_checkpoint_if_exists(checkpoint_path, "Polars conversion")
+    
+    if df_cached is not None:
+        # Also need to get bike models
+        bike_models = []
+        if "modelo_bicicleta" in df_cached.columns:
+            bike_models = df_cached["modelo_bicicleta"].unique().to_list()
+        return df_cached, bike_models
+    
+    step_tasks = ["Converting to Polars", "Casting station IDs", "Processing date columns", "Creating time features"]
+    with tqdm(total=len(step_tasks), desc="Step 1", leave=False) as pbar:
+        pbar.set_description("Converting to Polars")
+        df = pl.from_pandas(df_raw)
+        pbar.update(1)
+
+        pbar.set_description("Casting station IDs")
+        df = df.with_columns([
+            pl.col("id_estacion_origen").cast(pl.Int64),
+            pl.col("id_estacion_destino").cast(pl.Int64),
+        ])
+        pbar.update(1)
+
+        pbar.set_description("Processing date columns")
+        for col in ("fecha_origen_recorrido", "fecha_destino_recorrido"):
+            if col in df.columns:
+                if df[col].dtype == pl.String:
+                    df = df.with_columns(pl.col(col).str.to_datetime(time_unit="us"))
+                else:
+                    df = df.with_columns(pl.col(col).cast(pl.Datetime("us")))
+        pbar.update(1)
+
+        pbar.set_description("Creating time features")
+        freq = f"{dt_minutes}m"
+        df = df.with_columns(
+            ts_dep=pl.col("fecha_origen_recorrido").dt.truncate(freq),
+            ts_arr=pl.col("fecha_destino_recorrido").dt.truncate(freq)
+        )
+
+        bike_models = []
+        if "modelo_bicicleta" in df.columns:
+            bike_models = df["modelo_bicicleta"].unique().to_list()
+        pbar.update(1)
+
+    _save_checkpoint(df, checkpoint_path, "Polars conversion")
+    return df, bike_models
+
+
+def step_02_create_departures_table(df: pl.DataFrame, bike_models: list, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 2: Create departures table with lags & user profiles."""
+    print("[Step 2/11] Creating departures table with lags & user profiles...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step02_departures.parquet")
+    dep_cached = _load_checkpoint_if_exists(checkpoint_path, "departures table")
+    
+    if dep_cached is not None:
+        return dep_cached
+
+    step_tasks = ["Building aggregations", "Computing departures", "Calculating proportions", "Adding lag features"]
+    with tqdm(total=len(step_tasks), desc="Step 2", leave=False) as pbar:
+        pbar.set_description("Building aggregations")
+        aggs = [
+            pl.len().alias("dep_last_DT"),
+            pl.mean("duracion_recorrido").alias("trip_dur_mean_last_DT"),
+            (pl.col("genero") == "MALE").sum().alias("male_cnt"),
+            (pl.col("genero") == "FEMALE").sum().alias("female_cnt"),
+            (pl.col("genero") == "OTHER").sum().alias("other_cnt"),
+        ]
+        
+        if "modelo_bicicleta" in df.columns:
+            for model in bike_models:
+                if model:
+                    aggs.append((pl.col("modelo_bicicleta") == model).sum().alias(f"model_{model}_cnt"))
+        pbar.update(1)
+
+        pbar.set_description("Computing departures")
         dep = (
             df.group_by(["id_estacion_origen", "ts_dep"])
-              .agg([
-                  pl.len().alias("dep_last_DT"),
-                  (pl.col("genero") == "MALE").sum().alias("male_cnt")
-              ])
-              .rename({"id_estacion_origen": "station_id",
-                       "ts_dep": "ts_start"})
+              .agg(aggs)
+              .rename({"id_estacion_origen": "station_id", "ts_dep": "ts_start"})
               .sort(["station_id", "ts_start"])
-              .with_columns(
-                  share_male=pl.when(pl.col("dep_last_DT") > 0)
-                               .then(pl.col("male_cnt") / pl.col("dep_last_DT"))
-                               .otherwise(0.0)
-              )
-              .drop("male_cnt")
         )
-        # lags 1…6
+        pbar.update(1)
+
+        pbar.set_description("Calculating proportions")
+        dep = dep.with_columns([
+            pl.when(pl.col("dep_last_DT") > 0)
+              .then(pl.col("male_cnt") / pl.col("dep_last_DT"))
+              .otherwise(0.0).alias("share_male"),
+            pl.when(pl.col("dep_last_DT") > 0)
+              .then(pl.col("female_cnt") / pl.col("dep_last_DT"))
+              .otherwise(0.0).alias("share_female"),
+            pl.when(pl.col("dep_last_DT") > 0)
+              .then(pl.col("other_cnt") / pl.col("dep_last_DT"))
+              .otherwise(0.0).alias("share_other"),
+        ]).drop(["male_cnt", "female_cnt", "other_cnt"])
+        pbar.update(1)
+
+        pbar.set_description("Adding lag features")
         dep = dep.with_columns([
             pl.col("dep_last_DT").shift(k).over("station_id").alias(f"dep_lag_{k}")
             for k in range(1, 7)
         ])
-        print(f"  -> Saving checkpoint: {dep_path}")
-        dep.write_parquet(dep_path)
+        pbar.update(1)
 
-    print(f"  -> Departures table shape: {dep.shape}")
+    _save_checkpoint(dep, checkpoint_path, "departures table")
+    return dep
 
-    # ------------------------------------------------------------------
-    # 2. Tabla de arribos desplazada → target
-    # ------------------------------------------------------------------
-    print("\n[Step 2/9] Creating shifted arrivals table for target...")
-    arr_next_path = os.path.join(checkpoint_dir, "arr_next.parquet")
-    if os.path.exists(arr_next_path):
-        print(f"  -> Loading from checkpoint: {arr_next_path}")
-        arr_next = pl.read_parquet(arr_next_path)
-    else:
+
+def step_03_create_arrivals_table(df: pl.DataFrame, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 3: Create arrivals table with lags."""
+    print("[Step 3/11] Creating arrivals table with lags...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step03_arrivals.parquet")
+    arr_cached = _load_checkpoint_if_exists(checkpoint_path, "arrivals table")
+    
+    if arr_cached is not None:
+        return arr_cached
+
+    step_tasks = ["Computing arrivals", "Adding lag features"]
+    with tqdm(total=len(step_tasks), desc="Step 3", leave=False) as pbar:
+        pbar.set_description("Computing arrivals")
         arr = (
             df.group_by(["id_estacion_destino", "ts_arr"])
-              .agg(pl.len().alias("arrivals"))
-              .rename({"id_estacion_destino": "station_id",
-                       "ts_arr": "ts_start"})
+              .agg(pl.len().alias("arr_last_DT"))
+              .rename({"id_estacion_destino": "station_id", "ts_arr": "ts_start"})
+              .sort(["station_id", "ts_start"])
         )
+        pbar.update(1)
+        
+        pbar.set_description("Adding lag features")
+        arr = arr.with_columns([
+            pl.col("arr_last_DT").shift(k).over("station_id").alias(f"arr_lag_{k}")
+            for k in range(1, 7)
+        ])
+        pbar.update(1)
+
+    _save_checkpoint(arr, checkpoint_path, "arrivals table")
+    return arr
+
+
+def step_04_create_shifted_arrivals(dt_minutes: int, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 4: Create shifted arrivals table for target."""
+    print("[Step 4/11] Creating shifted arrivals table for target...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step04_shifted_arrivals.parquet")
+    arr_next_cached = _load_checkpoint_if_exists(checkpoint_path, "shifted arrivals")
+    
+    if arr_next_cached is not None:
+        return arr_next_cached
+
+    step_tasks = ["Loading arrivals base", "Creating shifted target"]
+    with tqdm(total=len(step_tasks), desc="Step 4", leave=False) as pbar:
+        pbar.set_description("Loading arrivals base")
+        arr_path = os.path.join(checkpoint_dir, "step03_arrivals.parquet")
+        arr_base = pl.read_parquet(arr_path).select(["station_id", "ts_start", "arr_last_DT"])
+        pbar.update(1)
+        
+        pbar.set_description("Creating shifted target")
         arr_next = (
-            arr.with_columns(
+            arr_base.with_columns(
                 (pl.col("ts_start") - timedelta(minutes=dt_minutes)).alias("ts_start")
-            ).rename({"arrivals": "y_arrivals_next_DT"})
+            ).rename({"arr_last_DT": "y_arrivals_next_DT"})
         )
-        print(f"  -> Saving checkpoint: {arr_next_path}")
-        arr_next.write_parquet(arr_next_path)
+        pbar.update(1)
 
-    print(f"  -> Arrivals target table shape: {arr_next.shape}")
+    _save_checkpoint(arr_next, checkpoint_path, "shifted arrivals")
+    return arr_next
 
-    # ------------------------------------------------------------------
-    # 3. Tabla de clima (una fila por ts_start)
-    # ------------------------------------------------------------------
-    print("\n[Step 3/9] Creating weather table...")
-    weather_cols = [c for c in df.columns if (
-        c.endswith("_2m") or c in [
-            "precipitation", "rain", "weather_code", "pressure_msl",
-            "surface_pressure", "cloud_cover", "sunshine_duration",
-            "is_day", "direct_radiation", "wind_speed_10m",
-            "wind_direction_10m"
-        ])]
 
-    if weather_cols:
+def step_05_create_weather_table(df: pl.DataFrame, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 5: Create enhanced weather table."""
+    print("[Step 5/11] Creating enhanced weather table...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step05_weather.parquet")
+    weather_cached = _load_checkpoint_if_exists(checkpoint_path, "weather table")
+    
+    if weather_cached is not None:
+        return weather_cached
+
+    weather_cols = [c for c in df.columns if c.startswith("weather_")]
+    
+    if not weather_cols:
+        return None
+
+    step_tasks = ["Extracting weather data", "Mapping weather codes", "Adding derived features", "Adding lag features"]
+    with tqdm(total=len(step_tasks), desc="Step 5", leave=False) as pbar:
+        pbar.set_description("Extracting weather data")
         weather = (
             df.select(["ts_dep"] + weather_cols)
               .unique(subset=["ts_dep"], keep="first")
               .rename({"ts_dep": "ts_start"})
+              .sort("ts_start")
         )
-        print(f"  -> Weather table shape: {weather.shape}")
-    else:
-        weather = None
-        print("  -> No weather table created.")
+        pbar.update(1)
+        
+        pbar.set_description("Mapping weather codes")
+        def map_weather_code(code):
+            weather_mapping = {
+                0: "Clear", 1: "Clouds", 2: "Clouds", 3: "Clouds",
+                45: "Fog", 48: "Fog",
+                51: "Drizzle", 53: "Drizzle", 55: "Drizzle",
+                56: "Drizzle", 57: "Drizzle",
+                61: "Rain", 63: "Rain", 65: "Rain",
+                66: "Rain", 67: "Rain",
+                71: "Snow", 73: "Snow", 75: "Snow", 77: "Snow",
+                80: "Rain", 81: "Rain", 82: "Rain",
+                85: "Snow", 86: "Snow",
+                95: "Thunderstorm", 96: "Thunderstorm", 99: "Thunderstorm"
+            }
+            return weather_mapping.get(code, "Other")
+        pbar.update(1)
+        
+        pbar.set_description("Adding derived features")
+        weather = weather.with_columns([
+            (pl.col("weather_precipitation") > 0).cast(pl.Int8).alias("precip_flag"),
+            (pl.col("weather_wind_direction_10m") * (math.pi / 180)).sin().alias("wind_dir_sin"),
+            (pl.col("weather_wind_direction_10m") * (math.pi / 180)).cos().alias("wind_dir_cos"),
+            pl.col("weather_weather_code").map_elements(map_weather_code, return_dtype=pl.Utf8).alias("weather_code_cat"),
+        ])
+        pbar.update(1)
+        
+        pbar.set_description("Adding lag features")
+        weather = weather.sort("ts_start").with_columns([
+            pl.col("weather_precipitation").shift(1).alias("precipitation_lag_1h"),
+            pl.col("weather_rain").shift(1).alias("rain_lag_1h")
+        ])
+        pbar.update(1)
 
-    # ------------------------------------------------------------------
-    # 4. Metadatos de estaciones
-    # ------------------------------------------------------------------
-    print("\n[Step 4/9] Creating station metadata table...")
-    stations = (
-        df.select([
-            "id_estacion_origen",
-            "nombre_estacion_origen",
-            "long_estacion_origen",
-            "lat_estacion_origen"
-        ]).unique("id_estacion_origen", keep="first")
-          .rename({
-              "id_estacion_origen": "station_id",
-              "nombre_estacion_origen": "station_name",
-              "long_estacion_origen": "lon",
-              "lat_estacion_origen": "lat"
-          })
-    )
-    print(f"  -> Stations metadata table shape: {stations.shape}")
+    _save_checkpoint(weather, checkpoint_path, "weather table")
+    return weather
 
-    # ------------------------------------------------------------------
-    # 5. Esqueleto estación × tiempo completo
-    # ------------------------------------------------------------------
-    print("\n[Step 5/9] Building full station x time skeleton...")
-    df_feat_path = os.path.join(checkpoint_dir, "df_feat_skeleton.parquet")
-    if os.path.exists(df_feat_path):
-        print(f"  -> Loading from checkpoint: {df_feat_path}")
-        df_feat = pl.read_parquet(df_feat_path)
-    else:
+
+def step_06_create_station_metadata(df: pl.DataFrame, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 6: Create station metadata table."""
+    print("[Step 6/11] Creating station metadata table...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step06_stations.parquet")
+    stations_cached = _load_checkpoint_if_exists(checkpoint_path, "station metadata")
+    
+    if stations_cached is not None:
+        return stations_cached
+
+    with tqdm(total=1, desc="Step 6", leave=False) as pbar:
+        pbar.set_description("Extracting station metadata")
+        stations = (
+            df.select([
+                "id_estacion_origen",
+                "nombre_estacion_origen",
+                "long_estacion_origen",
+                "lat_estacion_origen"
+            ]).unique("id_estacion_origen", keep="first")
+              .rename({
+                  "id_estacion_origen": "station_id",
+                  "nombre_estacion_origen": "station_name",
+                  "long_estacion_origen": "lon",
+                  "lat_estacion_origen": "lat"
+              })
+        )
+        pbar.update(1)
+
+    _save_checkpoint(stations, checkpoint_path, "station metadata")
+    return stations
+
+
+def step_07_build_skeleton(df: pl.DataFrame, stations: pl.DataFrame, dt_minutes: int, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 7: Build full station x time skeleton."""
+    print("[Step 7/11] Building full station x time skeleton...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step07_skeleton.parquet")
+    skeleton_cached = _load_checkpoint_if_exists(checkpoint_path, "skeleton")
+    
+    if skeleton_cached is not None:
+        return skeleton_cached
+
+    step_tasks = ["Computing time range", "Building skeleton"]
+    with tqdm(total=len(step_tasks), desc="Step 7", leave=False) as pbar:
+        pbar.set_description("Computing time range")
         min_ts = df["ts_dep"].min()
         max_ts = df["ts_dep"].max() + timedelta(minutes=dt_minutes)
+        freq = f"{dt_minutes}m"
+        pbar.update(1)
+        
+        pbar.set_description("Building skeleton")
         skeleton = _build_skeleton(stations, min_ts, max_ts, freq)
-        print(f"  -> Full data skeleton shape: {skeleton.shape}")
+        pbar.update(1)
+
+    _save_checkpoint(skeleton, checkpoint_path, "skeleton")
+    return skeleton
+
+
+def step_08_join_base_features(checkpoint_dir: str, has_weather: bool) -> pl.DataFrame:
+    """Step 8: Join data onto skeleton."""
+    print("[Step 8/11] Joining data onto skeleton...")
+    
+    # Check for final checkpoint first
+    final_checkpoint = "step08_joined_with_weather.parquet" if has_weather else "step08_joined_no_weather.parquet"
+    final_path = os.path.join(checkpoint_dir, final_checkpoint)
+    df_feat_cached = _load_checkpoint_if_exists(final_path, "joined features")
+    
+    if df_feat_cached is not None:
+        return df_feat_cached
+
+    # Load required components
+    skeleton = pl.read_parquet(os.path.join(checkpoint_dir, "step07_skeleton.parquet"))
+    dep = pl.read_parquet(os.path.join(checkpoint_dir, "step02_departures.parquet"))
+    arr = pl.read_parquet(os.path.join(checkpoint_dir, "step03_arrivals.parquet"))
+    arr_next = pl.read_parquet(os.path.join(checkpoint_dir, "step04_shifted_arrivals.parquet"))
+
+    step_tasks = ["Joining departures", "Joining arrivals", "Joining targets"]
+    if has_weather:
+        step_tasks.append("Joining weather")
+        
+    with tqdm(total=len(step_tasks), desc="Step 8", leave=False) as pbar:
+        pbar.set_description("Joining departures")
+        df_feat = skeleton.join(dep, on=["station_id", "ts_start"], how="left")
+        pbar.update(1)
+        
+        pbar.set_description("Joining arrivals")
+        df_feat = df_feat.join(arr, on=["station_id", "ts_start"], how="left")
+        pbar.update(1)
+        
+        pbar.set_description("Joining targets")
+        df_feat = df_feat.join(arr_next, on=["station_id", "ts_start"], how="left")
+        pbar.update(1)
+        
+        if has_weather:
+            pbar.set_description("Joining weather")
+            weather = pl.read_parquet(os.path.join(checkpoint_dir, "step05_weather.parquet"))
+            df_feat = df_feat.join(weather, on="ts_start", how="left")
+            pbar.update(1)
+
+    _save_checkpoint(df_feat, final_path, "joined features")
+    return df_feat
+
+
+def step_09_temporal_features(df_feat: pl.DataFrame, holiday_dates: list, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 9: Engineering temporal and calendar features."""
+    print("[Step 9/11] Engineering temporal and calendar features...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step09_temporal.parquet")
+    df_cached = _load_checkpoint_if_exists(checkpoint_path, "temporal features")
+    
+    if df_cached is not None:
+        return df_cached
+
+    df_feat = _create_temporal_features(df_feat, checkpoint_dir, checkpoint_path, holiday_dates)
+    return df_feat
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_full_thread_pool():
+    """Force Polars to use every logical core unless the user explicitly set
+    POLARS_MAX_THREADS. This prevents the 20 %‑CPU bottleneck the user hit."""
+    if os.getenv("POLARS_MAX_THREADS") is None:
+        try:
+            pl.Config.set_global_pool_size(os.cpu_count())
+        except AttributeError:  # older Polars (<0.19) fallback silently
+            pass
+
+_ensure_full_thread_pool()
+
+# ---------------------------------------------------------------------------
+# Step‑10 feature engineering (rolling demand stats)
+# ---------------------------------------------------------------------------
+
+def step_10_rolling_features(
+    df_feat: pl.DataFrame,
+    dt_minutes: int,
+    checkpoint_dir: str,
+) -> pl.DataFrame:
+    """Step 10 – create 24‑h rolling mean / std and ratio for each station.
+
+    Changes vs. the slow original version:
+      • Uses all CPU cores (see helper above).
+      • Keeps execution in **non‑streaming** mode so Polars parallelises.
+      • New columns stored as *Float32* → ½ the RAM.
+      • Writes Parquet with larger row‑groups (250 k) for faster future reads.
+    """
+
+    print("[Step 10/11] Engineering expanded demand history features…")
+
+    checkpoint_path = os.path.join(checkpoint_dir, "step10_rolling.parquet")
 
     # ------------------------------------------------------------------
-    # 6. Joins en orden LEFT para no perder filas
+    # Fast‑path – return cached Parquet if it exists
     # ------------------------------------------------------------------
-    print("\n[Step 6/9] Joining data onto skeleton...")
-    df_feat = (skeleton
-               .join(dep, on=["station_id", "ts_start"], how="left")
-               .join(arr_next, on=["station_id", "ts_start"], how="left"))
-    print(f"  -> Saving checkpoint: {df_feat_path}")
-    df_feat.write_parquet(df_feat_path)
-
-    print(f"  -> Shape after joining departures and arrivals: {df_feat.shape}")
-
-    if weather is not None:
-        df_feat = df_feat.join(weather, on="ts_start", how="left")
-        print(f"  -> Shape after joining weather: {df_feat.shape}")
+    df_cached = _load_checkpoint_if_exists(checkpoint_path, "rolling features")
+    if df_cached is not None:
+        return df_cached
 
     # ------------------------------------------------------------------
-    # 7. Features temporales
+    # Compute fresh features
     # ------------------------------------------------------------------
-    print("\n[Step 7/9] Engineering temporal features...")
-    df_feat = df_feat.with_columns(
-        hour=pl.col("ts_start").dt.hour(),
-        dow=pl.col("ts_start").dt.weekday(),
-        month=pl.col("ts_start").dt.month(),
-    ).with_columns(
-        sin_hour=(pl.col("hour") * 2 * math.pi / 24).sin(),
-        cos_hour=(pl.col("hour") * 2 * math.pi / 24).cos(),
-        is_weekend=(pl.col("dow") >= 6).cast(pl.Int8)
-    )
-    print(f"  -> Shape after adding temporal features: {df_feat.shape}")
+    tasks = [
+        "Computing window size",
+        "Sorting data",
+        "Adding rolling mean/std",
+        "Adding ratio feature",
+        "Writing checkpoint",
+    ]
+
+    with tqdm(total=len(tasks), desc="Step 10", leave=False) as pbar:
+        # 1️⃣ window size (rows that cover 24 h)
+        pbar.set_description(tasks[0])
+        window = (24 * 60) // dt_minutes  # e.g. 48 for 30‑min deltas
+        pbar.update(1)
+
+        # 2️⃣ full sort to ensure window continuity per station
+        pbar.set_description(tasks[1])
+        df_feat = df_feat.sort(["station_id", "ts_start"])
+        pbar.update(1)
+
+        # 3️⃣ rolling mean / std – cast to Float32 first to save RAM
+        pbar.set_description(tasks[2])
+        base_col = pl.col("dep_last_DT").cast(pl.Float32)
+        df_feat = df_feat.with_columns([
+            base_col.rolling_mean(window, min_periods=1)
+                    .over("station_id")
+                    .alias("dep_ma_24h"),
+            base_col.rolling_std(window, min_periods=1)
+                    .over("station_id")
+                    .alias("dep_std_24h"),
+        ])
+        pbar.update(1)
+
+        # 4️⃣ ratio feature (also Float32)
+        pbar.set_description(tasks[3])
+        df_feat = df_feat.with_columns(
+            dep_ratio_DT_24h=(pl.col("dep_last_DT") / (pl.col("dep_ma_24h") + 1.0))
+            .cast(pl.Float32)
+        )
+        pbar.update(1)
+
+        # 5️⃣ write checkpoint – **streaming=False** keeps full parallelism
+        pbar.set_description(tasks[4])
+        (
+            df_feat.lazy()
+                   .sink_parquet(
+                       checkpoint_path,
+                       compression="snappy",
+                       row_group_size=250_000,
+                       streaming=False,
+                   )
+        )
+        pbar.update(1)
 
     # ------------------------------------------------------------------
-    # 8. Fusión con coords + demanda vecina
+    # Housekeeping
     # ------------------------------------------------------------------
-    print("\n[Step 8/9] Calculating neighbor demand...")
-    df_feat_final_path = os.path.join(checkpoint_dir, "df_feat_final.parquet")
-    if os.path.exists(df_feat_final_path):
-        print(f"  -> Loading from checkpoint: {df_feat_final_path}")
-        df_feat = pl.read_parquet(df_feat_final_path)
+    try:
+        _log_memory_usage("rolling features")
+    except NameError:
+        pass  # caller may not have the helper; ignore
+
+    gc.collect()
+    return df_feat
+
+
+def _calculate_safe_neighbor_limit(n_stations: int, requested_neighbors: int) -> int:
+    """Calculate a safe number of neighbors based on dataset size to prevent memory issues."""
+    # Base limits
+    max_absolute_neighbors = 10
+    
+    # For very large datasets, be more conservative
+    if n_stations > 2000:
+        max_safe = min(3, requested_neighbors)
+    elif n_stations > 1000:
+        max_safe = min(5, requested_neighbors)
+    elif n_stations > 500:
+        max_safe = min(8, requested_neighbors)
     else:
+        max_safe = min(max_absolute_neighbors, requested_neighbors)
+    
+    # Final safety check based on total pairs
+    total_pairs = n_stations * max_safe
+    if total_pairs > 150000:  # Conservative threshold
+        max_safe = max(1, 150000 // n_stations)
+        
+    return max_safe
+
+
+def step_11_neighbor_features(df_feat: pl.DataFrame, n_neighbors: int, checkpoint_dir: str, bike_models: list) -> pl.DataFrame:
+    """Step 11: Calculate neighbor demand and final cleanup."""
+    print("[Step 11/11] Calculating neighbor demand and final cleanup...")
+    
+    checkpoint_path = os.path.join(checkpoint_dir, "step11_final.parquet")
+    df_cached = _load_checkpoint_if_exists(checkpoint_path, "final features")
+    
+    if df_cached is not None:
+        return df_cached
+
+    # Log initial memory usage
+    _log_memory_usage("step 11 start")
+
+    # Load stations for neighbor calculation
+    stations = pl.read_parquet(os.path.join(checkpoint_dir, "step06_stations.parquet"))
+    
+    step_tasks = ["Adding coordinates", "Computing neighbors", "Calculating neighbor demand", "Adding lag features", "Final cleanup"]
+    with tqdm(total=len(step_tasks), desc="Step 11", leave=False) as pbar:
+        pbar.set_description("Adding coordinates")
         df_feat = df_feat.join(stations.select(["station_id", "lat", "lon"]),
                                on="station_id", how="left")
+        pbar.update(1)
+        _log_memory_usage("after coordinates join")
 
         if n_neighbors > 0 and stations.height > 0:
+            pbar.set_description("Computing neighbors")
             coords_pd = stations.drop_nulls(subset=["lat", "lon"]).to_pandas()
-            print(f"  -> Found {len(coords_pd)} stations with coordinates for neighbor calculation.")
+            
+            # Calculate safe number of neighbors based on dataset size
+            max_safe_neighbors = _calculate_safe_neighbor_limit(len(coords_pd), n_neighbors)
+            if max_safe_neighbors < n_neighbors:
+                print(f"  -> Dataset has {len(coords_pd)} stations. Limiting neighbors from {n_neighbors} to {max_safe_neighbors} to prevent memory issues.")
 
-            nbrs = NearestNeighbors(
-                n_neighbors=min(n_neighbors + 1, len(coords_pd)),
-                algorithm="ball_tree",
-                metric=lambda a, b: _haversine_np(a[1], a[0], b[1], b[0])
-            )
-            nbrs.fit(coords_pd[["lat", "lon"]].to_numpy())
-            _, ind = nbrs.kneighbors(coords_pd[["lat", "lon"]].to_numpy())
+            try:
+                nbrs = NearestNeighbors(
+                    n_neighbors=min(max_safe_neighbors + 1, len(coords_pd)),
+                    algorithm="ball_tree",
+                    metric=lambda a, b: _haversine_np(a[1], a[0], b[1], b[0])
+                )
+                nbrs.fit(coords_pd[["lat", "lon"]].to_numpy())
+                _, ind = nbrs.kneighbors(coords_pd[["lat", "lon"]].to_numpy())
 
-            neighbor_map = pl.DataFrame({
-                "station_id": np.repeat(coords_pd["station_id"].values,
-                                        ind.shape[1] - 1),
-                "neighbor_id": coords_pd["station_id"].values[ind[:, 1:].ravel()]
-            })
+                # Create neighbor mapping with smaller chunks to avoid memory issues
+                neighbor_map = pl.DataFrame({
+                    "station_id": np.repeat(coords_pd["station_id"].values,
+                                            ind.shape[1] - 1),
+                    "neighbor_id": coords_pd["station_id"].values[ind[:, 1:].ravel()]
+                })
+                
+                _log_memory_usage("after neighbor computation")
+                pbar.update(1)
 
-            neighbor_dep = (
-                df_feat.select(["ts_start", "station_id", "dep_last_DT"])
-                       .rename({"station_id": "neighbor_id",
-                                "dep_last_DT": "neighbor_dep"})
-            )
+                pbar.set_description("Calculating neighbor demand")
+                
+                # Process neighbor demand in smaller chunks to avoid memory explosion
+                neighbor_dep = (
+                    df_feat.select(["ts_start", "station_id", "dep_last_DT"])
+                           .rename({"station_id": "neighbor_id",
+                                    "dep_last_DT": "neighbor_dep"})
+                )
+                
+                # Process join in chunks if the neighbor_map is very large
+                chunk_size = 50000  # Process 50k neighbor relationships at a time
+                if neighbor_map.height > chunk_size:
+                    print(f"  -> Processing {neighbor_map.height} neighbor relationships in chunks of {chunk_size}")
+                    
+                    near_sum_chunks = []
+                    for i in range(0, neighbor_map.height, chunk_size):
+                        chunk_end = min(i + chunk_size, neighbor_map.height)
+                        neighbor_chunk = neighbor_map.slice(i, chunk_end - i)
+                        
+                        chunk_sum = (
+                            neighbor_chunk.join(neighbor_dep, on="neighbor_id", how="inner")
+                                         .group_by(["station_id", "ts_start"])
+                                        .agg(pl.sum("neighbor_dep").alias("near_dep_sum_DT_chunk"))
+                        )
+                        near_sum_chunks.append(chunk_sum)
+                        
+                        # Force garbage collection between chunks
+                        gc.collect()
+                    
+                    # Combine all chunks
+                    if near_sum_chunks:
+                        near_sum_combined = pl.concat(near_sum_chunks)
+                        near_sum = (
+                            near_sum_combined.group_by(["station_id", "ts_start"])
+                                           .agg(pl.sum("near_dep_sum_DT_chunk").alias("near_dep_sum_DT"))
+                        )
+                    else:
+                        # Create empty result if no chunks
+                        near_sum = pl.DataFrame({
+                            "station_id": [],
+                            "ts_start": [],
+                            "near_dep_sum_DT": []
+                        }).cast({"station_id": pl.Int64, "ts_start": df_feat["ts_start"].dtype, "near_dep_sum_DT": pl.Float64})
+                else:
+                    # Process normally for smaller datasets
+                    near_sum = (
+                        neighbor_map.join(neighbor_dep, on="neighbor_id", how="inner")
+                                     .group_by(["station_id", "ts_start"])
+                                    .agg(pl.sum("neighbor_dep").alias("near_dep_sum_DT"))
+                    )
 
-            near_sum = (
-                neighbor_map.join(neighbor_dep, on="neighbor_id", how="inner")
-                             .group_by(["station_id", "ts_start"])
-                            .agg(pl.sum("neighbor_dep").alias("near_dep_sum_DT"))
-            )
+                df_feat = df_feat.join(near_sum, on=["station_id", "ts_start"], how="left")
+                _log_memory_usage("after neighbor demand calculation")
+                pbar.update(1)
+                
+                # Clean up intermediate objects
+                del neighbor_map, neighbor_dep, near_sum
+                gc.collect()
+                
+            except Exception as e:
+                print(f"  -> Error in neighbor calculation: {e}")
+                print("  -> Continuing without neighbor features...")
+                # Add empty neighbor column
+                df_feat = df_feat.with_columns(pl.lit(None).alias("near_dep_sum_DT").cast(pl.Float64))
+                pbar.update(1)
+        else:
+            # Add empty neighbor column when no neighbors requested
+            df_feat = df_feat.with_columns(pl.lit(None).alias("near_dep_sum_DT").cast(pl.Float64))
+            pbar.update(2)  # Skip neighbor computation steps
+        
+        pbar.set_description("Adding lag features")
+        df_feat = df_feat.with_columns(
+            pl.col("near_dep_sum_DT").shift(1).over("station_id").alias("near_dep_lag_1")
+        )
+        pbar.update(1)
+        _log_memory_usage("after lag features")
 
-            df_feat = df_feat.join(near_sum, on=["station_id", "ts_start"], how="left")
+        pbar.set_description("Final cleanup")
+        lag_cols = [c for c in df_feat.columns if c.startswith("dep_lag_") or c.startswith("arr_lag_")]
+        fill_zero = [
+            "dep_last_DT", "y_arrivals_next_DT", "near_dep_sum_DT", 
+            "arr_last_DT", "near_dep_lag_1"
+        ] + lag_cols
+        
+        if bike_models:
+            fill_zero.extend([f"model_{model}_cnt" for model in bike_models if model])
 
-        # ------------------------------------------------------------------
-        # 9. Relleno de nulos y limpieza final
-        # ------------------------------------------------------------------
-        print("\n[Step 9/9] Filling nulls and final cleanup...")
-        lag_cols = [c for c in df_feat.columns if c.startswith("dep_lag_")]
-        fill_zero = ["dep_last_DT", "y_arrivals_next_DT", "near_dep_sum_DT"] + lag_cols
         existing_fill = [c for c in fill_zero if c in df_feat.columns]
-        df_feat = df_feat.with_columns([pl.col(existing_fill).fill_null(0)])
+        df_feat = df_feat.with_columns([pl.col(c).fill_null(0) for c in existing_fill])
 
-        # clima: rellenar con forward-fill por columna (opcional), o media
-        if weather_cols:
+        # Weather features cleanup if they exist
+        weather_cols_to_fill = [c for c in df_feat.columns if c.startswith("weather_") and c != "weather_code_cat"]
+        if weather_cols_to_fill:
             df_feat = df_feat.sort("ts_start")
             df_feat = df_feat.with_columns([
-                pl.col(c).fill_null(strategy="forward") for c in weather_cols
+                pl.col(c).fill_null(strategy="forward") for c in weather_cols_to_fill
             ])
+            for col in weather_cols_to_fill:
+                 if df_feat[col].is_null().any():
+                     mean_val = df_feat[col].mean()
+                     df_feat = df_feat.with_columns(pl.col(col).fill_null(mean_val))
+        
+        # Rellenar rolling window NaNs
+        for col in ["dep_ma_24h", "dep_std_24h", "dep_ratio_DT_24h"]:
+            if col in df_feat.columns:
+                df_feat = df_feat.with_columns(pl.col(col).fill_null(0))
 
-        # descartar columnas gps si no se usan en el modelo
-        df_feat = df_feat.drop(["lon", "lat"], strict=False)
+        # One-hot encode weather categories
+        if "weather_code_cat" in df_feat.columns:
+             df_feat = df_feat.to_dummies(columns=["weather_code_cat"])
 
-        print(f"  -> Saving final checkpoint: {df_feat_final_path}")
-        df_feat.write_parquet(df_feat_final_path)
+        # Drop auxiliary columns
+        cols_to_drop = ["lon", "lat", "hour", "day", "month", "dow"]
+        existing_cols_to_drop = [c for c in cols_to_drop if c in df_feat.columns]
+        df_feat = df_feat.drop(existing_cols_to_drop)
+        pbar.update(1)
+        _log_memory_usage("after final cleanup")
 
-    print("✅  Feature-engineering finalizado -> shape:", df_feat.shape)
+    # Force garbage collection before saving
+    gc.collect()
+    _save_checkpoint(df_feat, checkpoint_path, "final features", use_streaming=True)
+    _log_memory_usage("step 11 complete")
+    
+    return df_feat
+
+
+def engineer_ecobici_features(
+    df_raw: pd.DataFrame,
+    dt_minutes: int = 30,
+    n_neighbors: int = 5,
+    clear_checkpoints: bool = False
+) -> pd.DataFrame:
+    """
+    Parametrized pipeline for feature-engineering optimized with Polars.
+    
+    Each step is now a separate function with proper checkpoint management
+    that only loads what's needed for that specific step.
+
+    Parameters
+    ----------
+    df_raw : pd.DataFrame
+        Original trips + weather data
+    dt_minutes : int, default 30
+        Time window granularity in minutes
+    n_neighbors : int, default 5
+        Number of nearest neighbor stations for demand features
+    clear_checkpoints : bool, default False
+        Whether to clear all checkpoints and start fresh
+
+    Returns
+    -------
+    pd.DataFrame
+        Final feature dataset
+    """
+    print("🚴‍♂️  Parametrized Feature Engineering Pipeline (11 steps)")
+    print("=" * 60)
+
+    # Setup checkpointing
+    checkpoint_dir = "feature_checkpoints"
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    
+    if clear_checkpoints:
+        clear_feature_checkpoints(checkpoint_dir)
+    
+    print(f"  Checkpoints directory: '{checkpoint_dir}/'")
+    print(f"  Input raw data shape: {df_raw.shape}")
+    _log_memory_usage("initialization")
+
+    # Check for final result first
+    final_result_path = os.path.join(checkpoint_dir, "df_feat_final_result.parquet")
+    if os.path.exists(final_result_path):
+        print(f"  🎉 Final result already exists! Loading from: {final_result_path}")
+        try:
+            df_final = pl.read_parquet(final_result_path)
+            print(f"  ✅ Successfully loaded final result with shape: {df_final.shape}")
+            return df_final.to_pandas(use_pyarrow_extension_array=True)
+        except Exception as e:
+            print(f"  ⚠️ Error loading final result: {e}. Will recreate...")
+            os.remove(final_result_path)
+
+    # Execute pipeline steps
+    df, bike_models = step_01_convert_to_polars(df_raw, dt_minutes, checkpoint_dir)
+    
+    # These steps only need the main dataframe
+    step_02_create_departures_table(df, bike_models, checkpoint_dir)
+    step_03_create_arrivals_table(df, checkpoint_dir)
+    step_04_create_shifted_arrivals(dt_minutes, checkpoint_dir)
+    
+    weather = step_05_create_weather_table(df, checkpoint_dir)
+    has_weather = weather is not None
+    
+    stations = step_06_create_station_metadata(df, checkpoint_dir)
+    step_07_build_skeleton(df, stations, dt_minutes, checkpoint_dir)
+    
+    # Clear main dataframe from memory after extracting what we need
+    del df
+    gc.collect()
+    _log_memory_usage("after clearing main dataframe")
+    
+    # Continue with feature assembly
+    df_feat = step_08_join_base_features(checkpoint_dir, has_weather)
+    df_feat = step_09_temporal_features(df_feat, holiday_dates=[], checkpoint_dir=checkpoint_dir)
+    df_feat = step_10_rolling_features(df_feat, dt_minutes, checkpoint_dir)
+    df_feat = step_11_neighbor_features(df_feat, n_neighbors, checkpoint_dir, bike_models)
+    
+    # Save final result
+    try:
+        df_feat.lazy().sink_parquet(final_result_path, compression="snappy", row_group_size=10000)
+        print(f"  ✅ Saved final result: {final_result_path}")
+    except Exception as e:
+        print(f"  ⚠️ Could not save final result: {e}")
+    
+    return df_feat.to_pandas(use_pyarrow_extension_array=True)
+
+
+def pivot_features_for_global_model(
+    df_long: pd.DataFrame,
+    checkpoint_dir: str = "feature_checkpoints"
+) -> None:
+    """
+    Transforms the long-format feature DataFrame into a wide format suitable for a
+    global prediction model and saves the results as Parquet files.
+
+    In this format, each row represents a single timestamp. The feature columns
+    contain the station-specific features for all stations, concatenated in a
+    consistent order, followed by the global features for that timestamp. The
+    target variable is similarly a single row containing the concatenated
+    arrival predictions for all stations.
+
+    This structure allows a model to learn from the state of the entire system
+    at time `t` to predict the entire system's state at time `t+1`.
+
+    The final `X_wide.parquet` and `y_wide.parquet` files are saved in the
+    `checkpoint_dir`.
+
+    Args:
+        df_long (pd.DataFrame):
+            The output from `engineer_ecobici_features`. It must be in a long
+            format with 'ts_start' and 'station_id' columns.
+        checkpoint_dir (str):
+            Directory to save intermediate and final Parquet files.
+    """
+    print("🔄 Pivoting data to wide format for global model...")
+
+    # --- File Paths ---
+    x_wide_path = os.path.join(checkpoint_dir, "X_wide.parquet")
+    y_wide_path = os.path.join(checkpoint_dir, "y_wide.parquet")
+
+    if os.path.exists(x_wide_path) and os.path.exists(y_wide_path):
+        print(f"  -> Wide data already exists in '{checkpoint_dir}/'. Skipping.")
+        print("✅ Pivoting complete (loaded from cache).")
+        return
+
+    df = pl.from_pandas(df_long)
+    df = df.sort("ts_start", "station_id")
+
+    # --- Column Identification ---
+    print("\n[Step 1/3] Identifying columns...")
+    target_col = "y_arrivals_next_DT"
+    id_cols = ["ts_start", "station_id"]
+
+    station_specific_patterns = [
+        "dep_", "arr_", "share_", "trip_", "model_", "y_arrivals", "near_dep"
+    ]
+
+    station_specific_cols = [
+        c for c in df.columns
+        if any(pat in c for pat in station_specific_patterns) and c != target_col
+    ]
+
+    global_cols = [
+        c for c in df.columns
+        if c not in station_specific_cols + id_cols + [target_col]
+    ]
+
+    print(f"  -> Identified {len(station_specific_cols)} station-specific and {len(global_cols)} global features.")
+
+    # --- Feature (X) Matrix Construction ---
+    print("\n[Step 2/3] Constructing feature (X) matrix...")
+
+    # 1. Pivot station-specific features
+    x_station_wide_path = os.path.join(checkpoint_dir, "X_station_wide.parquet")
+    if os.path.exists(x_station_wide_path):
+        print(f"  -> Loading station-specific features from checkpoint: {x_station_wide_path}")
+        X_station_wide = pl.read_parquet(x_station_wide_path)
+    else:
+        print("  -> Pivoting station-specific features...")
+        X_station_wide = df.pivot(
+            index="ts_start",
+            columns="station_id",
+            values=station_specific_cols
+        )
+        print(f"  -> Saving checkpoint: {x_station_wide_path}")
+        X_station_wide.write_parquet(x_station_wide_path)
+
+    # 2. Get global features (cheap, no checkpoint needed)
+    print("  -> Extracting global features...")
+    X_global = df.group_by("ts_start").first().select(global_cols)
+
+    # 3. Join them together
+    print("  -> Joining global and station-specific features...")
+    X_wide = X_global.join(X_station_wide, on="ts_start", how="inner")
+
+    print(f"  -> Saving final features matrix: {x_wide_path}")
+    X_wide.write_parquet(x_wide_path)
+
+    # --- Target (y) Matrix Construction ---
+    print("\n[Step 3/3] Constructing target (y) matrix...")
+
+    # Pivot target variable
+    y_wide_unaligned_path = os.path.join(checkpoint_dir, "y_wide_unaligned.parquet")
+    if os.path.exists(y_wide_unaligned_path):
+        print(f"  -> Loading unaligned target from checkpoint: {y_wide_unaligned_path}")
+        y_wide = pl.read_parquet(y_wide_unaligned_path)
+    else:
+        print("  -> Pivoting target variable...")
+        y_wide = df.pivot(
+            index="ts_start",
+            columns="station_id",
+            values=target_col
+        )
+        print(f"  -> Saving checkpoint: {y_wide_unaligned_path}")
+        y_wide.write_parquet(y_wide_unaligned_path)
+
+    # Ensure y_wide has the same timestamps and order as X_wide
+    print("  -> Aligning target matrix with feature matrix timestamps...")
+    y_wide = X_wide.select("ts_start").join(y_wide, on="ts_start", how="left")
+
+    print(f"  -> Saving final target matrix: {y_wide_path}")
+    y_wide.write_parquet(y_wide_path)
+
+    print("-" * 50)
+    print(f"  Original long shape: {df.shape}")
+    print(f"  Pivoted X_wide shape: {X_wide.shape} -> saved to X_wide.parquet")
+    print(f"  Pivoted y_wide shape: {y_wide.shape} -> saved to y_wide.parquet")
+    print("✅ Pivoting complete.")
+
+
+def _check_memory_and_abort_if_needed(operation_name: str, max_memory_mb: int = 8000) -> bool:
+    """Check if memory usage is too high and recommend aborting to prevent kernel crash."""
+    try:
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        
+        if memory_mb > max_memory_mb:
+            print(f"  ⚠️ WARNING: Memory usage ({memory_mb:.1f} MB) too high for {operation_name}")
+            print(f"  ⚠️ Recommended: Reduce n_neighbors or use smaller dataset to prevent kernel crash")
+            return True  # Abort recommended
+        return False  # Continue
+    except ImportError:
+        return False  # Continue if psutil not available
+    except Exception:
+        return False  # Continue on any error
