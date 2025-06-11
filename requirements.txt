@@ -3,3 +3,11 @@ polars
 scikit-learn
 pyarrow
 xgboost
+lightgbm
+numpy
+openmeteo-requests
+requests-cache
+retry-requests
+polars
+holidays
+psutil
