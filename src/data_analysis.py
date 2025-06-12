@@ -1,6 +1,6 @@
 from __future__ import annotations
 import pandas as pd
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Union
 import numpy as np
 import polars as pl
 from datetime import timedelta
@@ -1247,7 +1247,7 @@ def engineer_ecobici_features(
 
 
 def pivot_features_for_global_model(
-    df_long: pd.DataFrame,
+    df_long: Union[pd.DataFrame, pl.DataFrame],
     checkpoint_dir: str = "feature_checkpoints"
 ) -> None:
     """
@@ -1267,7 +1267,7 @@ def pivot_features_for_global_model(
     `checkpoint_dir`.
 
     Args:
-        df_long (pd.DataFrame):
+        df_long (Union[pd.DataFrame, pl.DataFrame]):
             The output from `engineer_ecobici_features`. It must be in a long
             format with 'ts_start' and 'station_id' columns.
         checkpoint_dir (str):
@@ -1284,7 +1284,16 @@ def pivot_features_for_global_model(
         print("✅ Pivoting complete (loaded from cache).")
         return
 
-    df = pl.from_pandas(df_long)
+    # Allow either Pandas or Polars input for flexibility
+    if isinstance(df_long, pl.DataFrame):
+        df = df_long.clone()
+    elif isinstance(df_long, pd.DataFrame):
+        df = pl.from_pandas(df_long)
+    else:
+        raise TypeError(
+            "df_long must be a pandas.DataFrame or polars.DataFrame."
+        )
+
     df = df.sort("ts_start", "station_id")
 
     # --- Column Identification ---
@@ -1328,7 +1337,10 @@ def pivot_features_for_global_model(
 
     # 2. Get global features (cheap, no checkpoint needed)
     print("  -> Extracting global features...")
-    X_global = df.group_by("ts_start").first().select(global_cols)
+    # Ensure 'ts_start' is retained for the subsequent join
+    X_global = (
+        df.group_by("ts_start").first().select(["ts_start"] + global_cols)
+    )
 
     # 3. Join them together
     print("  -> Joining global and station-specific features...")
