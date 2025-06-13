@@ -2,6 +2,14 @@
 ecobici_features.csv
 xgb_model.json
 *.csv
+*.pth
+*.pkl
+*.pt
+*.pth.tar
+*.pth.tar.gz
+*.pth.tar.bz2
+*.pth.tar.xz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
