@@ -399,7 +399,7 @@ def load_trips(input_dir: Path, verbose: bool = False) -> pd.DataFrame:
     return trips_df
 
 
-def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: bool = False, load_parquet: bool = False, save_parquet: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load all raw datasets (users and trips) from data/raw directory."""
     if verbose:
         print("INICIANDO CARGA OPTIMIZADA DE DATOS RAW")
@@ -407,23 +407,31 @@ def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: b
     users_dir = raw_dir / "users"
     trips_dir = raw_dir / "trips"
     
-
     if not users_dir.exists():
         raise FileNotFoundError(f"Directorio de usuarios no encontrado: {users_dir}")
     if not trips_dir.exists():
         raise FileNotFoundError(f"Directorio de viajes no encontrado: {trips_dir}")
     
+    # Try to load from parquet if requested
+    if load_parquet and save_dir is not None:
+        users_parquet = save_dir / "users.parquet"
+        trips_parquet = save_dir / "trips.parquet"
+        
+        if users_parquet.exists() and trips_parquet.exists():
+            if verbose:
+                print("Loading from parquet files...")
+            users_df = pd.read_parquet(users_parquet)
+            trips_df = pd.read_parquet(trips_parquet)
+            return users_df, trips_df
+    
     users_df = load_users(users_dir, verbose)
-
     
     if verbose:
         print(f"Total usuarios: {len(users_df):,} registros")
         print(f"Columnas usuarios: {list(users_df.columns)}")
-
         print()
     
     trips_df = load_trips(trips_dir, verbose)
-    
     
     if verbose:
         print(f"Total viajes: {len(trips_df):,} registros")
@@ -452,10 +460,16 @@ def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: b
     if verbose:
         print("Procesamiento de IDs completado")
         print()
- 
+    
+    # Save to parquet if requested
+    if save_parquet and save_dir is not None:
+        if verbose:
+            print("Saving to parquet files...")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        users_df.to_parquet(save_dir / "users.parquet")
+        trips_df.to_parquet(save_dir / "trips.parquet")
     
     return users_df, trips_df
-
 # =============================================================================
 # UTILITY FUNCTIONS FOR STATION ID PROCESSING
 # =============================================================================
