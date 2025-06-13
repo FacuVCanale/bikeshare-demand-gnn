@@ -542,3 +542,41 @@ def process_station_ids_to_3_digits(df, verbose: bool = False):
                 print(f"  Reduction: {original_count - new_count} stations")
     
     return df_processed
+
+
+def analyze_raw_data(df: pd.DataFrame) -> None:
+    """
+    analyze raw data before preprocessing
+    
+    parameters:
+        df: dataframe to analyze
+    """
+    print("ORIGINAL RAW DATA ANALYSIS (BEFORE PREPROCESSING)")
+    print("=" * 60)
+
+    # null values analysis
+    print("Number of null values per column (ORIGINAL):")
+    nan_counts_original = df.isnull().sum()
+    print(nan_counts_original)
+
+    print("\nPercentage of null values per column (ORIGINAL):")
+    nan_percentages_original = (df.isnull().sum() / len(df) * 100).round(2)
+    print(nan_percentages_original)
+
+    # min/max analysis
+    print("\nMin and max values per column:")
+    for col in df.columns:
+        try:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            print(f"\n{col}:")
+            print(f"  Min: {min_val}")
+            print(f"  Max: {max_val}")
+        except:
+            print(f"\n{col}: Cannot calculate min/max (likely non-numeric)")
+
+    # dataset info
+    print(f"\nOriginal dataset shape: {df.shape}")
+    print(f"Original columns: {list(df.columns)}")
+
+    return ['id_recorrido', 'id_estacion_origen', 'id_estacion_destino', 'id_usuario', 'duracion_recorrido', 'genero']

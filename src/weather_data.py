@@ -160,7 +160,7 @@ class WeatherDataCollector:
     
     def get_weather_data(
         self,
-        file_path: str = "../data/raw/meteo/hourly_open_meteo.csv",
+        file_path: str = "../../data/raw/meteo/hourly_open_meteo.csv",
         latitude: float = -34.6131,
         longitude: float = -58.3772,
         start_date: str = "2020-01-01",
@@ -406,3 +406,103 @@ class WeatherDataCollector:
             df['is_comfortable'] = ((df['temperature_2m'] >= 15) & (df['temperature_2m'] <= 25)).astype(int)
         
         return df 
+    
+def analyze_weather_impact(trips_df):
+    """analyze impact of weather conditions on bike usage and trip duration"""
+    results = {}
+    
+    # temperature analysis
+    if 'weather_temperature_2m' in trips_df.columns:
+        temp_ranges = pd.cut(trips_df['weather_temperature_2m'],
+                           bins=[-float('inf'), 10, 15, 20, 25, 30, float('inf')],
+                           labels=['<10°C', '10-15°C', '15-20°C', '20-25°C', '25-30°C', '>30°C'])
+        results['temperature'] = {
+            'usage': temp_ranges.value_counts().sort_index(),
+            'duration': trips_df.groupby(temp_ranges)['duracion_recorrido'].mean() if 'duracion_recorrido' in trips_df.columns else None
+        }
+    
+    # rain analysis
+    if 'weather_is_raining' in trips_df.columns:
+        results['rain'] = {
+            'usage': trips_df['weather_is_raining'].value_counts(),
+            'duration': trips_df.groupby('weather_is_raining')['duracion_recorrido'].mean() if 'duracion_recorrido' in trips_df.columns else None
+        }
+    
+    # wind analysis
+    if 'weather_wind_speed_10m' in trips_df.columns:
+        wind_ranges = pd.cut(trips_df['weather_wind_speed_10m'],
+                           bins=[0, 10, 20, 30, float('inf')],
+                           labels=['calm (0-10)', 'light (10-20)', 'moderate (20-30)', 'strong (>30)'])
+        results['wind'] = {
+            'usage': wind_ranges.value_counts().sort_index()
+        }
+    
+    return results
+
+def print_weather_analysis(results, total_trips):
+    """print formatted weather analysis results"""
+    # temperature impact
+    if 'temperature' in results:
+        print("temperature impact on bike usage:")
+        for temp_range, count in results['temperature']['usage'].items():
+            percentage = count / total_trips * 100
+            print(f"  {temp_range}: {count:,} trips ({percentage:.1f}%)")
+        
+        if results['temperature']['duration'] is not None:
+            print("\naverage trip duration by temperature:")
+            for temp_range, avg_duration in results['temperature']['duration'].items():
+                print(f"  {temp_range}: {avg_duration:.0f} seconds")
+    
+    # rain impact
+    if 'rain' in results:
+        print("\nrain impact on bike usage:")
+        for is_raining, count in results['rain']['usage'].items():
+            condition = "rainy" if is_raining else "dry"
+            percentage = count / total_trips * 100
+            print(f"  {condition} conditions: {count:,} trips ({percentage:.1f}%)")
+        
+        if results['rain']['duration'] is not None:
+            print("\naverage trip duration by rain conditions:")
+            for is_raining, avg_duration in results['rain']['duration'].items():
+                condition = "rainy" if is_raining else "dry"
+                print(f"  {condition}: {avg_duration:.0f} seconds")
+    
+    # wind impact
+    if 'wind' in results:
+        print("\nwind impact on bike usage:")
+        for wind_range, count in results['wind']['usage'].items():
+            percentage = count / total_trips * 100
+            print(f"  {wind_range} km/h: {count:,} trips ({percentage:.1f}%)")
+
+
+def load_and_summarize_weather_data(weather_collector: WeatherDataCollector, weather_file_path: str = "../../data/raw/meteo/hourly_open_meteo.csv"):
+    """
+    load weather data and print summary statistics
+    
+    parameters:
+        weather_collector: weather data collector
+        weather_file_path: path to weather data file
+    
+    returns:
+        weather_df: dataframe with weather data
+        weather_summary: dictionary with weather statistics
+    """
+    # initialize collector and load data
+    weather_df = weather_collector.load_weather_data(weather_file_path)
+    
+    # print basic info
+    print(f"\nweather dataframe shape: {weather_df.shape}")
+    print(f"weather columns: {list(weather_df.columns)}")
+    print(f"date range: {weather_df['date'].min()} to {weather_df['date'].max()}")
+    
+    # get and print summary stats
+    weather_summary = weather_collector.get_weather_summary(weather_df)
+    print(f"\nweather summary:")
+    print(f"total records: {weather_summary['total_records']:,}")
+    print(f"temperature range: {weather_summary['temperature_stats']['min']:.1f}°C to {weather_summary['temperature_stats']['max']:.1f}°C")
+    print(f"mean temperature: {weather_summary['temperature_stats']['mean']:.1f}°C")
+    print(f"total precipitation: {weather_summary['precipitation_stats']['total_mm']:.1f}mm")
+    print(f"rainy hours: {weather_summary['precipitation_stats']['rainy_hours']:,}")
+    print(f"mean wind speed: {weather_summary['wind_stats']['mean_speed_10m']:.1f} km/h")
+    
+    return weather_df, weather_summary
