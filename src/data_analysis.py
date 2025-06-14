@@ -1,8 +1,6 @@
 from __future__ import annotations
-import pandas as pd
-from typing import Tuple, Dict, Union
-import numpy as np
 import polars as pl
+import numpy as np
 from datetime import timedelta
 import math
 from sklearn.neighbors import NearestNeighbors
@@ -16,158 +14,9 @@ from tqdm import tqdm
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
 # =============================================================================
 
-def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
-                          max_date: str = "2024-08-31",
-                          user_date_col: str = 'fecha_alta',
-                          trip_date_col: str = 'fecha_origen_recorrido',
-                          verbose: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    OPTIMIZED version to filter data until a specific maximum date.
-    
-    Optimizations:
-    - Uses vectorized operations for date comparisons
-    - Avoids redundant datetime conversions
-    - More efficient boolean indexing
-    - Batch processing for memory efficiency
-    - Robust date type handling for both string and datetime columns
-    
-    Args:
-        users_df: DataFrame of users
-        trips_df: DataFrame of trips  
-        max_date: Maximum date to include (YYYY-MM-DD format)
-        user_date_col: Date column in users_df
-        trip_date_col: Date column in trips_df
-        verbose: Whether to show information
-        
-    Returns:
-        Tuple with (users_filtered, trips_filtered)
-    """
-    if verbose:
-        print(f"FILTERING DATA UNTIL {max_date}")
-        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
-    
-    max_datetime = pd.to_datetime(max_date)
-    
-    # Optimize users filtering
-    if verbose:
-        print(f"   Filtering users...")
-    
-    # ensure date column is properly converted to datetime
-    users_date_series = users_df[user_date_col]
-    if not pd.api.types.is_datetime64_any_dtype(users_date_series):
-        users_date_series = pd.to_datetime(users_date_series, errors='coerce')
-    
-    # Vectorized filtering - much faster than multiple conditions
-    users_mask = (users_date_series.notna()) & (users_date_series <= max_datetime)
-    users_filtered = users_df[users_mask].copy()
-    
-    # Optimize trips filtering
-    if verbose:
-        print(f"   Filtering trips...")
-    
-    # ensure date column is properly converted to datetime
-    trips_date_series = trips_df[trip_date_col]
-    if not pd.api.types.is_datetime64_any_dtype(trips_date_series):
-        trips_date_series = pd.to_datetime(trips_date_series, errors='coerce')
-    
-    # Vectorized filtering for large dataset
-    trips_mask = (trips_date_series.notna()) & (trips_date_series <= max_datetime)
-    trips_filtered = trips_df[trips_mask].copy()
-    
-    if verbose:
-        users_removed = len(users_df) - len(users_filtered)
-        trips_removed = len(trips_df) - len(trips_filtered)
-        print(f"   Users: {len(users_df):,} → {len(users_filtered):,} (-{users_removed:,})")
-        print(f"   Trips: {len(trips_df):,} → {len(trips_filtered):,} (-{trips_removed:,})")
-    
-    return users_filtered, trips_filtered
-
-
-def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
-                       train_end_date: str, val_end_date: str, test_end_date: str,
-                       user_date_col: str = 'fecha_alta',
-                       trip_date_col: str = 'fecha_origen_recorrido',
-                       verbose: bool = True) -> Dict[str, pd.DataFrame]:
-    """
-    OPTIMIZED version to split users and trips data by temporal ranges.
-    
-    Major optimizations:
-    - Uses vectorized operations for all date comparisons
-    - Batch processing for memory efficiency  
-    - Efficient boolean indexing
-    - Reduced copying operations
-    - Smart memory management for large datasets
-    - Robust date type handling for both string and datetime columns
-    
-    Args:
-        users_df: DataFrame of users (already preprocessed)
-        trips_df: DataFrame of trips (already preprocessed) 
-        train_end_date: End date for training (YYYY-MM-DD format)
-        val_end_date: End date for validation (YYYY-MM-DD format)
-        test_end_date: End date for test (YYYY-MM-DD format)
-        user_date_col: Name of date column in users_df
-        trip_date_col: Name of date column in trips_df
-        verbose: Whether to show split information
-        
-    Returns:
-        Dict with the split DataFrames
-    """
-    
-    if verbose:
-        print("OPTIMIZED TEMPORAL SPLIT")
-        print(f"   Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
-        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
-    
-    # Convert dates once - more efficient
-    train_end = pd.to_datetime(train_end_date)
-    val_end = pd.to_datetime(val_end_date) 
-    test_end = pd.to_datetime(test_end_date)
-    
-    # Get date columns as series and ensure proper datetime conversion
-    user_dates = users_df[user_date_col]
-    if not pd.api.types.is_datetime64_any_dtype(user_dates):
-        user_dates = pd.to_datetime(user_dates, errors='coerce')
-    
-    trip_dates = trips_df[trip_date_col]
-    if not pd.api.types.is_datetime64_any_dtype(trip_dates):
-        trip_dates = pd.to_datetime(trip_dates, errors='coerce')
-    
-    # Vectorized splitting for users - much faster than individual filters
-    if verbose:
-        print("   Splitting users...")
-    
-    users_train_mask = user_dates <= train_end
-    users_val_mask = (user_dates > train_end) & (user_dates <= val_end)
-    users_test_mask = (user_dates > val_end) & (user_dates <= test_end)
-    
-    users_train = users_df[users_train_mask].copy()
-    users_val = users_df[users_val_mask].copy()
-    users_test = users_df[users_test_mask].copy()
-    
-    # Vectorized splitting for trips - optimized for large datasets
-    if verbose:
-        print("   Splitting trips...")
-    
-    trips_train_mask = trip_dates <= train_end
-    trips_val_mask = (trip_dates > train_end) & (trip_dates <= val_end)
-    trips_test_mask = (trip_dates > val_end) & (trip_dates <= test_end)
-    
-    trips_train = trips_df[trips_train_mask].copy()
-    trips_val = trips_df[trips_val_mask].copy()
-    trips_test = trips_df[trips_test_mask].copy()
-    
-    if verbose:
-        print(f"   Users: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
-        print(f"   Trips: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
-    
-    return {
-        'users_train': users_train,
-        'users_val': users_val, 
-        'users_test': users_test,
-        'trips_train': trips_train,
-        'trips_val': trips_val,
-        'trips_test': trips_test
-    }
+# Note: Removed pandas-based temporal split functions
+# These functions are no longer needed as we now assume all data is in Polars format
+# If temporal splitting is needed, it should be done before calling engineer_ecobici_features
 
 
 def _haversine_np(lon1, lat1, lon2, lat2):
@@ -260,7 +109,7 @@ def _create_temporal_features(df_feat: pl.DataFrame, checkpoint_dir: str, tempor
             min_year = df_feat["ts_start"].dt.year().min()
             max_year = df_feat["ts_start"].dt.year().max()
             ar_holidays = holidays.AR(years=range(min_year, max_year + 1))
-            holiday_dates = [pd.to_datetime(date).date() for date in ar_holidays.keys()]
+            holiday_dates = [date for date in ar_holidays.keys()]
     except Exception as e:
         print(f"  -> Warning: Could not load holidays: {e}. Using empty holidays list.")
         holiday_dates = []
@@ -407,12 +256,12 @@ def _save_checkpoint(df: pl.DataFrame, path: str, description: str, use_streamin
             print(f"  -> Failed to save {description} checkpoint: {e}")
 
 
-def step_01_convert_to_polars(df_raw: pd.DataFrame, dt_minutes: int, checkpoint_dir: str) -> tuple[pl.DataFrame, list]:
-    """Step 1: Convert to Polars and normalize dates."""
-    print("[Step 1/11] Converting to Polars and normalizing dates...")
+def step_01_normalize_polars_data(df_raw: pl.DataFrame, dt_minutes: int, checkpoint_dir: str) -> tuple[pl.DataFrame, list]:
+    """Step 1: Normalize Polars data (assumes df_raw is already Polars)."""
+    print("[Step 1/11] Normalizing Polars data...")
     
-    checkpoint_path = os.path.join(checkpoint_dir, "step01_polars_conversion.parquet")
-    df_cached = _load_checkpoint_if_exists(checkpoint_path, "Polars conversion")
+    checkpoint_path = os.path.join(checkpoint_dir, "step01_polars_normalization.parquet")
+    df_cached = _load_checkpoint_if_exists(checkpoint_path, "Polars normalization")
     
     if df_cached is not None:
         # Also need to get bike models
@@ -421,14 +270,10 @@ def step_01_convert_to_polars(df_raw: pd.DataFrame, dt_minutes: int, checkpoint_
             bike_models = df_cached["modelo_bicicleta"].unique().to_list()
         return df_cached, bike_models
     
-    step_tasks = ["Converting to Polars", "Casting station IDs", "Processing date columns", "Creating time features"]
+    step_tasks = ["Casting station IDs", "Processing date columns", "Creating time features"]
     with tqdm(total=len(step_tasks), desc="Step 1", leave=False) as pbar:
-        pbar.set_description("Converting to Polars")
-        df = pl.from_pandas(df_raw)
-        pbar.update(1)
-
         pbar.set_description("Casting station IDs")
-        df = df.with_columns([
+        df = df_raw.with_columns([
             pl.col("id_estacion_origen").cast(pl.Int64),
             pl.col("id_estacion_destino").cast(pl.Int64),
         ])
@@ -455,7 +300,7 @@ def step_01_convert_to_polars(df_raw: pd.DataFrame, dt_minutes: int, checkpoint_
             bike_models = df["modelo_bicicleta"].unique().to_list()
         pbar.update(1)
 
-    _save_checkpoint(df, checkpoint_path, "Polars conversion")
+    _save_checkpoint(df, checkpoint_path, "Polars normalization")
     return df, bike_models
 
 
@@ -1154,12 +999,12 @@ def step_11_neighbor_features(df_feat: pl.DataFrame, n_neighbors: int, checkpoin
 
 
 def engineer_ecobici_features(
-    df_raw: pd.DataFrame,
+    df_raw: pl.DataFrame,
     dt_minutes: int = 30,
     n_neighbors: int = 5,
     clear_checkpoints: bool = False,
     rolling_chunk_size: int = 50
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Parametrized pipeline for feature-engineering optimized with Polars.
     
@@ -1168,8 +1013,8 @@ def engineer_ecobici_features(
 
     Parameters
     ----------
-    df_raw : pd.DataFrame
-        Original trips + weather data
+    df_raw : pl.DataFrame
+        Original trips + weather data (must be Polars DataFrame)
     dt_minutes : int, default 30
         Time window granularity in minutes
     n_neighbors : int, default 5
@@ -1181,9 +1026,16 @@ def engineer_ecobici_features(
 
     Returns
     -------
-    pd.DataFrame
+    pl.DataFrame
         Final feature dataset
     """
+    # Validate input type
+    if not isinstance(df_raw, pl.DataFrame):
+        raise TypeError(
+            f"df_raw must be a polars.DataFrame, got {type(df_raw)}. "
+            f"Convert your data to Polars using pl.from_pandas() or pl.read_csv() before calling this function."
+        )
+    
     print("🚴‍♂️  Parametrized Feature Engineering Pipeline (11 steps)")
     print("=" * 60)
 
@@ -1206,13 +1058,13 @@ def engineer_ecobici_features(
         try:
             df_final = pl.read_parquet(final_result_path)
             print(f"  ✅ Successfully loaded final result with shape: {df_final.shape}")
-            return df_final.to_pandas(use_pyarrow_extension_array=True)
+            return df_final
         except Exception as e:
             print(f"  ⚠️ Error loading final result: {e}. Will recreate...")
             os.remove(final_result_path)
 
     # Execute pipeline steps
-    df, bike_models = step_01_convert_to_polars(df_raw, dt_minutes, checkpoint_dir)
+    df, bike_models = step_01_normalize_polars_data(df_raw, dt_minutes, checkpoint_dir)
     
     # These steps only need the main dataframe
     step_02_create_departures_table(df, bike_models, checkpoint_dir)
@@ -1243,12 +1095,14 @@ def engineer_ecobici_features(
     except Exception as e:
         print(f"  ⚠️ Could not save final result: {e}")
     
-    return df_feat.to_pandas(use_pyarrow_extension_array=True)
+    return df_feat
 
 
 def pivot_features_for_global_model(
-    df_long: Union[pd.DataFrame, pl.DataFrame],
-    checkpoint_dir: str = "feature_checkpoints"
+    df_long: pl.DataFrame,
+    checkpoint_dir: str = "../../data/processed/feature_checkpoints",
+    save_path: str = "../../data/processed",
+    verbose: bool = False
 ) -> None:
     """
     Transforms the long-format feature DataFrame into a wide format suitable for a
@@ -1267,32 +1121,32 @@ def pivot_features_for_global_model(
     `checkpoint_dir`.
 
     Args:
-        df_long (Union[pd.DataFrame, pl.DataFrame]):
+        df_long (pl.DataFrame):
             The output from `engineer_ecobici_features`. It must be in a long
             format with 'ts_start' and 'station_id' columns.
         checkpoint_dir (str):
             Directory to save intermediate and final Parquet files.
     """
-    print("🔄 Pivoting data to wide format for global model...")
+    # Validate input type
+    if not isinstance(df_long, pl.DataFrame):
+        raise TypeError(
+            f"df_long must be a polars.DataFrame, got {type(df_long)}. "
+            f"The output from engineer_ecobici_features is already a Polars DataFrame."
+        )
+
+    print("Pivoting data to wide format for global model...")
 
     # --- File Paths ---
-    x_wide_path = os.path.join(checkpoint_dir, "X_wide.parquet")
-    y_wide_path = os.path.join(checkpoint_dir, "y_wide.parquet")
+    x_wide_path = os.path.join(save_path, "X_wide.parquet")
+    y_wide_path = os.path.join(save_path, "y_wide.parquet")
 
     if os.path.exists(x_wide_path) and os.path.exists(y_wide_path):
         print(f"  -> Wide data already exists in '{checkpoint_dir}/'. Skipping.")
-        print("✅ Pivoting complete (loaded from cache).")
+        print("Pivoting complete (loaded from cache).")
         return
 
-    # Allow either Pandas or Polars input for flexibility
-    if isinstance(df_long, pl.DataFrame):
-        df = df_long.clone()
-    elif isinstance(df_long, pd.DataFrame):
-        df = pl.from_pandas(df_long)
-    else:
-        raise TypeError(
-            "df_long must be a pandas.DataFrame or polars.DataFrame."
-        )
+    # Use the input DataFrame directly since it's already Polars
+    df = df_long.clone()
 
     df = df.sort("ts_start", "station_id")
 
@@ -1315,7 +1169,8 @@ def pivot_features_for_global_model(
         if c not in station_specific_cols + id_cols + [target_col]
     ]
 
-    print(f"  -> Identified {len(station_specific_cols)} station-specific and {len(global_cols)} global features.")
+    if verbose:
+        print(f"  -> Identified {len(station_specific_cols)} station-specific and {len(global_cols)} global features.")
 
     # --- Feature (X) Matrix Construction ---
     print("\n[Step 2/3] Constructing feature (X) matrix...")
@@ -1378,7 +1233,7 @@ def pivot_features_for_global_model(
     print(f"  Original long shape: {df.shape}")
     print(f"  Pivoted X_wide shape: {X_wide.shape} -> saved to X_wide.parquet")
     print(f"  Pivoted y_wide shape: {y_wide.shape} -> saved to y_wide.parquet")
-    print("✅ Pivoting complete.")
+    print("Pivoting complete.")
 
 
 def _check_memory_and_abort_if_needed(operation_name: str, max_memory_mb: int = 8000) -> bool:
