@@ -276,7 +276,7 @@ def add_station_embedding_index(df: pl.DataFrame,
     print("Adding station embedding indices...")
     
     # convert mapping to polars expression
-    mapping_expr = pl.col(station_col).map_dict(station_id_to_idx)
+    mapping_expr = pl.col(station_col).replace(station_id_to_idx, default=None)
     
     df = df.with_columns([
         mapping_expr.alias("station_idx")

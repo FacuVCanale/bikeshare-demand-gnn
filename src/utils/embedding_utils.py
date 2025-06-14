@@ -56,7 +56,7 @@ def add_station_embedding_index(df: pl.DataFrame,
     print("Adding station embedding indices...")
     
     # convert mapping to polars expression
-    mapping_expr = pl.col(station_col).map_dict(station_id_to_idx)
+    mapping_expr = pl.col(station_col).replace(station_id_to_idx, default=None)
     
     df = df.with_columns([
         mapping_expr.alias("station_idx")
@@ -130,7 +130,7 @@ def encode_categorical_features(df: pl.DataFrame,
             
             # add encoded column
             df_encoded = df_encoded.with_columns([
-                pl.col(col).map_dict(value_to_idx).alias(f"{col}_idx")
+                pl.col(col).replace(value_to_idx, default=None).alias(f"{col}_idx")
             ])
             
         else:
@@ -143,7 +143,7 @@ def encode_categorical_features(df: pl.DataFrame,
             }
             
             df_encoded = df_encoded.with_columns([
-                pl.col(col).map_dict(value_to_idx).alias(f"{col}_encoded")
+                pl.col(col).replace(value_to_idx, default=None).alias(f"{col}_encoded")
             ])
     
     print(f"  -> Encoded {len([c for c in categorical_cols if c in df.columns])} categorical features")
