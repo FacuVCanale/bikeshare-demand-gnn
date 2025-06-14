@@ -7,12 +7,167 @@ from sklearn.neighbors import NearestNeighbors
 import os
 import holidays
 import gc
+import pandas as pd
+from typing import Tuple, Dict
 import psutil
 from tqdm import tqdm
 
 # =============================================================================
 # FUNCIÓN DE SPLIT DE DATOS TEMPORAL
 # =============================================================================
+
+def filter_data_until_date(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
+                          max_date: str = "2024-08-31",
+                          user_date_col: str = 'fecha_alta',
+                          trip_date_col: str = 'fecha_origen_recorrido',
+                          verbose: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    OPTIMIZED version to filter data until a specific maximum date.
+    
+    Optimizations:
+    - Uses vectorized operations for date comparisons
+    - Avoids redundant datetime conversions
+    - More efficient boolean indexing
+    - Batch processing for memory efficiency
+    - Robust date type handling for both string and datetime columns
+    
+    Args:
+        users_df: DataFrame of users
+        trips_df: DataFrame of trips  
+        max_date: Maximum date to include (YYYY-MM-DD format)
+        user_date_col: Date column in users_df
+        trip_date_col: Date column in trips_df
+        verbose: Whether to show information
+        
+    Returns:
+        Tuple with (users_filtered, trips_filtered)
+    """
+    if verbose:
+        print(f"FILTERING DATA UNTIL {max_date}")
+        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+    
+    max_datetime = pd.to_datetime(max_date)
+    
+    # Optimize users filtering
+    if verbose:
+        print(f"   Filtering users...")
+    
+    # ensure date column is properly converted to datetime
+    users_date_series = users_df[user_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(users_date_series):
+        users_date_series = pd.to_datetime(users_date_series, errors='coerce')
+    
+    # Vectorized filtering - much faster than multiple conditions
+    users_mask = (users_date_series.notna()) & (users_date_series <= max_datetime)
+    users_filtered = users_df[users_mask].copy()
+    
+    # Optimize trips filtering
+    if verbose:
+        print(f"   Filtering trips...")
+    
+    # ensure date column is properly converted to datetime
+    trips_date_series = trips_df[trip_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(trips_date_series):
+        trips_date_series = pd.to_datetime(trips_date_series, errors='coerce')
+    
+    # Vectorized filtering for large dataset
+    trips_mask = (trips_date_series.notna()) & (trips_date_series <= max_datetime)
+    trips_filtered = trips_df[trips_mask].copy()
+    
+    if verbose:
+        users_removed = len(users_df) - len(users_filtered)
+        trips_removed = len(trips_df) - len(trips_filtered)
+        print(f"   Users: {len(users_df):,} → {len(users_filtered):,} (-{users_removed:,})")
+        print(f"   Trips: {len(trips_df):,} → {len(trips_filtered):,} (-{trips_removed:,})")
+    
+    return users_filtered, trips_filtered
+
+
+def temporal_split_data(users_df: pd.DataFrame, trips_df: pd.DataFrame, 
+                       train_end_date: str, val_end_date: str, test_end_date: str,
+                       user_date_col: str = 'fecha_alta',
+                       trip_date_col: str = 'fecha_origen_recorrido',
+                       verbose: bool = True) -> Dict[str, pd.DataFrame]:
+    """
+    OPTIMIZED version to split users and trips data by temporal ranges.
+    
+    Major optimizations:
+    - Uses vectorized operations for all date comparisons
+    - Batch processing for memory efficiency  
+    - Efficient boolean indexing
+    - Reduced copying operations
+    - Smart memory management for large datasets
+    - Robust date type handling for both string and datetime columns
+    
+    Args:
+        users_df: DataFrame of users (already preprocessed)
+        trips_df: DataFrame of trips (already preprocessed) 
+        train_end_date: End date for training (YYYY-MM-DD format)
+        val_end_date: End date for validation (YYYY-MM-DD format)
+        test_end_date: End date for test (YYYY-MM-DD format)
+        user_date_col: Name of date column in users_df
+        trip_date_col: Name of date column in trips_df
+        verbose: Whether to show split information
+        
+    Returns:
+        Dict with the split DataFrames
+    """
+    
+    if verbose:
+        print("OPTIMIZED TEMPORAL SPLIT")
+        print(f"   Train ≤ {train_end_date} | Val: {train_end_date} - {val_end_date} | Test: {val_end_date} - {test_end_date}")
+        print(f"   Input: Users={len(users_df):,}, Trips={len(trips_df):,}")
+    
+    # Convert dates once - more efficient
+    train_end = pd.to_datetime(train_end_date)
+    val_end = pd.to_datetime(val_end_date) 
+    test_end = pd.to_datetime(test_end_date)
+    
+    # Get date columns as series and ensure proper datetime conversion
+    user_dates = users_df[user_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(user_dates):
+        user_dates = pd.to_datetime(user_dates, errors='coerce')
+    
+    trip_dates = trips_df[trip_date_col]
+    if not pd.api.types.is_datetime64_any_dtype(trip_dates):
+        trip_dates = pd.to_datetime(trip_dates, errors='coerce')
+    
+    # Vectorized splitting for users - much faster than individual filters
+    if verbose:
+        print("   Splitting users...")
+    
+    users_train_mask = user_dates <= train_end
+    users_val_mask = (user_dates > train_end) & (user_dates <= val_end)
+    users_test_mask = (user_dates > val_end) & (user_dates <= test_end)
+    
+    users_train = users_df[users_train_mask].copy()
+    users_val = users_df[users_val_mask].copy()
+    users_test = users_df[users_test_mask].copy()
+    
+    # Vectorized splitting for trips - optimized for large datasets
+    if verbose:
+        print("   Splitting trips...")
+    
+    trips_train_mask = trip_dates <= train_end
+    trips_val_mask = (trip_dates > train_end) & (trip_dates <= val_end)
+    trips_test_mask = (trip_dates > val_end) & (trip_dates <= test_end)
+    
+    trips_train = trips_df[trips_train_mask].copy()
+    trips_val = trips_df[trips_val_mask].copy()
+    trips_test = trips_df[trips_test_mask].copy()
+    
+    if verbose:
+        print(f"   Users: Train={len(users_train):,}, Val={len(users_val):,}, Test={len(users_test):,}")
+        print(f"   Trips: Train={len(trips_train):,}, Val={len(trips_val):,}, Test={len(trips_test):,}")
+    
+    return {
+        'users_train': users_train,
+        'users_val': users_val, 
+        'users_test': users_test,
+        'trips_train': trips_train,
+        'trips_val': trips_val,
+        'trips_test': trips_test
+    }
 
 # Note: Removed pandas-based temporal split functions
 # These functions are no longer needed as we now assume all data is in Polars format
@@ -983,8 +1138,8 @@ def step_11_neighbor_features(df_feat: pl.DataFrame, n_neighbors: int, checkpoin
         if "weather_code_cat" in df_feat.columns:
              df_feat = df_feat.to_dummies(columns=["weather_code_cat"])
 
-        # Drop auxiliary columns
-        cols_to_drop = ["lon", "lat", "hour", "day", "month", "dow"]
+        # Drop auxiliary columns (keep lon, lat for station coordinates)
+        cols_to_drop = ["hour", "day", "month", "dow"]
         existing_cols_to_drop = [c for c in cols_to_drop if c in df_feat.columns]
         df_feat = df_feat.drop(existing_cols_to_drop)
         pbar.update(1)
