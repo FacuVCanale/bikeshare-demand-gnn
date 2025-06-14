@@ -431,33 +431,59 @@ def step_03_create_arrivals_table(df: pl.DataFrame, checkpoint_dir: str) -> pl.D
     return arr
 
 
-def step_04_create_shifted_arrivals(dt_minutes: int, checkpoint_dir: str) -> pl.DataFrame:
-    """Step 4: Create shifted arrivals table for target."""
-    print("[Step 4/11] Creating shifted arrivals table for target...")
+def step_04_create_shifted_targets(dt_minutes: int, checkpoint_dir: str) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Step 4: Create shifted arrivals and departures tables for targets."""
+    print("[Step 4/11] Creating shifted arrivals and departures tables for targets...")
     
-    checkpoint_path = os.path.join(checkpoint_dir, "step04_shifted_arrivals.parquet")
-    arr_next_cached = _load_checkpoint_if_exists(checkpoint_path, "shifted arrivals")
+    # check for arrivals checkpoint
+    arr_checkpoint_path = os.path.join(checkpoint_dir, "step04_shifted_arrivals.parquet")
+    arr_next_cached = _load_checkpoint_if_exists(arr_checkpoint_path, "shifted arrivals")
     
-    if arr_next_cached is not None:
-        return arr_next_cached
+    # check for departures checkpoint
+    dep_checkpoint_path = os.path.join(checkpoint_dir, "step04_shifted_departures.parquet")
+    dep_next_cached = _load_checkpoint_if_exists(dep_checkpoint_path, "shifted departures")
+    
+    if arr_next_cached is not None and dep_next_cached is not None:
+        return arr_next_cached, dep_next_cached
 
-    step_tasks = ["Loading arrivals base", "Creating shifted target"]
+    step_tasks = ["Loading base tables", "Creating shifted arrivals", "Creating shifted departures"]
     with tqdm(total=len(step_tasks), desc="Step 4", leave=False) as pbar:
-        pbar.set_description("Loading arrivals base")
+        pbar.set_description("Loading base tables")
         arr_path = os.path.join(checkpoint_dir, "step03_arrivals.parquet")
+        dep_path = os.path.join(checkpoint_dir, "step02_departures.parquet")
+        
         arr_base = pl.read_parquet(arr_path).select(["station_id", "ts_start", "arr_last_DT"])
+        dep_base = pl.read_parquet(dep_path).select(["station_id", "ts_start", "dep_last_DT"])
         pbar.update(1)
         
-        pbar.set_description("Creating shifted target")
+        pbar.set_description("Creating shifted arrivals")
         arr_next = (
             arr_base.with_columns(
                 (pl.col("ts_start") - timedelta(minutes=dt_minutes)).alias("ts_start")
             ).rename({"arr_last_DT": "y_arrivals_next_DT"})
         )
         pbar.update(1)
+        
+        pbar.set_description("Creating shifted departures")
+        dep_next = (
+            dep_base.with_columns(
+                (pl.col("ts_start") - timedelta(minutes=dt_minutes)).alias("ts_start")
+            ).rename({"dep_last_DT": "y_departures_next_DT"})
+        )
+        pbar.update(1)
 
-    _save_checkpoint(arr_next, checkpoint_path, "shifted arrivals")
-    return arr_next
+    # save checkpoints
+    _save_checkpoint(arr_next, arr_checkpoint_path, "shifted arrivals")
+    _save_checkpoint(dep_next, dep_checkpoint_path, "shifted departures")
+    
+    return arr_next, dep_next
+
+
+# Keep backward compatibility function
+def step_04_create_shifted_arrivals(dt_minutes: int, checkpoint_dir: str) -> pl.DataFrame:
+    """Step 4: Create shifted arrivals table for target (backward compatibility)."""
+    shifted_arrivals, _ = step_04_create_shifted_targets(dt_minutes, checkpoint_dir)
+    return shifted_arrivals
 
 
 def step_05_create_weather_table(df: pl.DataFrame, checkpoint_dir: str) -> Optional[pl.DataFrame]:
@@ -677,7 +703,7 @@ def step_09_temporal_features(df_feat: pl.DataFrame, holiday_dates: list, checkp
     return df_feat
 
 
-def engineer_ecobici_features_optimized(
+def engineer_ecobici_features(
     df_raw: pl.DataFrame,
     dt_minutes: int = 30,
     n_neighbors: int = 5,
@@ -806,8 +832,8 @@ def engineer_ecobici_features_optimized(
     arrivals = step_03_create_arrivals_table(df, checkpoint_dir)
     _log_memory_usage("step 3")
     
-    print("[Step 4/11] Creating shifted arrivals table for target...")
-    shifted_arrivals = step_04_create_shifted_arrivals(dt_minutes, checkpoint_dir)
+    print("[Step 4/11] Creating shifted targets tables (arrivals and departures)...")
+    shifted_arrivals, shifted_departures = step_04_create_shifted_targets(dt_minutes, checkpoint_dir)
     _log_memory_usage("step 4")
     
     print("[Step 5/11] Creating enhanced weather table...")
@@ -856,7 +882,7 @@ def engineer_ecobici_features_optimized(
             df_feat = pl.read_parquet(joined_path)
     else:
         df_feat = _join_features_chunked(
-            df_feat, departures, arrivals, shifted_arrivals, weather, stations,
+            df_feat, departures, arrivals, shifted_arrivals, shifted_departures, weather, stations,
             joined_path, chunk_size_days, max_memory_mb, enable_streaming
         )
     
@@ -1100,6 +1126,7 @@ def _join_features_chunked(
     departures: pl.DataFrame,
     arrivals: pl.DataFrame, 
     shifted_arrivals: pl.DataFrame,
+    shifted_departures: pl.DataFrame,
     weather: Optional[pl.DataFrame],
     stations: pl.DataFrame,
     joined_path: str,
@@ -1176,6 +1203,16 @@ def _join_features_chunked(
             how="left"
         )
         
+        # join shifted departures (target)
+        chunk_feat = chunk_feat.join(
+            shifted_departures.filter(
+                (pl.col("ts_start") >= current_time) & 
+                (pl.col("ts_start") < chunk_end)
+            ),
+            on=["station_id", "ts_start"],
+            how="left"
+        )
+        
         # join weather if available
         if weather is not None:
             chunk_feat = chunk_feat.join(
@@ -1199,6 +1236,7 @@ def _join_features_chunked(
             pl.col("dep_last_DT").fill_null(0),
             pl.col("arr_last_DT").fill_null(0),
             pl.col("y_arrivals_next_DT").fill_null(0),
+            pl.col("y_departures_next_DT").fill_null(0),
             pl.col("trip_dur_mean_last_DT").fill_null(0.0)
         ])
         
@@ -1370,42 +1408,6 @@ def _optimize_data_types(df: pl.DataFrame) -> pl.DataFrame:
     
     return df
 
-
-# Keep the original function for backward compatibility
-def engineer_ecobici_features(
-    df_raw: pl.DataFrame,
-    dt_minutes: int = 30,
-    n_neighbors: int = 5,
-    clear_checkpoints: bool = False,
-    rolling_chunk_size: int = 50
-) -> pl.DataFrame:
-    """
-    Original function - now calls the optimized version with safe defaults.
-    
-    This wrapper maintains backward compatibility while using the new optimized pipeline.
-    """
-    print("⚠️  Using backward compatibility wrapper - calling optimized version...")
-    
-    # Detect available memory and set conservative limits
-    try:
-        import psutil
-        available_memory_mb = psutil.virtual_memory().available / 1024 / 1024
-        max_memory_mb = min(6000, int(available_memory_mb * 0.7))  # Use 70% of available memory, max 6GB
-        print(f"  -> Detected {available_memory_mb:.0f} MB available memory")
-        print(f"  -> Setting memory limit to {max_memory_mb} MB")
-    except:
-        max_memory_mb = 4000  # Conservative default
-        print(f"  -> Could not detect memory, using conservative limit: {max_memory_mb} MB")
-    
-    return engineer_ecobici_features_optimized(
-        df_raw=df_raw,
-        dt_minutes=dt_minutes,
-        n_neighbors=n_neighbors,
-        clear_checkpoints=clear_checkpoints,
-        max_memory_mb=max_memory_mb,
-        chunk_size_days=15,  # Conservative chunk size
-        enable_streaming=True
-    )
 
 
 def _check_memory_and_abort_if_needed(operation_name: str, max_memory_mb: int = 8000) -> bool:

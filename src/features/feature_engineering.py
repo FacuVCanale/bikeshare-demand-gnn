@@ -287,54 +287,189 @@ def add_station_embedding_index(df: pl.DataFrame,
     return df
 
 
-def apply_all_enrichments(df: pl.DataFrame, 
-                         df_raw: Optional[pl.DataFrame] = None,
-                         add_coords: bool = True,
-                         add_fourier: bool = True,
-                         k_values: List[int] = [1, 2]) -> Tuple[pl.DataFrame, Dict[int, int], int]:
+def apply_all_enrichments(df_train: pl.DataFrame, 
+                                   df_val: pl.DataFrame,
+                                   df_test: pl.DataFrame,
+                                   df_raw: Optional[pl.DataFrame] = None,
+                                   add_coords: bool = True,
+                                   add_fourier: bool = True,
+                                   k_values: List[int] = [1, 2]) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, Dict[int, int], int]:
     """
-    Apply all feature enrichments in the correct order.
+    Apply all feature enrichments to train/val/test splits without data leakage.
+    
+    Computes statistics (means, normalization parameters, etc.) only on training data
+    and applies them to validation and test sets to prevent data leakage.
     
     Args:
-        df: Feature dataframe to enrich
+        df_train: Training feature dataframe
+        df_val: Validation feature dataframe  
+        df_test: Test feature dataframe
         df_raw: Raw trips dataframe for coordinate extraction (required if add_coords=True)
         add_coords: Whether to add coordinate features
         add_fourier: Whether to add fourier coordinate features
         k_values: K values for fourier encoding
         
     Returns:
-        Tuple of (enriched_dataframe, station_id_to_idx_mapping, num_stations)
+        Tuple of (train_enriched, val_enriched, test_enriched, station_id_to_idx_mapping, num_stations)
     """
-    print("🚀 APPLYING ALL FEATURE ENRICHMENTS")
-    print("=" * 50)
+    print("🚀 APPLYING ALL FEATURE ENRICHMENTS WITHOUT DATA LEAKAGE")
+    print("=" * 60)
+    print(f"Train: {df_train.shape[0]:,} rows")
+    print(f"Val: {df_val.shape[0]:,} rows") 
+    print(f"Test: {df_test.shape[0]:,} rows")
+    print("=" * 60)
     
-    # start with input dataframe
-    df_enriched = df.clone()
-    
-    # 1. add coordinates if requested and raw data provided
+    # 1. COORDINATES - NO LEAKAGE (station coordinates are fixed)
     if add_coords and df_raw is not None:
-        df_enriched = add_coordinates_to_features(df_enriched, df_raw)
+        print("Adding coordinates to all splits...")
         
-        # normalize coordinates
-        df_enriched = normalize_coordinates(df_enriched)
+        # Create station metadata (this is fixed data, no leakage)
+        meta_df = create_station_metadata_enhanced(df_raw)
         
-        # add fourier features if requested
+        # Add coordinates to all splits
+        df_train = df_train.join(meta_df.select(["station_id", "lat", "lon"]), on="station_id", how="left")
+        df_val = df_val.join(meta_df.select(["station_id", "lat", "lon"]), on="station_id", how="left")
+        df_test = df_test.join(meta_df.select(["station_id", "lat", "lon"]), on="station_id", how="left")
+        
+        # 2. NORMALIZE COORDINATES - COMPUTE STATS ONLY ON TRAIN
+        print("Normalizing coordinates using TRAIN statistics only...")
+        
+        # Compute normalization stats on train only
+        lat_mean = df_train["lat"].mean()
+        lat_std = df_train["lat"].std()
+        lon_mean = df_train["lon"].mean() 
+        lon_std = df_train["lon"].std()
+        
+        print(f"  -> Normalization stats (from TRAIN only):")
+        print(f"     lat: mean={lat_mean:.6f}, std={lat_std:.6f}")
+        print(f"     lon: mean={lon_mean:.6f}, std={lon_std:.6f}")
+        
+        # Apply normalization to all splits using train stats
+        for df_split, split_name in [(df_train, "train"), (df_val, "val"), (df_test, "test")]:
+            locals()[f"df_{split_name}"] = df_split.with_columns([
+                ((pl.col("lat") - lat_mean) / lat_std).alias("lat_z"),
+                ((pl.col("lon") - lon_mean) / lon_std).alias("lon_z")
+            ])
+        
+        # Extract updated dataframes from locals
+        df_train = locals()["df_train"]
+        df_val = locals()["df_val"] 
+        df_test = locals()["df_test"]
+        
+        # 3. ADD FOURIER FEATURES - NO LEAKAGE (deterministic transformation)
         if add_fourier:
-            df_enriched = add_fourier_coordinates(df_enriched, k_values=k_values)
+            print(f"Adding fourier coordinates with k_values={k_values}...")
+            
+            for k in k_values:
+                for df_split, split_name in [(df_train, "train"), (df_val, "val"), (df_test, "test")]:
+                    locals()[f"df_{split_name}"] = df_split.with_columns([
+                        (pl.col("lat") * k * 2 * math.pi).sin().alias(f"lat_sin_{k}"),
+                        (pl.col("lat") * k * 2 * math.pi).cos().alias(f"lat_cos_{k}"),
+                        (pl.col("lon") * k * 2 * math.pi).sin().alias(f"lon_sin_{k}"),
+                        (pl.col("lon") * k * 2 * math.pi).cos().alias(f"lon_cos_{k}")
+                    ])
+            
+            # Extract updated dataframes from locals
+            df_train = locals()["df_train"]
+            df_val = locals()["df_val"]
+            df_test = locals()["df_test"]
+            
+            print(f"  -> Added {len(k_values) * 4} fourier coordinate features")
     
-    # 2. correct trip duration if column exists
-    if "trip_dur_mean_last_DT" in df_enriched.columns:
-        df_enriched = correct_trip_duration_mean(df_enriched)
+    # 4. CORRECT TRIP DURATION - COMPUTE REPLACEMENT VALUE FROM TRAIN ONLY
+    if "trip_dur_mean_last_DT" in df_train.columns:
+        print("Correcting trip duration using TRAIN statistics only...")
+        
+        # Compute replacement value from train only
+        train_mean_duration = df_train.filter(pl.col("trip_dur_mean_last_DT") > 0)["trip_dur_mean_last_DT"].mean()
+        
+        if train_mean_duration is not None:
+            print(f"  -> Using train mean duration: {train_mean_duration:.1f} seconds")
+            
+            # Apply correction to all splits using train-derived value
+            df_train = df_train.with_columns([
+                pl.col("trip_dur_mean_last_DT").fill_null(train_mean_duration),
+                pl.col("trip_dur_mean_last_DT").is_null().alias("dur_is_null")
+            ])
+            
+            df_val = df_val.with_columns([
+                pl.col("trip_dur_mean_last_DT").fill_null(train_mean_duration),
+                pl.col("trip_dur_mean_last_DT").is_null().alias("dur_is_null")
+            ])
+            
+            df_test = df_test.with_columns([
+                pl.col("trip_dur_mean_last_DT").fill_null(train_mean_duration),
+                pl.col("trip_dur_mean_last_DT").is_null().alias("dur_is_null")
+            ])
+            
+            corrected_train = df_train["dur_is_null"].sum()
+            corrected_val = df_val["dur_is_null"].sum()
+            corrected_test = df_test["dur_is_null"].sum()
+            
+            print(f"  -> Corrected nulls: Train={corrected_train:,}, Val={corrected_val:,}, Test={corrected_test:,}")
+        else:
+            print("  -> No valid durations found in train, adding null flags only")
+            for df_split, split_name in [(df_train, "train"), (df_val, "val"), (df_test, "test")]:
+                locals()[f"df_{split_name}"] = df_split.with_columns([
+                    pl.col("trip_dur_mean_last_DT").is_null().alias("dur_is_null")
+                ])
+            df_train = locals()["df_train"]
+            df_val = locals()["df_val"]
+            df_test = locals()["df_test"]
     
-    # 3. create occurrence flags if relevant columns exist
-    if "dep_last_DT" in df_enriched.columns and "y_arrivals_next_DT" in df_enriched.columns:
-        df_enriched = create_occurrence_flags(df_enriched)
+    # 5. CREATE OCCURRENCE FLAGS - NO LEAKAGE (simple binary flags)
+    if "dep_last_DT" in df_train.columns and "y_arrivals_next_DT" in df_train.columns:
+        print("Creating occurrence flags...")
+        
+        for df_split, split_name in [(df_train, "train"), (df_val, "val"), (df_test, "test")]:
+            locals()[f"df_{split_name}"] = df_split.with_columns([
+                (pl.col("dep_last_DT") > 0).alias("dep_occurred"),
+                (pl.col("arr_last_DT") > 0).alias("arr_occurred")
+            ])
+        
+        df_train = locals()["df_train"]
+        df_val = locals()["df_val"]
+        df_test = locals()["df_test"]
+        
+        print(f"  -> Departures occurred: Train={df_train['dep_occurred'].sum():,}, Val={df_val['dep_occurred'].sum():,}, Test={df_test['dep_occurred'].sum():,}")
+        print(f"  -> Arrivals occurred: Train={df_train['arr_occurred'].sum():,}, Val={df_val['arr_occurred'].sum():,}, Test={df_test['arr_occurred'].sum():,}")
     
-    # 4. create station embeddings mapping
-    station_id_to_idx, num_stations = create_station_embeddings_mapping(df_enriched)
-    df_enriched = add_station_embedding_index(df_enriched, station_id_to_idx)
+    # 6. CREATE STATION EMBEDDINGS - NO LEAKAGE (uses all station IDs, but creates consistent mapping)
+    print("Creating station embeddings mapping...")
     
-    print("=" * 50)
-    print(f"✅ ENRICHMENT COMPLETE: {df.height:,} → {df_enriched.height:,} rows, {len(df.columns)} → {len(df_enriched.columns)} columns")
+    # Collect all unique station IDs from all splits (this is okay, it's just creating a consistent mapping)
+    all_station_ids = pl.concat([
+        df_train.select("station_id"),
+        df_val.select("station_id"), 
+        df_test.select("station_id")
+    ]).unique().sort("station_id")["station_id"].to_list()
     
-    return df_enriched, station_id_to_idx, num_stations 
+    station_id_to_idx = {station_id: idx for idx, station_id in enumerate(all_station_ids)}
+    num_stations = len(all_station_ids)
+    
+    print(f"  -> Created mapping for {num_stations} unique stations")
+    
+    # Add embedding indices to all splits
+    for df_split, split_name in [(df_train, "train"), (df_val, "val"), (df_test, "test")]:
+        locals()[f"df_{split_name}"] = df_split.with_columns([
+            pl.col("station_id").map_elements(lambda x: station_id_to_idx[x], return_dtype=pl.Int32).alias("station_idx")
+        ])
+    
+    df_train = locals()["df_train"]
+    df_val = locals()["df_val"]
+    df_test = locals()["df_test"]
+    
+    # Calculate new column count (simplified approach)
+    base_cols = ["lat", "lon", "lat_z", "lon_z", "dur_is_null", "dep_occurred", "arr_occurred", "station_idx"]
+    fourier_cols = [f"{coord}_{trig}_{k}" for k in k_values for coord in ["lat", "lon"] for trig in ["sin", "cos"]]
+    new_cols = base_cols + fourier_cols
+    
+    print("=" * 60)
+    print(f"✅ ENRICHMENT COMPLETE (NO DATA LEAKAGE):")
+    print(f"   Train: {df_train.shape}")
+    print(f"   Val: {df_val.shape}")
+    print(f"   Test: {df_test.shape}")
+    print(f"   Stations: {num_stations}")
+    print(f"   Statistics computed ONLY on training data")
+    
+    return df_train, df_val, df_test, station_id_to_idx, num_stations 
