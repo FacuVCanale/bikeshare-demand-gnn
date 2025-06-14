@@ -1,12 +1,12 @@
 """
-Feature enrichment and cleaning functions for EcoBici data.
+Feature engineering functions for EcoBici data.
 
 This module contains functions for:
-- Adding lat/lon coordinates to stations
-- Normalizing coordinates  
-- Correcting trip_dur_mean_last_DT
-- Creating occurrence flags
-- Station embeddings
+- Station metadata enhancement
+- Coordinate normalization and spatial features
+- Trip duration corrections
+- Occurrence flags and embeddings
+- Feature enrichment pipelines
 """
 
 import polars as pl
@@ -27,7 +27,7 @@ def create_station_metadata_enhanced(df: pl.DataFrame) -> pl.DataFrame:
     """
     print("Creating enhanced station metadata...")
     
-    # Extract unique station information from origin stations
+    # extract unique station information from origin stations
     origin_meta = (
         df.select([
             "id_estacion_origen",
@@ -44,7 +44,7 @@ def create_station_metadata_enhanced(df: pl.DataFrame) -> pl.DataFrame:
         })
     )
     
-    # Extract unique station information from destination stations
+    # extract unique station information from destination stations
     dest_meta = (
         df.select([
             "id_estacion_destino",
@@ -61,7 +61,7 @@ def create_station_metadata_enhanced(df: pl.DataFrame) -> pl.DataFrame:
         })
     )
     
-    # Combine and deduplicate
+    # combine and deduplicate
     meta_df = (
         pl.concat([origin_meta, dest_meta])
         .unique("station_id", keep="first")
@@ -86,17 +86,17 @@ def add_coordinates_to_features(df_feat: pl.DataFrame, df_raw: pl.DataFrame) -> 
     """
     print("Adding coordinates to feature dataframe...")
     
-    # Create station metadata
+    # create station metadata
     meta_df = create_station_metadata_enhanced(df_raw)
     
-    # Join coordinates to feature dataframe
+    # join coordinates to feature dataframe
     df_with_coords = df_feat.join(
         meta_df.select(["station_id", "lat", "lon"]), 
         on="station_id", 
         how="left"
     )
     
-    # Check for missing coordinates
+    # check for missing coordinates
     missing_coords = df_with_coords.filter(pl.col("lat").is_null() | pl.col("lon").is_null()).height
     if missing_coords > 0:
         print(f"  -> Warning: {missing_coords} rows have missing coordinates")
@@ -120,13 +120,13 @@ def normalize_coordinates(df: pl.DataFrame, lat_col: str = "lat", lon_col: str =
     """
     print("Normalizing coordinates...")
     
-    # Calculate statistics
+    # calculate statistics
     lat_mean = df[lat_col].mean()
     lat_std = df[lat_col].std()
     lon_mean = df[lon_col].mean() 
     lon_std = df[lon_col].std()
     
-    # Add normalized coordinates
+    # add normalized coordinates
     df_norm = df.with_columns([
         ((pl.col(lat_col) - lat_mean) / lat_std).alias("lat_z"),
         ((pl.col(lon_col) - lon_mean) / lon_std).alias("lon_z")
@@ -187,12 +187,12 @@ def correct_trip_duration_mean(df: pl.DataFrame,
     """
     print("Correcting trip duration mean...")
     
-    # Create null flag before correction
+    # create null flag before correction
     df = df.with_columns([
         pl.col(duration_col).is_null().cast(pl.UInt8).alias("dur_is_null")
     ])
     
-    # Apply correction logic
+    # apply correction logic
     df = df.with_columns([
         pl.when((pl.col(departure_col) == 0) | pl.col(departure_col).is_null())
         .then(0.0)
@@ -200,12 +200,8 @@ def correct_trip_duration_mean(df: pl.DataFrame,
         .alias(duration_col)
     ])
     
-    # Count corrections made
-    null_count = df["dur_is_null"].sum()
-    zero_dep_count = df.filter((pl.col(departure_col) == 0) | pl.col(departure_col).is_null()).height
-    
-    print(f"  -> Added dur_is_null flag ({null_count} null values detected)")
-    print(f"  -> Corrected {zero_dep_count} cases where dep_last_DT was 0/null")
+    corrected_count = df.filter(pl.col("dur_is_null") == 1).height
+    print(f"  -> Corrected {corrected_count} null duration values")
     
     return df
 
@@ -214,38 +210,29 @@ def create_occurrence_flags(df: pl.DataFrame,
                            departure_col: str = "dep_last_DT", 
                            arrival_col: str = "y_arrivals_next_DT") -> pl.DataFrame:
     """
-    Create binary flags for departure and arrival occurrences.
+    Create binary occurrence flags for departures and arrivals.
     
     Args:
-        df: DataFrame containing departure and arrival columns
-        departure_col: Name of departure count column
-        arrival_col: Name of arrival count column
+        df: DataFrame with departure and arrival columns
+        departure_col: Name of the departure count column
+        arrival_col: Name of the arrival count column
         
     Returns:
-        DataFrame with additional columns: has_dep, has_arr
+        DataFrame with additional columns: dep_occurred, arr_occurred
     """
     print("Creating occurrence flags...")
     
     df = df.with_columns([
-        pl.when(pl.col(departure_col) > 0)
-        .then(1)
-        .otherwise(0)
-        .cast(pl.UInt8)
-        .alias("has_dep"),
-        
-        pl.when(pl.col(arrival_col) > 0)
-        .then(1)
-        .otherwise(0)
-        .cast(pl.UInt8)
-        .alias("has_arr")
+        (pl.col(departure_col) > 0).cast(pl.UInt8).alias("dep_occurred"),
+        (pl.col(arrival_col) > 0).cast(pl.UInt8).alias("arr_occurred")
     ])
     
-    has_dep_count = df["has_dep"].sum()
-    has_arr_count = df["has_arr"].sum()
+    dep_occurred_count = df.filter(pl.col("dep_occurred") == 1).height
+    arr_occurred_count = df.filter(pl.col("arr_occurred") == 1).height
     total_rows = df.height
     
-    print(f"  -> has_dep: {has_dep_count:,} / {total_rows:,} ({has_dep_count/total_rows*100:.1f}%)")
-    print(f"  -> has_arr: {has_arr_count:,} / {total_rows:,} ({has_arr_count/total_rows*100:.1f}%)")
+    print(f"  -> Departures occurred: {dep_occurred_count:,}/{total_rows:,} ({dep_occurred_count/total_rows*100:.1f}%)")
+    print(f"  -> Arrivals occurred: {arr_occurred_count:,}/{total_rows:,} ({arr_occurred_count/total_rows*100:.1f}%)")
     
     return df
 
@@ -253,65 +240,49 @@ def create_occurrence_flags(df: pl.DataFrame,
 def create_station_embeddings_mapping(df: pl.DataFrame, 
                                      station_col: str = "station_id") -> Tuple[Dict[int, int], int]:
     """
-    Create mapping from station_id to 0-based index for embeddings.
+    Create mapping from station_id to embedding index for neural networks.
     
     Args:
         df: DataFrame containing station_id column
-        station_col: Name of station ID column
+        station_col: Name of the station ID column
         
     Returns:
-        Tuple of (station_id_to_idx mapping, embedding_dim)
+        Tuple of (station_id_to_index_dict, num_stations)
     """
     print("Creating station embeddings mapping...")
     
-    # Get unique station IDs
-    unique_stations = df[station_col].unique().sort().to_list()
-    n_stations = len(unique_stations)
-    
-    # Calculate embedding dimension (sqrt rule)
-    embedding_dim = int(math.sqrt(n_stations))
-    
-    # Create 0-based mapping
+    unique_stations = sorted(df[station_col].unique().to_list())
     station_id_to_idx = {station_id: idx for idx, station_id in enumerate(unique_stations)}
     
-    print(f"  -> Found {n_stations} unique stations")
-    print(f"  -> Recommended embedding dimension: {embedding_dim}")
-    print(f"  -> Station ID range: {min(unique_stations)} to {max(unique_stations)}")
+    print(f"  -> Created mapping for {len(unique_stations)} unique stations")
     
-    return station_id_to_idx, embedding_dim
+    return station_id_to_idx, len(unique_stations)
 
 
 def add_station_embedding_index(df: pl.DataFrame, 
                                station_id_to_idx: Dict[int, int],
                                station_col: str = "station_id") -> pl.DataFrame:
     """
-    Add 0-based station index column for embedding lookup.
+    Add station embedding index column based on station_id mapping.
     
     Args:
-        df: DataFrame containing station_id column
-        station_id_to_idx: Mapping from station_id to 0-based index
-        station_col: Name of station ID column
+        df: DataFrame with station_id column
+        station_id_to_idx: Mapping from station_id to embedding index
+        station_col: Name of the station ID column
         
     Returns:
-        DataFrame with additional station_id_idx column
+        DataFrame with added station_idx column
     """
-    print("Adding station embedding index...")
+    print("Adding station embedding indices...")
     
-    # Convert mapping to Polars-friendly format
-    mapping_df = pl.DataFrame({
-        station_col: list(station_id_to_idx.keys()),
-        "station_id_idx": list(station_id_to_idx.values())
-    })
+    # convert mapping to polars expression
+    mapping_expr = pl.col(station_col).map_dict(station_id_to_idx)
     
-    # Join to add index
-    df = df.join(mapping_df, on=station_col, how="left")
+    df = df.with_columns([
+        mapping_expr.alias("station_idx")
+    ])
     
-    # Check for any missing mappings
-    missing_count = df["station_id_idx"].null_count()
-    if missing_count > 0:
-        print(f"  -> Warning: {missing_count} rows have missing station_id_idx")
-    else:
-        print(f"  -> Successfully mapped all {df.height:,} rows")
+    print(f"  -> Added embedding indices for {df.height:,} rows")
     
     return df
 
@@ -322,52 +293,48 @@ def apply_all_enrichments(df: pl.DataFrame,
                          add_fourier: bool = True,
                          k_values: List[int] = [1, 2]) -> Tuple[pl.DataFrame, Dict[int, int], int]:
     """
-    Apply all enrichment functions in sequence.
+    Apply all feature enrichments in the correct order.
     
     Args:
-        df: Input DataFrame with feature engineered data
-        df_raw: Raw trips dataframe (needed for coordinates)
-        add_coords: Whether to add coordinate normalization
-        add_fourier: Whether to add fourier coordinate features  
+        df: Feature dataframe to enrich
+        df_raw: Raw trips dataframe for coordinate extraction (required if add_coords=True)
+        add_coords: Whether to add coordinate features
+        add_fourier: Whether to add fourier coordinate features
         k_values: K values for fourier encoding
         
     Returns:
-        Tuple of (enriched_df, station_id_to_idx, embedding_dim)
+        Tuple of (enriched_dataframe, station_id_to_idx_mapping, num_stations)
     """
-    print("Applying all data enrichments...")
+    print("🚀 APPLYING ALL FEATURE ENRICHMENTS")
     print("=" * 50)
     
-    # Step 1: Correct trip duration
-    df = correct_trip_duration_mean(df)
+    # start with input dataframe
+    df_enriched = df.clone()
     
-    # Step 2: Create occurrence flags
-    df = create_occurrence_flags(df)
+    # 1. add coordinates if requested and raw data provided
+    if add_coords and df_raw is not None:
+        df_enriched = add_coordinates_to_features(df_enriched, df_raw)
+        
+        # normalize coordinates
+        df_enriched = normalize_coordinates(df_enriched)
+        
+        # add fourier features if requested
+        if add_fourier:
+            df_enriched = add_fourier_coordinates(df_enriched, k_values=k_values)
     
-    # Step 3: Station embeddings mapping
-    station_id_to_idx, embedding_dim = create_station_embeddings_mapping(df)
-    df = add_station_embedding_index(df, station_id_to_idx)
+    # 2. correct trip duration if column exists
+    if "trip_dur_mean_last_DT" in df_enriched.columns:
+        df_enriched = correct_trip_duration_mean(df_enriched)
     
-    # Step 4: Add coordinates if requested and available
-    if add_coords:
-        # Check if we need to add coordinate data
-        if "lat" not in df.columns or "lon" not in df.columns:
-            if df_raw is not None:
-                print("  -> Adding coordinates from raw data...")
-                df = add_coordinates_to_features(df, df_raw)
-            else:
-                print("  -> Coordinates not found and no raw data provided, skipping coordinate enrichment")
-                add_coords = False
-        else:
-            print("  -> Coordinates already present in dataframe")
-            
-        if add_coords:
-            df = normalize_coordinates(df)
-            if add_fourier:
-                df = add_fourier_coordinates(df, k_values=k_values)
+    # 3. create occurrence flags if relevant columns exist
+    if "dep_last_DT" in df_enriched.columns and "y_arrivals_next_DT" in df_enriched.columns:
+        df_enriched = create_occurrence_flags(df_enriched)
+    
+    # 4. create station embeddings mapping
+    station_id_to_idx, num_stations = create_station_embeddings_mapping(df_enriched)
+    df_enriched = add_station_embedding_index(df_enriched, station_id_to_idx)
     
     print("=" * 50)
-    print("✅ All enrichments completed successfully!")
-    print(f"   Final shape: {df.shape}")
-    print(f"   Station embedding dimension: {embedding_dim}")
+    print(f"✅ ENRICHMENT COMPLETE: {df.height:,} → {df_enriched.height:,} rows, {len(df.columns)} → {len(df_enriched.columns)} columns")
     
-    return df, station_id_to_idx, embedding_dim 
+    return df_enriched, station_id_to_idx, num_stations 
