@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 import numpy as np
 from datetime import datetime, timedelta
+from src.utils.path_utils import data_path
 
 
 class WeatherDataCollector:
@@ -163,7 +164,7 @@ class WeatherDataCollector:
     
     def get_weather_data(
         self,
-        file_path: str = "../../data/raw/meteo/hourly_open_meteo.csv",
+        file_path: str | Path = data_path("weather/hourly_open_meteo.csv"),
         latitude: float = -34.6131,
         longitude: float = -58.3772,
         start_date: str = "2020-01-01",

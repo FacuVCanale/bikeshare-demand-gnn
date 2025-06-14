@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import time
 from typing import List, Optional, Dict, Any
+from src.utils.path_utils import data_path
 
 
 # =============================================================================
@@ -380,7 +381,7 @@ def load_trips(input_dir: Path, verbose: bool = False) -> pd.DataFrame:
     )
 
 
-def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = None, verbose: bool = False, 
+def load_all_raw_data(raw_dir: Path, save_dir: Optional[Path] = data_path("processed"), verbose: bool = False, 
                      load_parquet: bool = False, save_parquet: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load all raw CSV data or existing parquet files.

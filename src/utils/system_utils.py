@@ -15,6 +15,7 @@ import polars as pl
 import pandas as pd
 from pathlib import Path
 from typing import Optional, Union
+from src.utils.path_utils import temp_path, data_path
 
 
 def log_memory_usage(step_name: str) -> None:
@@ -57,7 +58,7 @@ def force_garbage_collection() -> None:
     gc.collect()
 
 
-def clear_checkpoint_directory(checkpoint_dir: str = "feature_checkpoints") -> None:
+def clear_checkpoint_directory(checkpoint_dir: Union[str, Path] = data_path("feature_checkpoints")) -> None:
     """
     Clear all files in the checkpoint directory.
     
@@ -78,7 +79,7 @@ def clear_checkpoint_directory(checkpoint_dir: str = "feature_checkpoints") -> N
         print(f"checkpoint directory does not exist: {checkpoint_dir}")
 
 
-def create_checkpoint_directory(checkpoint_dir: str = "feature_checkpoints") -> Path:
+def create_checkpoint_directory(checkpoint_dir: str | Path = data_path("feature_checkpoints")) -> Path:
     """
     Create checkpoint directory if it doesn't exist.
     
@@ -241,7 +242,7 @@ def get_file_size_mb(file_path: Union[str, Path]) -> float:
     return 0.0
 
 
-def cleanup_temp_files(temp_dir: str = "temp") -> None:
+def cleanup_temp_files(temp_dir: Union[str, Path] = temp_path()) -> None:
     """
     Clean up temporary files in the specified directory.
     

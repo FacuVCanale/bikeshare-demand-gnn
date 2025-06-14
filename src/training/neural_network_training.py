@@ -10,6 +10,7 @@ import joblib
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import math
+from src.utils.path_utils import data_path, model_path
 
 
 def main():
@@ -66,7 +67,7 @@ def main():
     X = scaler.fit_transform(X)
 
     # Persist the scaler so we can apply the exact same transform later
-    joblib.dump(scaler, "scaler.pkl")
+    joblib.dump(scaler, data_path("scaler.pkl"))
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
@@ -82,7 +83,7 @@ def main():
 
     y_scaler = StandardScaler()
     y = y_scaler.fit_transform(y_log)
-    joblib.dump(y_scaler, "y_scaler.pkl")
+    joblib.dump(y_scaler, data_path("y_scaler.pkl"))
 
     print(f"Features shape: {X.shape}, Target shape: {y.shape}")
 
@@ -236,7 +237,7 @@ def main():
             best_val_loss = val_loss
             epochs_no_improve = 0
             # Save best model so far
-            torch.save(model.state_dict(), "nn_model_best.pth")
+            torch.save(model.state_dict(), model_path("nn_model_best.pth"))
         else:
             epochs_no_improve += 1
 
@@ -245,9 +246,9 @@ def main():
             break
 
     # Save model
-    MODEL_PATH = "nn_model_last.pth"
+    MODEL_PATH = model_path("nn_model_last.pth")
     torch.save(model.state_dict(), MODEL_PATH)
-    print(f"\nNeural network model saved as '{MODEL_PATH}'. Best model saved as 'nn_model_best.pth'")
+    print(f"\nNeural network model saved to {MODEL_PATH}. Best model saved to {model_path('nn_model_best.pth')}")
 
 
 if __name__ == "__main__":

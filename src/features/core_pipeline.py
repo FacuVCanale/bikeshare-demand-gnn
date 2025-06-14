@@ -16,6 +16,8 @@ from datetime import timedelta
 from typing import Tuple, List, Optional
 from tqdm import tqdm
 from sklearn.neighbors import NearestNeighbors
+from pathlib import Path
+from src.utils.path_utils import data_path
 
 
 def _log_memory_usage(step_name: str):
@@ -37,7 +39,7 @@ def _get_memory_usage_mb() -> float:
         return 0.0
 
 
-def clear_feature_checkpoints(checkpoint_dir: str = "feature_checkpoints"):
+def clear_feature_checkpoints(checkpoint_dir: str | Path = data_path("feature_checkpoints")):
     """
     Clear all checkpoint files to force fresh computation.
     
@@ -751,7 +753,7 @@ def engineer_ecobici_features(
     print(f"  Streaming enabled: {enable_streaming}")
 
     # setup checkpointing
-    checkpoint_dir = "feature_checkpoints"
+    checkpoint_dir = data_path("feature_checkpoints")
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
     

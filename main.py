@@ -3,6 +3,7 @@ import numpy as np
 from src.dataset.tabular_dataset import TabularDataset
 from src.models.lgbm import LightGBMModel
 from src.training.main import train_process
+from src.utils.path_utils import model_path
 
 def main():
     """
@@ -40,12 +41,12 @@ def main():
 
     # Example of saving the model
     print("Saving trained model...")
-    trained_model.save('models/lgbm_model.joblib')
+    trained_model.save(model_path('lgbm_model.joblib'))
     
     # Example of loading and predicting
     print("Loading model and making a prediction...")
     loaded_model = LightGBMModel()
-    loaded_model.load('models/lgbm_model.joblib')
+    loaded_model.load(model_path('lgbm_model.joblib'))
     
     sample_data = (dataset.test[0].head(1),) # tuple with one dataframe
     prediction = loaded_model.predict(sample_data)

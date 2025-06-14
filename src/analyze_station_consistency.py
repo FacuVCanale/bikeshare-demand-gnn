@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 import json
+from src.utils.path_utils import data_path
 
 def extract_first_3_digits_station_id(station_id):
     """Función que replica la lógica del pipeline"""
@@ -260,12 +261,12 @@ for _, row in df_results.iterrows():
 df_summary = pd.DataFrame(summary_results)
 
 # Guardar resultados
-df_summary.to_csv('station_consistency_summary.csv', index=False)
-df_detailed.to_csv('station_consistency_detailed.csv', index=False)
+df_summary.to_csv(data_path('station_consistency_summary.csv'), index=False)
+df_detailed.to_csv(data_path('station_consistency_detailed.csv'), index=False)
 
 print(f"\nResultados guardados en:")
-print(f"  - station_consistency_summary.csv (resumen con diccionario año-coordenada)")
-print(f"  - station_consistency_detailed.csv (detalle por estación-año)")
+print(f"  - {data_path('station_consistency_summary.csv')} (resumen con diccionario año-coordenada)")
+print(f"  - {data_path('station_consistency_detailed.csv')} (detalle por estación-año)")
 
 # Mostrar top 10 estaciones más activas
 print(f"\n=== TOP 10 ESTACIONES MÁS ACTIVAS ===")
