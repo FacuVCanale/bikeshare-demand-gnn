@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 import numpy as np
 from datetime import datetime, timedelta
-from src.utils.path_utils import data_path
+from utils.path_utils import data_path
 
 
 class WeatherDataCollector:

@@ -453,7 +453,7 @@ def create_temporal_features_optimized(df_feat: pl.DataFrame, checkpoint_dir: st
             pass
     
     print("  -> Combining all temporal windows...")
-    # Combine all windows using streaming
+    # Combine all windows using streaming - no sort to avoid memory issues
     df_feat_final = pl.concat(
         [pl.scan_parquet(f) for f in chunk_paths],
         how="vertical"
@@ -471,12 +471,8 @@ def create_temporal_features_optimized(df_feat: pl.DataFrame, checkpoint_dir: st
     except:
         pass
     
-    # Final sort
-    print("  -> Final sort by timestamp...")
-    df_feat_final = df_feat_final.sort(["ts_start", "station_id"])
-    
-    # Save final result
-    print(f"  -> Saving checkpoint: {temporal_path}")
+    # Save unsorted result first
+    print(f"  -> Saving unsorted checkpoint: {temporal_path}")
     try:
         df_feat_final.write_parquet(
             temporal_path,
@@ -484,8 +480,31 @@ def create_temporal_features_optimized(df_feat: pl.DataFrame, checkpoint_dir: st
             compression_level=3,
             row_group_size=5_000
         )
-        print("  -> Temporal features checkpoint saved")
+        print("  -> Unsorted temporal features checkpoint saved")
     except Exception as e:
         print(f"  -> Error saving temporal features: {e}")
+        return df_feat_final
     
-    return df_feat_final 
+    # Now try to sort using streaming approach
+    print("  -> Attempting streaming sort...")
+    try:
+        sorted_path = temporal_path.replace('.parquet', '_sorted.parquet')
+        df_sorted = pl.scan_parquet(temporal_path).sort(["ts_start", "station_id"]).collect()
+        
+        # Replace original with sorted version
+        df_sorted.write_parquet(
+            sorted_path,
+            compression="zstd",
+            compression_level=3,
+            row_group_size=5_000
+        )
+        
+        # Replace original file with sorted version
+        os.replace(sorted_path, temporal_path)
+        print("  -> Successfully sorted and saved temporal features")
+        return df_sorted
+        
+    except Exception as e:
+        print(f"  -> Warning: Could not sort data due to memory constraints: {e}")
+        print("  -> Returning unsorted data - sorting can be done later if needed")
+        return df_feat_final 

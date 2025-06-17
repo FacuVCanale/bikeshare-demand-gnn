@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 import time
 from typing import List, Optional, Dict, Any
-from src.utils.path_utils import data_path
+from utils.path_utils import data_path
 
 
 # =============================================================================

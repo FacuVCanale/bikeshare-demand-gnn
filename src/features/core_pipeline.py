@@ -17,7 +17,8 @@ from typing import Tuple, List, Optional
 from tqdm import tqdm
 from sklearn.neighbors import NearestNeighbors
 from pathlib import Path
-from src.utils.path_utils import data_path
+from utils.path_utils import data_path
+import gc
 
 
 def _log_memory_usage(step_name: str):
@@ -232,6 +233,9 @@ def step_01_normalize_polars_data(df_raw: pl.DataFrame, dt_minutes: int, checkpo
     print(f"  -> Input shape: {df_raw.shape}")
     print(f"  -> Available columns: {df_raw.columns[:10]}{'...' if len(df_raw.columns) > 10 else ''}")
     
+    print("Deleting null values...")
+    df_raw = df_raw.drop_nulls()
+
     # show data types for key columns  
     key_cols = ["fecha_origen_recorrido", "id_estacion_origen", "duracion_recorrido"]
     for col in key_cols:
@@ -287,14 +291,6 @@ def step_01_normalize_polars_data(df_raw: pl.DataFrame, dt_minutes: int, checkpo
         df = df.with_columns([
             (pl.col("ts_start").dt.truncate(f"{dt_minutes}m")).alias("ts_start")
         ])
-    
-    # filter out invalid data
-    df = df.filter(
-        (pl.col("station_id_origin").is_not_null()) &
-        (pl.col("station_id_dest").is_not_null()) &
-        (pl.col("trip_duration") > 0) &
-        (pl.col("trip_duration") < 24 * 60)  # less than 24 hours
-    )
     
     # extract bike models
     bike_models = df.select("bike_model").unique().to_series().to_list()
@@ -710,7 +706,7 @@ def engineer_ecobici_features(
     dt_minutes: int = 30,
     n_neighbors: int = 5,
     clear_checkpoints: bool = False,
-    max_memory_mb: int = 3000,  # More conservative limit for 8GB systems
+    max_memory_mb: int = 15000,  # More conservative limit for 8GB systems
     chunk_size_days: int = 5,   # Smaller chunks to prevent memory overflow
     enable_streaming: bool = True,
     process_in_chunks_from_start: bool = False  # New parameter for ultra-low memory processing
@@ -754,6 +750,18 @@ def engineer_ecobici_features(
 
     # setup checkpointing
     checkpoint_dir = data_path("feature_checkpoints")
+    
+    temporal_path_step9 = os.path.join(checkpoint_dir, "step09_temporal_optimized.parquet")
+
+    if os.path.exists(temporal_path_step9):
+        print(f"  -> Loading temporal features from checkpoint: {temporal_path_step9}")
+        if enable_streaming:
+            df_feat = pl.scan_parquet(temporal_path_step9).collect()
+        else:
+            df_feat = pl.read_parquet(temporal_path_step9)
+        
+        print(f"  -> Temporal checkpoint loaded, proceeding to final steps...")
+        return final_steps(df_feat, checkpoint_dir, enable_streaming)
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
     
@@ -847,7 +855,8 @@ def engineer_ecobici_features(
     _log_memory_usage("step 6")
     
     # clear main dataframe from memory after extracting what we need
-    del df
+    #del df
+    import gc
     gc.collect()
     _log_memory_usage("after clearing main dataframe")
     
@@ -892,20 +901,28 @@ def engineer_ecobici_features(
     
     # OPTIMIZED TEMPORAL FEATURES
     print("[Step 9/11] Engineering temporal and calendar features...")
-    temporal_path = os.path.join(checkpoint_dir, "step09_temporal_optimized.parquet")
     
-    if os.path.exists(temporal_path):
-        print(f"  -> Loading temporal features from checkpoint: {temporal_path}")
-        if enable_streaming:
-            df_feat = pl.scan_parquet(temporal_path).collect()
-        else:
-            df_feat = pl.read_parquet(temporal_path)
-    else:
-        from data.temporal_processing import create_temporal_features_optimized
-        df_feat = create_temporal_features_optimized(df_feat, checkpoint_dir, temporal_path, holiday_dates=[])
+    from data.temporal_processing import create_temporal_features_optimized
+    df_feat = create_temporal_features_optimized(df_feat, checkpoint_dir, temporal_path_step9, holiday_dates=[])
     
     _log_memory_usage("after temporal features")
     
+    # Call final steps to complete the pipeline
+    return final_steps(df_feat, checkpoint_dir, enable_streaming)
+
+
+def final_steps(df_feat: pl.DataFrame, checkpoint_dir: str, enable_streaming: bool = True) -> pl.DataFrame:
+    """
+    Execute final steps (10-11) of the feature engineering pipeline.
+    
+    Args:
+        df_feat: DataFrame with temporal features
+        checkpoint_dir: Directory for checkpoints
+        enable_streaming: Whether to use streaming operations
+        
+    Returns:
+        Final optimized feature dataset
+    """
     print(f"[Step 10/11] Final data cleaning and optimization...")
     # Optimize data types to save memory
     df_feat = _optimize_data_types(df_feat)
@@ -913,6 +930,9 @@ def engineer_ecobici_features(
     
     print(f"[Step 11/11] Saving final result...")
     print(f"  -> Final feature dataset shape: {df_feat.shape}")
+    
+    # Define final result path
+    final_result_path = os.path.join(checkpoint_dir, "df_feat_final_result_optimized.parquet")
     
     # Check dataset size and use appropriate saving method
     final_size_mb = df_feat.estimated_size('mb')
@@ -939,6 +959,33 @@ def engineer_ecobici_features(
                 row_group_size=10000
             )
         print(f"  ✅ Saved optimized final result: {final_result_path}")
+        
+        # Sort the saved data for better organization and query performance
+        print(f"  -> Sorting final dataset by station_id and ts_start...")
+        try:
+            if enable_streaming:
+                # Sort using streaming operations
+                sorted_df = pl.scan_parquet(final_result_path).sort(["station_id", "ts_start"])
+                sorted_df.sink_parquet(
+                    final_result_path,
+                    compression="zstd",
+                    compression_level=3,
+                    row_group_size=10000
+                )
+            else:
+                # Sort in memory
+                df_feat = df_feat.sort(["station_id", "ts_start"])
+                df_feat.write_parquet(
+                    final_result_path,
+                    compression="zstd",
+                    compression_level=3,  
+                    row_group_size=10000
+                )
+            print(f"  ✅ Final dataset sorted and saved")
+        except Exception as sort_error:
+            print(f"  ⚠️ Could not sort final dataset: {sort_error}")
+            print(f"  -> Dataset saved but not sorted")
+            
     except Exception as e:
         print(f"  ⚠️ Could not save final result: {e}")
         # Try fallback method
@@ -946,6 +993,17 @@ def engineer_ecobici_features(
             print(f"  -> Trying fallback chunked writing...")
             _write_parquet_in_chunks(df_feat, final_result_path, chunk_rows=25000)
             print(f"  ✅ Saved using fallback method: {final_result_path}")
+            
+            # Try to sort the fallback saved data
+            print(f"  -> Attempting to sort fallback saved data...")
+            try:
+                sorted_df = pl.scan_parquet(final_result_path).sort(["station_id", "ts_start"])
+                sorted_df.sink_parquet(final_result_path, compression="snappy", row_group_size=10000)
+                print(f"  ✅ Fallback dataset sorted and saved")
+            except Exception as sort_error:
+                print(f"  ⚠️ Could not sort fallback dataset: {sort_error}")
+                print(f"  -> Fallback dataset saved but not sorted")
+                
         except Exception as e2:
             print(f"  ❌ Fallback also failed: {e2}")
     
