@@ -14,6 +14,11 @@ xgb_model.json
 __pycache__/
 *.py[cod]
 *$py.class
+.roomodes
+.taskmaster/
+.cursor/
+.roo/
+models/
 
 # C extensions
 *.so
