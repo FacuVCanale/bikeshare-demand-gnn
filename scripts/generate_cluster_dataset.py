@@ -326,12 +326,31 @@ def main():
         
         metadata_path = output_dir / "dataset_metadata.json"
         import json
+        import numpy as np
+        
+        def make_json_serializable(obj):
+            """Convert non-serializable objects to JSON-serializable format."""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, tuple):
+                return list(obj)
+            elif isinstance(obj, dict):
+                return {k: make_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [make_json_serializable(item) for item in obj]
+            elif hasattr(obj, 'shape'):  # DataFrame shapes
+                return list(obj)
+            elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes)):
+                return list(obj)
+            else:
+                return obj
+        
         with open(metadata_path, 'w') as f:
-            # convert any non-serializable objects for JSON
-            serializable_metadata = {
-                k: v if not isinstance(v, (pl.DataFrame, dict)) or k == 'cluster_centroids' 
-                else str(v) for k, v in metadata.items()
-            }
+            serializable_metadata = make_json_serializable(metadata)
             json.dump(serializable_metadata, f, indent=2)
         
         logger.info(f"Saved metadata to {metadata_path}")
