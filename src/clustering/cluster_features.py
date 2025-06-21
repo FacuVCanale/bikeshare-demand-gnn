@@ -568,6 +568,176 @@ class ClusterFeatureGenerator:
         
         return df_with_weather
         
+    def add_lag_features(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Add lag features without data leakage.
+        
+        Lag features are computed per cluster to capture temporal patterns.
+        Uses proper time-based sorting to prevent future information leakage.
+        
+        Args:
+            df: DataFrame with cluster_id, ts_start and aggregated features
+            
+        Returns:
+            DataFrame with lag features added
+        """
+        self.logger.info("Adding lag features...")
+        
+        # define key features to create lags for
+        lag_features = [
+            # departure features
+            'dep_internal_count', 'dep_external_count',
+            'dep_internal_male', 'dep_internal_female', 
+            'dep_internal_young', 'dep_internal_adult', 'dep_internal_senior',
+            'dep_internal_model_iconic', 'dep_internal_duration_mean',
+            
+            # arrival features  
+            'arr_internal_count', 'arr_external_count',
+            'arr_internal_male', 'arr_internal_female',
+            'arr_internal_young', 'arr_internal_adult', 'arr_internal_senior',
+            'arr_internal_model_iconic',
+            
+            # flags
+            'has_dep_internal', 'has_dep_external',
+            'has_arr_internal', 'has_arr_external'
+        ]
+        
+        # filter to only features that exist in the dataframe
+        existing_lag_features = [f for f in lag_features if f in df.columns]
+        
+        if not existing_lag_features:
+            self.logger.warning("No lag features found in dataframe")
+            return df
+            
+        self.logger.info(f"  -> Creating lags for {len(existing_lag_features)} features")
+        
+        # sort by cluster and time to ensure proper temporal ordering
+        df_sorted = df.sort(["cluster_id", "ts_start"])
+        
+        # create lag features for different time periods
+        lag_periods = [1, 2, 4, 8]  # 1, 2, 4, 8 intervals back (30min, 1h, 2h, 4h)
+        
+        lag_expressions = []
+        
+        for feature in existing_lag_features:
+            for lag in lag_periods:
+                # lag feature: value from 'lag' periods ago for the same cluster
+                lag_expr = (
+                    pl.col(feature)
+                    .shift(lag)
+                    .over("cluster_id")  # partition by cluster_id
+                    .alias(f"{feature}_lag_{lag}")
+                )
+                lag_expressions.append(lag_expr)
+        
+        # add rolling window features (moving averages)
+        rolling_windows = [4, 8, 24]  # 2h, 4h, 12h windows
+        
+        for feature in existing_lag_features:
+            for window in rolling_windows:
+                # rolling mean: average of last 'window' periods (excluding current)
+                rolling_mean_expr = (
+                    pl.col(feature)
+                    .shift(1)  # exclude current period to prevent leakage
+                    .rolling_mean(window)
+                    .over("cluster_id")
+                    .alias(f"{feature}_rolling_mean_{window}")
+                )
+                lag_expressions.append(rolling_mean_expr)
+                
+                # rolling std: standard deviation of last 'window' periods
+                rolling_std_expr = (
+                    pl.col(feature)
+                    .shift(1)  # exclude current period to prevent leakage
+                    .rolling_std(window)
+                    .over("cluster_id")
+                    .alias(f"{feature}_rolling_std_{window}")
+                )
+                lag_expressions.append(rolling_std_expr)
+        
+        # add same hour last day/week features (strong cyclical patterns)
+        intervals_per_day = 24 * 60 // self.dt_minutes  # number of intervals per day
+        intervals_per_week = intervals_per_day * 7
+        
+        for feature in existing_lag_features:
+            # same hour yesterday
+            same_hour_yesterday_expr = (
+                pl.col(feature)
+                .shift(intervals_per_day)
+                .over("cluster_id")
+                .alias(f"{feature}_same_hour_yesterday")
+            )
+            lag_expressions.append(same_hour_yesterday_expr)
+            
+            # same hour last week
+            same_hour_last_week_expr = (
+                pl.col(feature)
+                .shift(intervals_per_week)
+                .over("cluster_id")
+                .alias(f"{feature}_same_hour_last_week")
+            )
+            lag_expressions.append(same_hour_last_week_expr)
+        
+        # apply all lag expressions at once for efficiency
+        df_with_lags = df_sorted.with_columns(lag_expressions)
+        
+        # collect lag column names for filling null values
+        lag_columns = []
+        for feature in existing_lag_features:
+            for lag in lag_periods:
+                lag_columns.append(f"{feature}_lag_{lag}")
+            for window in rolling_windows:
+                lag_columns.append(f"{feature}_rolling_mean_{window}")
+                lag_columns.append(f"{feature}_rolling_std_{window}")
+            lag_columns.append(f"{feature}_same_hour_yesterday")
+            lag_columns.append(f"{feature}_same_hour_last_week")
+        
+        # fill null values with 0 for lag features (beginning of time series)
+        fill_expressions = []
+        for col in lag_columns:
+            if col in df_with_lags.columns:
+                fill_expressions.append(pl.col(col).fill_null(0))
+        
+        if fill_expressions:
+            df_with_lags = df_with_lags.with_columns(fill_expressions)
+        
+        # add lag availability flags to track data quality
+        lag_availability_flags = []
+        
+        # flag for whether we have enough history for short-term lags
+        if "dep_internal_count_lag_1" in df_with_lags.columns and "arr_internal_count_lag_1" in df_with_lags.columns:
+            lag_availability_flags.append(
+                (pl.col("dep_internal_count_lag_1") > 0).cast(pl.Int32).alias("has_short_term_lags")
+            )
+        else:
+            lag_availability_flags.append(pl.lit(0).alias("has_short_term_lags"))
+        
+        # flag for whether we have enough history for daily patterns
+        if "dep_internal_count_same_hour_yesterday" in df_with_lags.columns and "arr_internal_count_same_hour_yesterday" in df_with_lags.columns:
+            lag_availability_flags.append(
+                (pl.col("dep_internal_count_same_hour_yesterday") > 0).cast(pl.Int32).alias("has_daily_lags")
+            )
+        else:
+            lag_availability_flags.append(pl.lit(0).alias("has_daily_lags"))
+        
+        # flag for whether we have enough history for weekly patterns  
+        if "dep_internal_count_same_hour_last_week" in df_with_lags.columns and "arr_internal_count_same_hour_last_week" in df_with_lags.columns:
+            lag_availability_flags.append(
+                (pl.col("dep_internal_count_same_hour_last_week") > 0).cast(pl.Int32).alias("has_weekly_lags")
+            )
+        else:
+            lag_availability_flags.append(pl.lit(0).alias("has_weekly_lags"))
+        
+        if lag_availability_flags:
+            df_with_lags = df_with_lags.with_columns(lag_availability_flags)
+        
+        self.logger.info(f"  -> Added {len(lag_expressions)} lag features")
+        self.logger.info(f"  -> Added {len(lag_availability_flags)} lag availability flags")
+        self.logger.info(f"  -> Lag periods: {lag_periods} intervals")
+        self.logger.info(f"  -> Rolling windows: {rolling_windows} intervals")
+        self.logger.info(f"  -> Cyclical lags: 1 day ({intervals_per_day} intervals), 1 week ({intervals_per_week} intervals)")
+        
+        return df_with_lags
+        
     def generate_cluster_features(self, trips_df: pl.DataFrame,
                                 station_cluster_mapping: Dict[int, int],
                                 cluster_centroids: Dict[int, Dict[str, float]]) -> pl.DataFrame:
@@ -638,7 +808,10 @@ class ClusterFeatureGenerator:
         # step 7: add weather features from original trip data
         features = self.add_weather_features_from_skeleton(features, trips_df)
         
-        # step 8: create summary statistics
+        # step 8: add lag features (must be after all other features are created)
+        features = self.add_lag_features(features)
+        
+        # step 9: create summary statistics
         self.logger.info("Computing summary statistics...")
         total_rows = features.height
         non_zero_internal_deps = features.filter(pl.col("dep_internal_count") > 0).height
