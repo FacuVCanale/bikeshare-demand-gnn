@@ -132,7 +132,10 @@ class GateTrainer:
         self.model.set_hps(hyperparameters)
         
         # prepare data for the specific model type
-        train_data, val_data, test_data = self.dataset.prepare_dataset(self.model)
+        if model_type.lower() == 'catboost':
+            train_data, val_data, test_data = self.dataset.prepare_for_catboost(self.model)
+        else:
+            train_data, val_data, test_data = self.dataset.prepare_for_gbdt(self.model)
         
         # train model
         start_time = time.time()
