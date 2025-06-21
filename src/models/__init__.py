@@ -1,4 +1,20 @@
-# This file makes the 'models' directory a Python package. 
-from .bike_dest_eta_enhanced_model import BikeDestETAEnhancedModel, BikeDestETAEnhanced
+"""
+Machine Learning Models for EcoBici-AI
+
+This module contains various ML models for bike share demand prediction.
+"""
+
 from .base_model import BaseModel
-from .catboost_model import CatBoostModel 
+from .catboost_model import CatBoostModel
+from .gbdt_models import LightGBMModel, XGBoostModel
+from .multi_model import MultiModel
+from .nn_model import NeuralNetworkModel
+
+__all__ = [
+    'BaseModel',
+    'CatBoostModel', 
+    'LightGBMModel',
+    'XGBoostModel',
+    'MultiModel',
+    'NeuralNetworkModel'
+] 

@@ -4,13 +4,26 @@ Command-line script for training Gate models.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-# add src to path
-sys.path.append(str(Path(__file__).parent.parent / 'src'))
+# get the project root directory
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-from src.training.gate_trainer import GateTrainer
+# add project root and src to Python path
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / 'src'))
+
+# set working directory to project root
+os.chdir(PROJECT_ROOT)
+
+try:
+    from src.training.gate_trainer import GateTrainer
+except ImportError as e:
+    print(f"Error importing GateTrainer: {e}")
+    print("Make sure all dependencies are installed and the project structure is correct")
+    sys.exit(1)
 
 
 def parse_args():
