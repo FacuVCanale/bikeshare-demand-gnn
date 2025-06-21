@@ -7,6 +7,7 @@ This module handles:
 - User demographics aggregation by cluster and trip type
 - Age bins (young/adult/senior) instead of age statistics to prevent data leakage
 - Bike model distribution features
+- Weather feature aggregation
 - Ghost trip handling
 """
 
@@ -37,6 +38,24 @@ class ClusterFeatureGenerator:
             'adult': (26, 55),     # 26-55 years old  
             'senior': (56, 120)    # 56+ years old
         }
+        
+        # weather features to aggregate
+        self.weather_features = [
+            'temperature_2m', 'relative_humidity_2m', 'dew_point_2m', 
+            'apparent_temperature', 'precipitation', 'weather_code',
+            'pressure_msl', 'cloud_cover', 'cloud_cover_low', 'cloud_cover_mid',
+            'cloud_cover_high', 'vapour_pressure_deficit', 'wind_speed_10m',
+            'wind_direction_10m', 'wind_gusts_10m', 'soil_temperature_0_to_7cm',
+            'soil_moisture_0_to_7cm', 'sunshine_duration', 'direct_radiation',
+            'temp_feel_diff', 'weather_comfort'
+        ]
+        
+        # weather boolean flags
+        self.weather_flags = [
+            'is_day', 'temp_comfortable', 'temp_very_hot', 'temp_cold',
+            'is_raining', 'heavy_rain', 'light_rain', 'strong_wind',
+            'moderate_wind', 'weather_matched'
+        ]
         
     def setup_logging(self, log_level: str):
         """Setup logging configuration."""
@@ -96,7 +115,10 @@ class ClusterFeatureGenerator:
              
             # unmapped station flag
             ((pl.col("origin_cluster_id") == -1) | 
-             (pl.col("dest_cluster_id") == -1)).alias("has_unmapped_station")
+             (pl.col("dest_cluster_id") == -1)).alias("has_unmapped_station"),
+             
+            # model_iconic flag: 1 for ICONIC, 0 for FIT
+            (pl.col("modelo_bicicleta") == "ICONIC").cast(pl.Int32).alias("model_iconic")
         ])
         
         # add age bins to prevent data leakage
@@ -108,6 +130,7 @@ class ClusterFeatureGenerator:
         external_trips = trips_classified.filter(pl.col("is_external_trip")).height
         ghost_trips = trips_classified.filter(pl.col("is_ghost_trip")).height
         unmapped_trips = trips_classified.filter(pl.col("has_unmapped_station")).height
+        iconic_trips = trips_classified.filter(pl.col("model_iconic") == 1).height
         
         self.logger.info(f"Trip classification results:")
         self.logger.info(f"  -> Total trips: {total_trips:,}")
@@ -115,6 +138,7 @@ class ClusterFeatureGenerator:
         self.logger.info(f"  -> External trips: {external_trips:,} ({external_trips/total_trips*100:.1f}%)")
         self.logger.info(f"  -> Ghost trips: {ghost_trips:,} ({ghost_trips/total_trips*100:.1f}%)")
         self.logger.info(f"  -> Trips with unmapped stations: {unmapped_trips:,} ({unmapped_trips/total_trips*100:.1f}%)")
+        self.logger.info(f"  -> ICONIC bike trips: {iconic_trips:,} ({iconic_trips/total_trips*100:.1f}%)")
         
         return trips_classified
         
@@ -133,26 +157,26 @@ class ClusterFeatureGenerator:
         trips_with_age_bins = trips_df.with_columns([
             # young: 0-25 years
             ((pl.col("user_age") >= self.age_bins['young'][0]) & 
-             (pl.col("user_age") <= self.age_bins['young'][1])).alias("is_young"),
+             (pl.col("user_age") <= self.age_bins['young'][1])).cast(pl.Int32).alias("is_young"),
              
             # adult: 26-55 years  
             ((pl.col("user_age") >= self.age_bins['adult'][0]) & 
-             (pl.col("user_age") <= self.age_bins['adult'][1])).alias("is_adult"),
+             (pl.col("user_age") <= self.age_bins['adult'][1])).cast(pl.Int32).alias("is_adult"),
              
             # senior: 56+ years
             ((pl.col("user_age") >= self.age_bins['senior'][0]) & 
-             (pl.col("user_age") <= self.age_bins['senior'][1])).alias("is_senior"),
+             (pl.col("user_age") <= self.age_bins['senior'][1])).cast(pl.Int32).alias("is_senior"),
              
             # age available flag
-            pl.col("user_age").is_not_null().alias("has_age_data")
+            pl.col("user_age").is_not_null().cast(pl.Int32).alias("has_age_data")
         ])
         
         # log age bin distribution
         if "user_age" in trips_df.columns:
-            young_count = trips_with_age_bins.filter(pl.col("is_young")).height
-            adult_count = trips_with_age_bins.filter(pl.col("is_adult")).height  
-            senior_count = trips_with_age_bins.filter(pl.col("is_senior")).height
-            has_age_count = trips_with_age_bins.filter(pl.col("has_age_data")).height
+            young_count = trips_with_age_bins.filter(pl.col("is_young") == 1).height
+            adult_count = trips_with_age_bins.filter(pl.col("is_adult") == 1).height  
+            senior_count = trips_with_age_bins.filter(pl.col("is_senior") == 1).height
+            has_age_count = trips_with_age_bins.filter(pl.col("has_age_data") == 1).height
             
             self.logger.info(f"  -> Age distribution:")
             self.logger.info(f"     Young (0-25): {young_count:,}")
@@ -226,74 +250,95 @@ class ClusterFeatureGenerator:
         ])
         
         # aggregate internal departures
+        internal_aggs = [
+            pl.len().alias("dep_internal_count"),
+            
+            # gender counts for internal departures
+            (pl.col("genero") == "MALE").sum().alias("dep_internal_male"),
+            (pl.col("genero") == "FEMALE").sum().alias("dep_internal_female"),
+            (pl.col("genero") == "OTHER").sum().alias("dep_internal_other"),
+            
+            # age bins for internal departures - NO STATISTICS, ONLY COUNTS
+            pl.col("is_young").sum().alias("dep_internal_young"),
+            pl.col("is_adult").sum().alias("dep_internal_adult"),
+            pl.col("is_senior").sum().alias("dep_internal_senior"),
+            pl.col("has_age_data").sum().alias("dep_internal_age_available"),
+            
+            # bike model counts
+            pl.col("model_iconic").sum().alias("dep_internal_model_iconic"),
+            
+            # trip duration stats for internal departures
+            pl.col("duracion_recorrido").mean().alias("dep_internal_duration_mean"),
+            pl.col("duracion_recorrido").std().alias("dep_internal_duration_std"),
+        ]
+        
+        # add weather aggregations for internal departures
+        weather_cols_in_data = [col for col in self.weather_features if col in trips_df.columns]
+        weather_flags_in_data = [col for col in self.weather_flags if col in trips_df.columns]
+        
+        for weather_col in weather_cols_in_data:
+            internal_aggs.append(pl.col(weather_col).mean().alias(f"dep_internal_{weather_col}_mean"))
+        
+        for weather_flag in weather_flags_in_data:
+            internal_aggs.append(pl.col(weather_flag).cast(pl.Int32).sum().alias(f"dep_internal_{weather_flag}_count"))
+        
         internal_deps = (
             trips_with_time
             .filter(pl.col("is_internal_trip"))
             .group_by(["origin_cluster_id", "ts_start"])
-            .agg([
-                pl.len().alias("dep_internal_count"),
-                
-                # gender counts for internal departures
-                (pl.col("genero") == "MALE").sum().alias("dep_internal_male"),
-                (pl.col("genero") == "FEMALE").sum().alias("dep_internal_female"),
-                (pl.col("genero") == "OTHER").sum().alias("dep_internal_other"),
-                
-                # age bins for internal departures - NO STATISTICS, ONLY COUNTS
-                pl.col("is_young").sum().alias("dep_internal_young"),
-                pl.col("is_adult").sum().alias("dep_internal_adult"),
-                pl.col("is_senior").sum().alias("dep_internal_senior"),
-                pl.col("has_age_data").sum().alias("dep_internal_age_available"),
-                
-                # bike model diversity for internal departures
-                pl.col("modelo_bicicleta").n_unique().alias("dep_internal_model_types"),
-                
-                # trip duration stats for internal departures - only basic stats
-                pl.col("duracion_recorrido").mean().alias("dep_internal_duration_mean"),
-                pl.col("duracion_recorrido").std().alias("dep_internal_duration_std"),
-            ])
+            .agg(internal_aggs)
             .rename({"origin_cluster_id": "cluster_id"})
         )
         
         # aggregate external departures
+        external_aggs = [
+            pl.len().alias("dep_external_count"),
+            
+            # gender counts for external departures
+            (pl.col("genero") == "MALE").sum().alias("dep_external_male"),
+            (pl.col("genero") == "FEMALE").sum().alias("dep_external_female"),
+            (pl.col("genero") == "OTHER").sum().alias("dep_external_other"),
+            
+            # age bins for external departures - NO STATISTICS, ONLY COUNTS
+            pl.col("is_young").sum().alias("dep_external_young"),
+            pl.col("is_adult").sum().alias("dep_external_adult"),
+            pl.col("is_senior").sum().alias("dep_external_senior"),
+            pl.col("has_age_data").sum().alias("dep_external_age_available"),
+            
+            # bike model counts
+            pl.col("model_iconic").sum().alias("dep_external_model_iconic"),
+            
+            # trip duration stats for external departures
+            pl.col("duracion_recorrido").mean().alias("dep_external_duration_mean"),
+            pl.col("duracion_recorrido").std().alias("dep_external_duration_std"),
+        ]
+        
+        # add weather aggregations for external departures
+        for weather_col in weather_cols_in_data:
+            external_aggs.append(pl.col(weather_col).mean().alias(f"dep_external_{weather_col}_mean"))
+        
+        for weather_flag in weather_flags_in_data:
+            external_aggs.append(pl.col(weather_flag).cast(pl.Int32).sum().alias(f"dep_external_{weather_flag}_count"))
+        
         external_deps = (
             trips_with_time
             .filter(pl.col("is_external_trip"))
             .group_by(["origin_cluster_id", "ts_start"])
-            .agg([
-                pl.len().alias("dep_external_count"),
-                
-                # gender counts for external departures
-                (pl.col("genero") == "MALE").sum().alias("dep_external_male"),
-                (pl.col("genero") == "FEMALE").sum().alias("dep_external_female"),
-                (pl.col("genero") == "OTHER").sum().alias("dep_external_other"),
-                
-                # age bins for external departures - NO STATISTICS, ONLY COUNTS
-                pl.col("is_young").sum().alias("dep_external_young"),
-                pl.col("is_adult").sum().alias("dep_external_adult"),
-                pl.col("is_senior").sum().alias("dep_external_senior"),
-                pl.col("has_age_data").sum().alias("dep_external_age_available"),
-                
-                # bike model diversity for external departures
-                pl.col("modelo_bicicleta").n_unique().alias("dep_external_model_types"),
-                
-                # trip duration stats for external departures - only basic stats
-                pl.col("duracion_recorrido").mean().alias("dep_external_duration_mean"),
-                pl.col("duracion_recorrido").std().alias("dep_external_duration_std"),
-            ])
+            .agg(external_aggs)
             .rename({"origin_cluster_id": "cluster_id"})
         )
         
-        # combine internal and external departures
+        # combine internal and external departures using outer join with proper suffixes
         departures = internal_deps.join(
             external_deps, 
             on=["cluster_id", "ts_start"], 
-            how="full"
+            how="outer"
         ).fill_null(0)
         
-        # create has_departure flags
+        # create has_departure flags as 1/0
         departures = departures.with_columns([
-            (pl.col("dep_internal_count") > 0).alias("has_dep_internal"),
-            (pl.col("dep_external_count") > 0).alias("has_dep_external"),
+            (pl.col("dep_internal_count") > 0).cast(pl.Int32).alias("has_dep_internal"),
+            (pl.col("dep_external_count") > 0).cast(pl.Int32).alias("has_dep_external"),
         ])
         
         self.logger.info(f"  -> Departure aggregations shape: {departures.shape}")
@@ -318,66 +363,87 @@ class ClusterFeatureGenerator:
         ])
         
         # aggregate internal arrivals
+        internal_aggs = [
+            pl.len().alias("arr_internal_count"),
+            
+            # gender counts for internal arrivals
+            (pl.col("genero") == "MALE").sum().alias("arr_internal_male"),
+            (pl.col("genero") == "FEMALE").sum().alias("arr_internal_female"),
+            (pl.col("genero") == "OTHER").sum().alias("arr_internal_other"),
+            
+            # age bins for internal arrivals - NO STATISTICS, ONLY COUNTS
+            pl.col("is_young").sum().alias("arr_internal_young"),
+            pl.col("is_adult").sum().alias("arr_internal_adult"),
+            pl.col("is_senior").sum().alias("arr_internal_senior"),
+            pl.col("has_age_data").sum().alias("arr_internal_age_available"),
+            
+            # bike model counts
+            pl.col("model_iconic").sum().alias("arr_internal_model_iconic"),
+        ]
+        
+        # add weather aggregations for internal arrivals
+        weather_cols_in_data = [col for col in self.weather_features if col in trips_df.columns]
+        weather_flags_in_data = [col for col in self.weather_flags if col in trips_df.columns]
+        
+        for weather_col in weather_cols_in_data:
+            internal_aggs.append(pl.col(weather_col).mean().alias(f"arr_internal_{weather_col}_mean"))
+        
+        for weather_flag in weather_flags_in_data:
+            internal_aggs.append(pl.col(weather_flag).cast(pl.Int32).sum().alias(f"arr_internal_{weather_flag}_count"))
+        
         internal_arrs = (
             trips_with_time
             .filter(pl.col("is_internal_trip"))
             .group_by(["dest_cluster_id", "ts_start"])
-            .agg([
-                pl.len().alias("arr_internal_count"),
-                
-                # gender counts for internal arrivals
-                (pl.col("genero") == "MALE").sum().alias("arr_internal_male"),
-                (pl.col("genero") == "FEMALE").sum().alias("arr_internal_female"),
-                (pl.col("genero") == "OTHER").sum().alias("arr_internal_other"),
-                
-                # age bins for internal arrivals - NO STATISTICS, ONLY COUNTS
-                pl.col("is_young").sum().alias("arr_internal_young"),
-                pl.col("is_adult").sum().alias("arr_internal_adult"),
-                pl.col("is_senior").sum().alias("arr_internal_senior"),
-                pl.col("has_age_data").sum().alias("arr_internal_age_available"),
-                
-                # bike model diversity for internal arrivals  
-                pl.col("modelo_bicicleta").n_unique().alias("arr_internal_model_types"),
-            ])
+            .agg(internal_aggs)
             .rename({"dest_cluster_id": "cluster_id"})
         )
         
         # aggregate external arrivals
+        external_aggs = [
+            pl.len().alias("arr_external_count"),
+            
+            # gender counts for external arrivals
+            (pl.col("genero") == "MALE").sum().alias("arr_external_male"),
+            (pl.col("genero") == "FEMALE").sum().alias("arr_external_female"),
+            (pl.col("genero") == "OTHER").sum().alias("arr_external_other"),
+            
+            # age bins for external arrivals - NO STATISTICS, ONLY COUNTS
+            pl.col("is_young").sum().alias("arr_external_young"),
+            pl.col("is_adult").sum().alias("arr_external_adult"),
+            pl.col("is_senior").sum().alias("arr_external_senior"),
+            pl.col("has_age_data").sum().alias("arr_external_age_available"),
+            
+            # bike model counts
+            pl.col("model_iconic").sum().alias("arr_external_model_iconic"),
+        ]
+        
+        # add weather aggregations for external arrivals
+        for weather_col in weather_cols_in_data:
+            external_aggs.append(pl.col(weather_col).mean().alias(f"arr_external_{weather_col}_mean"))
+        
+        for weather_flag in weather_flags_in_data:
+            external_aggs.append(pl.col(weather_flag).cast(pl.Int32).sum().alias(f"arr_external_{weather_flag}_count"))
+        
         external_arrs = (
             trips_with_time
             .filter(pl.col("is_external_trip"))
             .group_by(["dest_cluster_id", "ts_start"])
-            .agg([
-                pl.len().alias("arr_external_count"),
-                
-                # gender counts for external arrivals
-                (pl.col("genero") == "MALE").sum().alias("arr_external_male"),
-                (pl.col("genero") == "FEMALE").sum().alias("arr_external_female"),
-                (pl.col("genero") == "OTHER").sum().alias("arr_external_other"),
-                
-                # age bins for external arrivals - NO STATISTICS, ONLY COUNTS
-                pl.col("is_young").sum().alias("arr_external_young"),
-                pl.col("is_adult").sum().alias("arr_external_adult"),
-                pl.col("is_senior").sum().alias("arr_external_senior"),
-                pl.col("has_age_data").sum().alias("arr_external_age_available"),
-                
-                # bike model diversity for external arrivals
-                pl.col("modelo_bicicleta").n_unique().alias("arr_external_model_types"),
-            ])
+            .agg(external_aggs)
             .rename({"dest_cluster_id": "cluster_id"})
         )
         
-        # combine internal and external arrivals
+        # combine internal and external arrivals using outer join with proper suffixes
         arrivals = internal_arrs.join(
             external_arrs,
             on=["cluster_id", "ts_start"],
-            how="full"
+            how="outer"
         ).fill_null(0)
         
-        # create has_arrival flags
+        # create has_arrival flags as 1/0
         arrivals = arrivals.with_columns([
-            (pl.col("arr_internal_count") > 0).alias("has_arr_internal"),
-            (pl.col("arr_external_count") > 0).alias("has_arr_external"),
+            (pl.col("arr_internal_count") > 0).cast(pl.Int32).alias("has_arr_internal"),
+            (pl.col("arr_external_count") > 0).cast(pl.Int32).alias("has_arr_external"),
         ])
         
         self.logger.info(f"  -> Arrival aggregations shape: {arrivals.shape}")
@@ -409,65 +475,97 @@ class ClusterFeatureGenerator:
             (2 * np.pi * pl.col("ts_start").dt.month() / 12).sin().alias("month_sin"),
             (2 * np.pi * pl.col("ts_start").dt.month() / 12).cos().alias("month_cos"),
             
-            # business logic features
-            pl.col("ts_start").dt.weekday().is_in([6, 7]).alias("is_weekend"),
-            pl.col("ts_start").dt.hour().is_between(7, 9).alias("is_morning_rush"),
-            pl.col("ts_start").dt.hour().is_between(17, 19).alias("is_evening_rush"),
-            pl.col("ts_start").dt.hour().is_between(6, 22).alias("is_daytime"),
+            # business logic features - all as 1/0
+            pl.col("ts_start").dt.weekday().is_in([6, 7]).cast(pl.Int32).alias("is_weekend"),
+            pl.col("ts_start").dt.hour().is_between(7, 9).cast(pl.Int32).alias("is_morning_rush"),
+            pl.col("ts_start").dt.hour().is_between(17, 19).cast(pl.Int32).alias("is_evening_rush"),
+            pl.col("ts_start").dt.hour().is_between(6, 22).cast(pl.Int32).alias("is_daytime"),
             
-            # seasonal features
-            pl.col("ts_start").dt.month().is_in([12, 1, 2]).alias("is_summer"),
-            pl.col("ts_start").dt.month().is_in([6, 7, 8]).alias("is_winter"),
+            # seasonal features - all as 1/0
+            pl.col("ts_start").dt.month().is_in([12, 1, 2]).cast(pl.Int32).alias("is_summer"),
+            pl.col("ts_start").dt.month().is_in([6, 7, 8]).cast(pl.Int32).alias("is_winter"),
         ])
         
         self.logger.info(f"  -> Added temporal features")
         return df_with_temporal
         
-    def add_weather_features(self, df: pl.DataFrame, 
-                           weather_df: Optional[pl.DataFrame] = None) -> pl.DataFrame:
-        """Add weather features if available.
+    def add_weather_features_from_skeleton(self, df: pl.DataFrame, 
+                                         trips_df: pl.DataFrame) -> pl.DataFrame:
+        """Add weather features by aggregating from original trip data.
         
         Args:
-            df: Base DataFrame with ts_start
-            weather_df: Weather data (if separate) or None to use existing weather columns
+            df: Base DataFrame with cluster_id and ts_start
+            trips_df: Original trips data with weather info
             
         Returns:
-            DataFrame with weather features
+            DataFrame with weather features added
         """
-        self.logger.info("Adding weather features...")
+        self.logger.info("Adding weather features from original data...")
         
-        if weather_df is not None:
-            # join with separate weather data
+        # round original trip timestamps to match skeleton
+        trips_with_time = trips_df.with_columns([
+            pl.col("fecha_origen_recorrido").dt.truncate(f"{self.dt_minutes}m").cast(pl.Datetime("us")).alias("ts_start")
+        ])
+        
+        # check which weather columns are available
+        weather_cols_in_data = [col for col in self.weather_features if col in trips_df.columns]
+        weather_flags_in_data = [col for col in self.weather_flags if col in trips_df.columns]
+        
+        if weather_cols_in_data or weather_flags_in_data:
+            self.logger.info(f"  -> Found {len(weather_cols_in_data)} weather numeric features")
+            self.logger.info(f"  -> Found {len(weather_flags_in_data)} weather boolean features")
+            
+            # aggregate weather data by time interval
+            weather_aggs = []
+            
+            # numeric weather features - take mean
+            for weather_col in weather_cols_in_data:
+                weather_aggs.append(pl.col(weather_col).mean().alias(f"{weather_col}_mean"))
+            
+            # boolean weather features - take most common value (mode)
+            for weather_flag in weather_flags_in_data:
+                weather_aggs.append(
+                    pl.col(weather_flag).cast(pl.Int32).mean().round().cast(pl.Int32).alias(f"{weather_flag}")
+                )
+            
+            # add weather data availability flag
+            weather_aggs.append(pl.lit(1).alias("weather_data_available"))
+            
+            weather_by_time = (
+                trips_with_time
+                .group_by("ts_start")
+                .agg(weather_aggs)
+            )
+            
+            # join weather data with main dataframe
             df_with_weather = df.join(
-                weather_df, 
-                on="ts_start", 
+                weather_by_time,
+                on="ts_start",
                 how="left"
             )
-        else:
-            # weather features should already be in the original trips data
-            # this is handled during the aggregation phase
-            df_with_weather = df
             
-        # check for weather columns and create weather availability flag
-        weather_cols = [
-            'temperature_2m', 'relative_humidity_2m', 'precipitation',
-            'weather_code', 'wind_speed_10m', 'pressure_msl'
-        ]
-        
-        has_weather_cols = [col for col in weather_cols if col in df_with_weather.columns]
-        
-        if has_weather_cols:
-            self.logger.info(f"  -> Found {len(has_weather_cols)} weather columns")
-            # add weather availability flag
+            # fill null weather values with 0 and mark as no weather data available
+            weather_cols_to_fill = [f"{col}_mean" for col in weather_cols_in_data] + weather_flags_in_data
+            
             df_with_weather = df_with_weather.with_columns([
-                pl.lit(True).alias("weather_data_available")
+                pl.when(pl.col("weather_data_available").is_null())
+                .then(0)
+                .otherwise(pl.col("weather_data_available"))
+                .alias("weather_data_available")
             ])
+            
+            for col in weather_cols_to_fill:
+                if col in df_with_weather.columns:
+                    df_with_weather = df_with_weather.with_columns([
+                        pl.col(col).fill_null(0)
+                    ])
+            
         else:
             self.logger.info("  -> No weather columns found, adding placeholder")
-            df_with_weather = df_with_weather.with_columns([
-                pl.lit(False).alias("weather_data_available")
+            df_with_weather = df.with_columns([
+                pl.lit(0).alias("weather_data_available")
             ])
-            
+        
         return df_with_weather
         
     def generate_cluster_features(self, trips_df: pl.DataFrame,
@@ -496,19 +594,15 @@ class ClusterFeatureGenerator:
         departures = self.aggregate_departures(trips_classified)
         arrivals = self.aggregate_arrivals(trips_classified)
         
-        # step 4: join skeleton with aggregations
+        # step 4: join skeleton with aggregations using outer joins to avoid _right suffixes
         self.logger.info("Joining skeleton with aggregated features...")
         
-        # debug: log data types
-        self.logger.info(f"  -> Skeleton ts_start dtype: {skeleton.schema['ts_start']}")
-        self.logger.info(f"  -> Departures ts_start dtype: {departures.schema['ts_start']}")
-        self.logger.info(f"  -> Arrivals ts_start dtype: {arrivals.schema['ts_start']}")
-        
-        features = skeleton.join(
-            departures, on=["cluster_id", "ts_start"], how="left"
-        ).join(
-            arrivals, on=["cluster_id", "ts_start"], how="left"
-        ).fill_null(0)
+        features = (
+            skeleton
+            .join(departures, on=["cluster_id", "ts_start"], how="left")
+            .join(arrivals, on=["cluster_id", "ts_start"], how="left")
+            .fill_null(0)
+        )
         
         # step 5: add cluster metadata
         self.logger.info("Adding cluster metadata...")
@@ -533,8 +627,8 @@ class ClusterFeatureGenerator:
         # step 6: add temporal features
         features = self.create_temporal_features(features)
         
-        # step 7: add weather features (if available in original data)
-        features = self.add_weather_features(features)
+        # step 7: add weather features from original trip data
+        features = self.add_weather_features_from_skeleton(features, trips_df)
         
         # step 8: create summary statistics
         self.logger.info("Computing summary statistics...")
@@ -543,6 +637,7 @@ class ClusterFeatureGenerator:
         non_zero_external_deps = features.filter(pl.col("dep_external_count") > 0).height
         non_zero_internal_arrs = features.filter(pl.col("arr_internal_count") > 0).height
         non_zero_external_arrs = features.filter(pl.col("arr_external_count") > 0).height
+        weather_available = features.filter(pl.col("weather_data_available") > 0).height
         
         self.logger.info(f"Cluster feature generation completed:")
         self.logger.info(f"  -> Total rows: {total_rows:,}")
@@ -550,6 +645,7 @@ class ClusterFeatureGenerator:
         self.logger.info(f"  -> Rows with external departures: {non_zero_external_deps:,} ({non_zero_external_deps/total_rows*100:.1f}%)")
         self.logger.info(f"  -> Rows with internal arrivals: {non_zero_internal_arrs:,} ({non_zero_internal_arrs/total_rows*100:.1f}%)")
         self.logger.info(f"  -> Rows with external arrivals: {non_zero_external_arrs:,} ({non_zero_external_arrs/total_rows*100:.1f}%)")
+        self.logger.info(f"  -> Rows with weather data: {weather_available:,} ({weather_available/total_rows*100:.1f}%)")
         self.logger.info(f"  -> Final feature count: {features.width}")
         
         return features 
