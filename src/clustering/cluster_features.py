@@ -604,6 +604,14 @@ class ClusterFeatureGenerator:
             .fill_null(0)
         )
         
+        # remove any duplicate columns with _right suffixes that might have been created
+        columns_to_keep = []
+        for col in features.columns:
+            if not (col.endswith("_right") or col.endswith("_right_right")):
+                columns_to_keep.append(col)
+        
+        features = features.select(columns_to_keep)
+        
         # step 5: add cluster metadata
         self.logger.info("Adding cluster metadata...")
         cluster_meta_data = []
