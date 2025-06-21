@@ -183,12 +183,13 @@ class ClusterFeatureGenerator:
         self.logger.info(f"  -> Time interval: {self.dt_minutes} minutes")
         self.logger.info(f"  -> Number of clusters: {len(cluster_ids)}")
         
-        # create time series
+        # create time series with consistent datetime precision
         time_range = pl.datetime_range(
             start=start_time.replace(minute=0, second=0, microsecond=0),
             end=end_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1),
             interval=f"{self.dt_minutes}m",
-            eager=True
+            eager=True,
+            time_unit="us"
         )
         
         # create cartesian product of clusters and time intervals
@@ -199,7 +200,8 @@ class ClusterFeatureGenerator:
                 
         skeleton_df = pl.DataFrame(
             skeleton_data,
-            schema=["cluster_id", "ts_start"]
+            schema={"cluster_id": pl.Int32, "ts_start": pl.Datetime("us")},
+            orient="row"
         )
         
         self.logger.info(f"  -> Created skeleton with {skeleton_df.height:,} rows")
@@ -218,9 +220,9 @@ class ClusterFeatureGenerator:
         """
         self.logger.info("Aggregating departure features...")
         
-        # round timestamp to time interval
+        # round timestamp to time interval - ensure consistent datetime precision
         trips_with_time = trips_df.with_columns([
-            pl.col("fecha_origen_recorrido").dt.truncate(f"{self.dt_minutes}m").alias("ts_start")
+            pl.col("fecha_origen_recorrido").dt.truncate(f"{self.dt_minutes}m").cast(pl.Datetime("us")).alias("ts_start")
         ])
         
         # aggregate internal departures
@@ -312,7 +314,7 @@ class ClusterFeatureGenerator:
         time_col = "fecha_destino_recorrido" if "fecha_destino_recorrido" in trips_df.columns else "fecha_origen_recorrido"
         
         trips_with_time = trips_df.with_columns([
-            pl.col(time_col).dt.truncate(f"{self.dt_minutes}m").alias("ts_start")
+            pl.col(time_col).dt.truncate(f"{self.dt_minutes}m").cast(pl.Datetime("us")).alias("ts_start")
         ])
         
         # aggregate internal arrivals
@@ -496,6 +498,12 @@ class ClusterFeatureGenerator:
         
         # step 4: join skeleton with aggregations
         self.logger.info("Joining skeleton with aggregated features...")
+        
+        # debug: log data types
+        self.logger.info(f"  -> Skeleton ts_start dtype: {skeleton.schema['ts_start']}")
+        self.logger.info(f"  -> Departures ts_start dtype: {departures.schema['ts_start']}")
+        self.logger.info(f"  -> Arrivals ts_start dtype: {arrivals.schema['ts_start']}")
+        
         features = skeleton.join(
             departures, on=["cluster_id", "ts_start"], how="left"
         ).join(
@@ -516,7 +524,8 @@ class ClusterFeatureGenerator:
             
         cluster_meta_df = pl.DataFrame(
             cluster_meta_data,
-            schema=['cluster_id', 'cluster_centroid_lat', 'cluster_centroid_lon', 'cluster_station_count']
+            schema=['cluster_id', 'cluster_centroid_lat', 'cluster_centroid_lon', 'cluster_station_count'],
+            orient="row"
         )
         
         features = features.join(cluster_meta_df, on="cluster_id", how="left")

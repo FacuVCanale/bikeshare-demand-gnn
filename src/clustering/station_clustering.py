@@ -185,7 +185,8 @@ class StationClusterer:
             
         centroid_df = pl.DataFrame(
             centroid_data,
-            schema=['cluster_centroid_lat', 'cluster_centroid_lon', 'cluster_station_count']
+            schema=['cluster_centroid_lat', 'cluster_centroid_lon', 'cluster_station_count'],
+            orient="row"
         )
         
         result = pl.concat([result, centroid_df], how="horizontal")
