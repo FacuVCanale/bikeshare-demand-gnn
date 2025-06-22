@@ -528,8 +528,36 @@ def main():
         print(f"Processing {split.upper()} split...")
         print(f"{'='*60}")
         
-        # Load data efficiently with lazy evaluation
-        parquet_path = Path(args.input_dir) / f'{split}_cluster_features.parquet'
+        # Determine the correct file naming pattern based on clustering configuration
+        cluster_features_path = Path(args.input_dir) / f'{split}_cluster_features.parquet'
+        station_features_path = Path(args.input_dir) / f'{split}_station_features.parquet'
+        
+        # Auto-detect which file pattern exists
+        if cluster_features_path.exists():
+            parquet_path = cluster_features_path
+            print(f"Found clustered data file: {parquet_path}")
+        elif station_features_path.exists():
+            parquet_path = station_features_path
+            print(f"Found station-level data file: {parquet_path}")
+        else:
+            # Try to infer from metadata
+            clustering_enabled = metadata.get('clustering_enabled', metadata.get('n_clusters') is not None)
+            if clustering_enabled:
+                parquet_path = cluster_features_path
+                print(f"Using cluster-based naming (from metadata): {parquet_path}")
+            else:
+                parquet_path = station_features_path
+                print(f"Using station-based naming (from metadata): {parquet_path}")
+            
+            # Final check if the inferred path exists
+            if not parquet_path.exists():
+                available_files = list(Path(args.input_dir).glob(f'{split}_*.parquet'))
+                raise FileNotFoundError(
+                    f"Neither {cluster_features_path} nor {station_features_path} exists.\n"
+                    f"Available files: {available_files}\n"
+                    f"Please check that the dataset generation step completed successfully."
+                )
+        
         print(f"Loading data from {parquet_path}...")
         
         # Use lazy loading for better memory management
