@@ -203,6 +203,18 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
             k_neighbors=config['k_neighbors']
         )
         
+        # for non-training splits, try to load pre-fitted scalers
+        scalers_path = Path(config.get('output_path', 'data/gnn')) / 'scalers_temp.pkl'
+        if split != 'train' and scalers_path.exists():
+            try:
+                logger.info(f"Loading pre-fitted scalers for {split} split...")
+                scalers = load_compressed(scalers_path, 'auto', logger)
+                dataset.feature_scaler = scalers['feature_scaler']
+                dataset.target_scaler = scalers['target_scaler']
+                logger.info(f"✅ Successfully loaded scalers for {split}")
+            except Exception as e:
+                logger.warning(f"Could not load scalers for {split}: {e}")
+        
         # load data with progress tracking
         logger.info(f"Loading {split} data...")
         temporal_signal = dataset.load_data(split)
@@ -413,37 +425,70 @@ Examples:
         'data_path': args.data_path,
         'sequence_length': args.sequence_length,
         'k_neighbors': args.k_neighbors,
-        'log_level': config.log_level
+        'log_level': config.log_level,
+        'output_path': args.output_path
     }
     
-    # process splits
+    # process splits with smart dependency handling
     if config.parallel_processing and len(splits) > 1 and not args.stats_only:
-        logger.info("🔄 Processing splits in parallel...")
+        logger.info("🔄 Processing splits with dependency management...")
         
-        # parallel processing
-        max_workers = config.max_workers or min(len(splits), psutil.cpu_count())
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # submit all split processing tasks
-            future_to_split = {
-                executor.submit(process_single_split, (split, process_config)): split 
-                for split in splits
-            }
+        results = {}
+        
+        # step 1: process training split first (required for scaler fitting)
+        if 'train' in splits:
+            logger.info("📊 Processing training split first (required for scalers)...")
+            train_result = process_single_split(('train', process_config))
+            results['train'] = train_result
             
-            results = {}
-            progress_bar = tqdm(total=len(splits), desc="Processing splits") if config.show_progress else None
+            if not train_result.get('success', False):
+                logger.error("❌ Training split failed - cannot proceed with other splits")
+                return
             
-            for future in as_completed(future_to_split):
-                result = future.result()
-                results[result['split']] = result
+            # save scalers temporarily for parallel processing
+            if train_result.get('dataset'):
+                try:
+                    temp_scalers = {
+                        'feature_scaler': train_result['dataset'].feature_scaler,
+                        'target_scaler': train_result['dataset'].target_scaler
+                    }
+                    temp_scalers_path = output_path / 'scalers_temp.pkl'
+                    save_compressed(temp_scalers, temp_scalers_path, 'none', logger)  # use no compression for speed
+                    logger.info("💾 Saved temporary scalers for parallel processing")
+                except Exception as e:
+                    logger.warning(f"Could not save temporary scalers: {e}")
+            
+            logger.info("✅ Training split completed - scalers are now available")
+            remaining_splits = [s for s in splits if s != 'train']
+        else:
+            remaining_splits = splits
+        
+        # step 2: process remaining splits in parallel (if any)
+        if remaining_splits:
+            logger.info(f"🔄 Processing remaining splits in parallel: {remaining_splits}")
+            
+            max_workers = config.max_workers or min(len(remaining_splits), psutil.cpu_count())
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # submit remaining split processing tasks
+                future_to_split = {
+                    executor.submit(process_single_split, (split, process_config)): split 
+                    for split in remaining_splits
+                }
+                
+                progress_bar = tqdm(total=len(remaining_splits), desc="Processing splits") if config.show_progress else None
+                
+                for future in as_completed(future_to_split):
+                    result = future.result()
+                    results[result['split']] = result
+                    
+                    if progress_bar:
+                        progress_bar.update(1)
+                        progress_bar.set_description(f"Completed {result['split']}")
                 
                 if progress_bar:
-                    progress_bar.update(1)
-                    progress_bar.set_description(f"Completed {result['split']}")
-            
-            if progress_bar:
-                progress_bar.close()
+                    progress_bar.close()
         
-        monitor.log_resources("Parallel processing completed")
+        monitor.log_resources("Smart parallel processing completed")
         
     else:
         logger.info("🔄 Processing splits sequentially...")
@@ -552,6 +597,15 @@ Examples:
         
         except Exception as e:
             logger.warning(f"⚠️  Warning: Could not save scalers: {e}")
+    
+    # cleanup temporary files
+    temp_scalers_path = output_path / 'scalers_temp.pkl'
+    if temp_scalers_path.exists():
+        try:
+            temp_scalers_path.unlink()
+            logger.info("🧹 Cleaned up temporary scalers file")
+        except Exception as e:
+            logger.warning(f"Could not remove temporary scalers file: {e}")
     
     # summary
     successful_splits = [split for split, result in results.items() if result.get('success', False)]
