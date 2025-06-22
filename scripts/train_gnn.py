@@ -8,6 +8,7 @@ for bike demand prediction, including model comparison and evaluation.
 import torch
 import numpy as np
 import pandas as pd
+import random
 from pathlib import Path
 import json
 import argparse
@@ -20,6 +21,23 @@ sys.path.insert(0, str(project_root))
 
 from src.models.gnn_models import create_gnn_model, print_model_summary
 from src.training.gnn_trainer import GNNTrainer, train_gnn_experiment
+
+
+def set_seed(seed: int):
+    """
+    Set random seed for reproducibility.
+    
+    Args:
+        seed: Random seed value
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
 
 
 def load_gnn_data(data_dir: str) -> Dict[str, Any]:
@@ -319,6 +337,8 @@ def main():
                         default='all', help='Model type to train')
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='Name for the experiment')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
     parser.add_argument('--patience', type=int, default=15,
@@ -354,6 +374,9 @@ def main():
                         help='Save detailed results')
     
     args = parser.parse_args()
+    
+    # set random seed for reproducibility
+    set_seed(args.seed)
     
     print("Loading GNN data...")
     try:
