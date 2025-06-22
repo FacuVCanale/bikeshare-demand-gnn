@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """
-Generate clustered dataset for EcoBici analysis.
+Generate clustered or station-level dataset for EcoBici analysis.
 
 This script:
 1. Loads and merges all datasets (trips_with_weather, trips, users)
 2. Creates temporal splits without data leakage  
-3. Fits K-means clustering on training stations only
-4. Generates cluster-level features with internal/external trip distinction
+3. Optionally fits K-means clustering on training stations (if --n_clusters specified)
+4. Generates cluster-level OR station-level features with internal/external trip distinction
 5. Handles ghost trips and user demographics
 6. Saves train/validation/test datasets with comprehensive features
 
 Usage:
-    python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/clustered
+    # With clustering (default):
+    python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/clustered --n_clusters 93
+    
+    # Without clustering (station-level features):
+    python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/station_level --n_clusters none
     
 Features generated:
-- Cluster metadata (centroids, station counts)
+- Metadata (cluster centroids/station coordinates, counts)
 - Temporal features (hour, day, season, cyclical encodings)
 - Weather features (temperature, humidity, precipitation, etc.)
-- Internal trip features (departures/arrivals within cluster)
-- External trip features (departures/arrivals across clusters)
+- Internal trip features (departures/arrivals within cluster/station)
+- External trip features (departures/arrivals across clusters/stations)
 - User demographics (gender, age) by trip type
 - Bike model distributions by trip type
 - Quality flags (user_matched, weather_available, etc.)
@@ -93,9 +97,9 @@ def main():
     
     parser.add_argument(
         "--n_clusters", 
-        type=int, 
+        type=lambda x: None if x.lower() == 'none' else int(x),
         default=93,
-        help="Number of clusters for K-means (default: 93)"
+        help="Number of clusters for K-means (default: 93). Use 'none' to disable clustering and use individual stations"
     )
     
     parser.add_argument(
@@ -152,11 +156,17 @@ def main():
     logger = setup_logging(args.log_level)
     
     logger.info("=" * 80)
-    logger.info("ECOBICI CLUSTER DATASET GENERATION")
+    if args.n_clusters is None:
+        logger.info("ECOBICI STATION-LEVEL DATASET GENERATION (NO CLUSTERING)")
+    else:
+        logger.info("ECOBICI CLUSTER DATASET GENERATION")
     logger.info("=" * 80)
     logger.info(f"Data directory: {args.data_dir}")
     logger.info(f"Output directory: {args.output_dir}")
-    logger.info(f"Number of clusters: {args.n_clusters}")
+    if args.n_clusters is None:
+        logger.info(f"Clustering: DISABLED (using individual stations)")
+    else:
+        logger.info(f"Number of clusters: {args.n_clusters}")
     logger.info(f"Time interval: {args.dt_minutes} minutes") 
     logger.info(f"Train end date: {args.train_end_date}")
     logger.info(f"Validation end date: {args.val_end_date}")
@@ -181,11 +191,16 @@ def main():
     try:
         # initialize components
         data_prep = DataPreparator(data_dir=args.data_dir, log_level=args.log_level)
-        clusterer = StationClusterer(
-            n_clusters=args.n_clusters,
-            random_state=args.random_state,
-            log_level=args.log_level
-        )
+        
+        # only initialize clusterer if clustering is enabled
+        clusterer = None
+        if args.n_clusters is not None:
+            clusterer = StationClusterer(
+                n_clusters=args.n_clusters,
+                random_state=args.random_state,
+                log_level=args.log_level
+            )
+        
         feature_gen = ClusterFeatureGenerator(
             dt_minutes=args.dt_minutes,
             log_level=args.log_level
@@ -230,37 +245,67 @@ def main():
                 with open(splits_checkpoint, 'wb') as f:
                     pickle.dump((train_data, val_data, test_data), f)
         
-        # step 3: extract station metadata and fit clustering on train data only
+        # step 3: extract station metadata and fit clustering on train data only (if enabled)
         logger.info("\n" + "="*60)
-        logger.info("STEP 3: STATION CLUSTERING (TRAIN DATA ONLY)")
+        if args.n_clusters is not None:
+            logger.info("STEP 3: STATION CLUSTERING (TRAIN DATA ONLY)")
+        else:
+            logger.info("STEP 3: STATION METADATA EXTRACTION (NO CLUSTERING)")
         logger.info("="*60)
         
-        clustering_model_path = models_dir / f"kmeans_k{args.n_clusters}_model.pkl"
-        
-        if args.use_checkpoints and clustering_model_path.exists():
-            clusterer.load_model(clustering_model_path)
+        if args.n_clusters is not None:
+            # clustering is enabled
+            clustering_model_path = models_dir / f"kmeans_k{args.n_clusters}_model.pkl"
+            
+            if args.use_checkpoints and clustering_model_path.exists():
+                clusterer.load_model(clustering_model_path)
+            else:
+                # extract station metadata from TRAIN data only to prevent data leakage
+                logger.info("Extracting station metadata from TRAINING data only...")
+                train_stations = data_prep.extract_station_metadata(train_data)
+                
+                # fit clustering on train stations only
+                clusterer.fit_clustering(train_stations)
+                
+                # save clustering model
+                clusterer.save_model(clustering_model_path)
+            
+            # get clustering artifacts
+            station_cluster_mapping = clusterer.get_station_cluster_mapping()
+            cluster_centroids = clusterer.get_cluster_centroids()
+            
+            logger.info(f"Clustering summary:")
+            logger.info(f"  -> {len(station_cluster_mapping)} stations mapped")
+            logger.info(f"  -> {len(cluster_centroids)} clusters created")
         else:
-            # extract station metadata from TRAIN data only to prevent data leakage
+            # no clustering - create station-level mapping
             logger.info("Extracting station metadata from TRAINING data only...")
             train_stations = data_prep.extract_station_metadata(train_data)
             
-            # fit clustering on train stations only
-            clusterer.fit_clustering(train_stations)
+            # create identity mapping: each station is its own cluster
+            station_cluster_mapping = {row[0]: row[0] for row in train_stations.iter_rows()}
             
-            # save clustering model
-            clusterer.save_model(clustering_model_path)
+            # create station centroids (each station is its own centroid)
+            cluster_centroids = {}
+            for row in train_stations.iter_rows():
+                station_id, name, lat, lon = row
+                cluster_centroids[station_id] = {
+                    'lat': lat,
+                    'lon': lon,
+                    'station_count': 1,
+                    'station_name': name
+                }
+            
+            logger.info(f"Station-level processing summary:")
+            logger.info(f"  -> {len(station_cluster_mapping)} stations extracted")
+            logger.info(f"  -> Each station treated as individual cluster")
         
-        # get clustering artifacts
-        station_cluster_mapping = clusterer.get_station_cluster_mapping()
-        cluster_centroids = clusterer.get_cluster_centroids()
-        
-        logger.info(f"Clustering summary:")
-        logger.info(f"  -> {len(station_cluster_mapping)} stations mapped")
-        logger.info(f"  -> {len(cluster_centroids)} clusters created")
-        
-        # step 4: generate cluster features for each split
+        # step 4: generate features for each split
         logger.info("\n" + "="*60)
-        logger.info("STEP 4: GENERATING CLUSTER FEATURES")
+        if args.n_clusters is not None:
+            logger.info("STEP 4: GENERATING CLUSTER FEATURES")
+        else:
+            logger.info("STEP 4: GENERATING STATION-LEVEL FEATURES")
         logger.info("="*60)
         
         datasets = {
@@ -274,15 +319,21 @@ def main():
         for split_name, split_data in datasets.items():
             logger.info(f"\nGenerating features for {split_name.upper()} split...")
             
-            features_checkpoint = checkpoints_dir / f"04_{split_name}_cluster_features.parquet"
+            # different checkpoint names for clustering vs station-level
+            if args.n_clusters is not None:
+                features_checkpoint = checkpoints_dir / f"04_{split_name}_cluster_features.parquet"
+                feature_type = "cluster features"
+            else:
+                features_checkpoint = checkpoints_dir / f"04_{split_name}_station_features.parquet"
+                feature_type = "station features"
             
             if args.use_checkpoints:
-                split_features = load_checkpoint_if_exists(features_checkpoint, f"{split_name} cluster features", logger)
+                split_features = load_checkpoint_if_exists(features_checkpoint, f"{split_name} {feature_type}", logger)
             else:
                 split_features = None
                 
             if split_features is None:
-                # generate cluster features for this split
+                # generate features for this split (cluster or station level)
                 split_features = feature_gen.generate_cluster_features(
                     trips_df=split_data,
                     station_cluster_mapping=station_cluster_mapping,
@@ -290,7 +341,7 @@ def main():
                 )
                 
                 if args.use_checkpoints:
-                    save_checkpoint(split_features, features_checkpoint, f"{split_name} cluster features", logger)
+                    save_checkpoint(split_features, features_checkpoint, f"{split_name} {feature_type}", logger)
             
             final_datasets[split_name] = split_features
         
@@ -300,7 +351,10 @@ def main():
         logger.info("="*60)
         
         for split_name, split_data in final_datasets.items():
-            output_path = output_dir / f"{split_name}_cluster_features.parquet"
+            if args.n_clusters is not None:
+                output_path = output_dir / f"{split_name}_cluster_features.parquet"
+            else:
+                output_path = output_dir / f"{split_name}_station_features.parquet"
             save_checkpoint(split_data, output_path, f"final {split_name} dataset", logger)
         
         # step 6: save metadata and summary
@@ -308,9 +362,10 @@ def main():
         logger.info("STEP 6: SAVING METADATA AND SUMMARY")
         logger.info("="*60)
         
-        # save clustering metadata
+        # save metadata
         metadata = {
             'n_clusters': args.n_clusters,
+            'clustering_enabled': args.n_clusters is not None,
             'dt_minutes': args.dt_minutes,
             'train_end_date': args.train_end_date,
             'val_end_date': args.val_end_date,
@@ -356,15 +411,55 @@ def main():
         logger.info(f"Saved metadata to {metadata_path}")
         
         # create summary report
+        if args.n_clusters is not None:
+            title = "ECOBICI CLUSTER DATASET GENERATION SUMMARY"
+            config_line = f"  Number of clusters: {args.n_clusters}"
+            summary_section = "CLUSTERING SUMMARY:"
+            summary_details = [
+                f"  Stations mapped: {len(station_cluster_mapping)}",
+                f"  Clusters created: {len(cluster_centroids)}"
+            ]
+            output_files = [
+                f"  Train dataset: {output_dir}/train_cluster_features.parquet",
+                f"  Validation dataset: {output_dir}/val_cluster_features.parquet", 
+                f"  Test dataset: {output_dir}/test_cluster_features.parquet",
+                f"  Clustering model: {models_dir}/kmeans_k{args.n_clusters}_model.pkl",
+                f"  Metadata: {metadata_path}"
+            ]
+            features_desc = [
+                "  - Cluster metadata (centroids, station counts)",
+                "  - Internal trip features (within cluster)",
+                "  - External trip features (across clusters)"
+            ]
+        else:
+            title = "ECOBICI STATION-LEVEL DATASET GENERATION SUMMARY"
+            config_line = f"  Clustering: DISABLED (station-level features)"
+            summary_section = "STATION PROCESSING SUMMARY:"
+            summary_details = [
+                f"  Stations processed: {len(station_cluster_mapping)}",
+                f"  Each station treated individually"
+            ]
+            output_files = [
+                f"  Train dataset: {output_dir}/train_station_features.parquet",
+                f"  Validation dataset: {output_dir}/val_station_features.parquet", 
+                f"  Test dataset: {output_dir}/test_station_features.parquet",
+                f"  Metadata: {metadata_path}"
+            ]
+            features_desc = [
+                "  - Station metadata (coordinates, names)",
+                "  - Internal trip features (within station)",
+                "  - External trip features (across stations)"
+            ]
+        
         summary_lines = [
-            "ECOBICI CLUSTER DATASET GENERATION SUMMARY",
+            title,
             "=" * 50,
             f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Data directory: {args.data_dir}",
             f"Output directory: {args.output_dir}",
             "",
             "CONFIGURATION:",
-            f"  Number of clusters: {args.n_clusters}",
+            config_line,
             f"  Time interval: {args.dt_minutes} minutes",
             f"  Train end date: {args.train_end_date}",
             f"  Validation end date: {args.val_end_date}",
@@ -375,23 +470,16 @@ def main():
             f"  Validation: {final_datasets['val'].shape}",
             f"  Test: {final_datasets['test'].shape}",
             "",
-            "CLUSTERING SUMMARY:",
-            f"  Stations mapped: {len(station_cluster_mapping)}",
-            f"  Clusters created: {len(cluster_centroids)}",
+            summary_section,
+        ] + summary_details + [
             "",
             "OUTPUT FILES:",
-            f"  Train dataset: {output_dir}/train_cluster_features.parquet",
-            f"  Validation dataset: {output_dir}/val_cluster_features.parquet", 
-            f"  Test dataset: {output_dir}/test_cluster_features.parquet",
-            f"  Clustering model: {clustering_model_path}",
-            f"  Metadata: {metadata_path}",
+        ] + output_files + [
             "",
             "FEATURES INCLUDED:",
-            "  - Cluster metadata (centroids, station counts)",
+        ] + features_desc + [
             "  - Temporal features (hour, day, season, cyclical)",
             "  - Weather features (temperature, humidity, precipitation)",
-            "  - Internal trip features (within cluster)",
-            "  - External trip features (across clusters)",
             "  - User demographics by trip type",
             "  - Bike model distributions by trip type",
             "  - Quality flags (user_matched, weather_available)",
@@ -407,13 +495,20 @@ def main():
         
         # final success message
         logger.info("\n" + "="*80)
-        logger.info("✓ CLUSTER DATASET GENERATION COMPLETED SUCCESSFULLY!")
+        if args.n_clusters is not None:
+            logger.info("✓ CLUSTER DATASET GENERATION COMPLETED SUCCESSFULLY!")
+        else:
+            logger.info("✓ STATION-LEVEL DATASET GENERATION COMPLETED SUCCESSFULLY!")
         logger.info("="*80)
         logger.info(f"Output directory: {output_dir}")
         logger.info(f"Train dataset: {final_datasets['train'].shape}")
         logger.info(f"Validation dataset: {final_datasets['val'].shape}")
         logger.info(f"Test dataset: {final_datasets['test'].shape}")
         logger.info(f"Total features: {final_datasets['train'].width}")
+        if args.n_clusters is not None:
+            logger.info(f"Clustering mode: {args.n_clusters} clusters")
+        else:
+            logger.info(f"Station-level mode: {len(station_cluster_mapping)} individual stations")
         logger.info("="*80)
         
     except Exception as e:
