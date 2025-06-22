@@ -382,6 +382,12 @@ def prepare_temporal_sequences_optimized(
     
     print(f"  Created {len(all_sequences)} sequences successfully")
     
+    # Check if we have too many sequences for memory (> 1M sequences is risky)
+    if len(all_sequences) > 1000000:
+        print(f"  WARNING: Too many sequences ({len(all_sequences)}) - would require ~{len(all_sequences) * 24 * len(feature_cols) * 4 / 1e9:.1f}GB RAM")
+        print("  Automatically switching to aggregation-only approach to avoid memory issues")
+        return np.array([]), np.array([]), np.array([]), feature_cols
+    
     # Clean up partitions to free memory
     del cluster_partitions
     gc.collect()
