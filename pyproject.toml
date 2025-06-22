@@ -64,7 +64,7 @@ ecobici-train-titans = "src.train_titans:main"
 
 [project.optional-dependencies]
 dev = [
-    "ecobici-ai[test,lint,docs,notebook,ml-extra]",
+    "ecobici-ai[test,lint,docs,notebook]",
     "ipykernel>=6.0.0",
     "optuna>=3.0.0",
     "tensorboard>=2.12.0",
@@ -86,11 +86,6 @@ dev = [
     "tqdm>=4.64.0",
     "rich>=13.0.0",
     "click>=8.0.0",
-]
-
-ml-extra = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
 ]
 
 test = [
@@ -271,7 +266,6 @@ module = [
     "sklearn.*",
     "xgboost.*",
     "pyarrow.*",
-    "torch.*",
     "lightgbm.*",
     "catboost.*",
     "optuna.*",

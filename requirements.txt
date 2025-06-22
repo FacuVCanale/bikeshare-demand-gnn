@@ -5,7 +5,6 @@ pyarrow
 xgboost
 lightgbm
 catboost
-torch  # for GPU detection
 numpy
 openmeteo-requests
 requests-cache
@@ -18,3 +17,4 @@ seaborn
 plotly
 joblib
 optuna
+torch-geometric
