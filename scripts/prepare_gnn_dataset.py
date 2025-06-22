@@ -519,7 +519,14 @@ def main():
     metadata_path = Path(args.input_dir) / 'dataset_metadata.json'
     metadata = load_cluster_metadata(str(metadata_path))
     
-    print(f"Loaded metadata for {metadata['n_clusters']} clusters")
+    # Handle both clustered and station-level datasets
+    clustering_enabled = metadata.get('clustering_enabled', metadata.get('n_clusters') is not None)
+    n_clusters_or_stations = metadata.get('n_clusters') or metadata.get('total_stations')
+    
+    if clustering_enabled:
+        print(f"Loaded metadata for {n_clusters_or_stations} clusters (clustered dataset)")
+    else:
+        print(f"Loaded metadata for {n_clusters_or_stations} stations (station-level dataset)")
     print(f"Data splits: Train={metadata['train_shape']}, Val={metadata['val_shape']}, Test={metadata['test_shape']}")
     
     # Process each split with optimizations
@@ -645,6 +652,10 @@ def main():
             print("Creating cluster connectivity graph...")
             print(f"  Graph parameters: k_neighbors={args.k_neighbors}, distance_threshold={args.distance_threshold}km")
             
+            # Get the actual number of nodes from the data
+            actual_num_nodes = len(metadata['cluster_centroids'])
+            print(f"  Detected {actual_num_nodes} nodes from centroids data")
+            
             adj_matrix = create_cluster_adjacency_matrix(
                 metadata['cluster_centroids'],
                 k_neighbors=args.k_neighbors,
@@ -652,10 +663,17 @@ def main():
             )
             edge_index = create_edge_index_from_adjacency(adj_matrix)
             
-            density = edge_index.shape[1] / (metadata['n_clusters'] * (metadata['n_clusters'] - 1))
+            # Calculate graph density using actual number of nodes
+            if actual_num_nodes > 1:
+                density = edge_index.shape[1] / (actual_num_nodes * (actual_num_nodes - 1))
+                avg_edges_per_node = edge_index.shape[1] / actual_num_nodes
+            else:
+                density = 0.0
+                avg_edges_per_node = 0.0
+                
             print(f"Created graph with {edge_index.shape[1]} edges")
             print(f"  Graph density: {density:.4f}")
-            print(f"  Avg edges per node: {edge_index.shape[1] / metadata['n_clusters']:.1f}")
+            print(f"  Avg edges per node: {avg_edges_per_node:.1f}")
             
             # Save adjacency matrix and edge index
             print("Saving graph structure...")
@@ -724,11 +742,14 @@ def main():
         
         # Create data object efficiently
         print("Building PyTorch Geometric Data object...")
+        # Get actual number of nodes from the data shape
+        actual_num_nodes = node_features.shape[0]
+        
         data = Data(
             x=torch.tensor(node_features, dtype=torch.float32),
             y=torch.tensor(target_values, dtype=torch.float32),
             edge_index=edge_index,
-            num_nodes=metadata['n_clusters']
+            num_nodes=actual_num_nodes
         )
         
         # Save processed data with compression
@@ -765,7 +786,8 @@ def main():
         'sequence_length': args.sequence_length,
         'processing_timestamp': pd.Timestamp.now().isoformat(),
         'optimization_version': '2.0',  # Track optimization version
-        'n_clusters': metadata['n_clusters'],
+        'n_clusters': n_clusters_or_stations,
+        'clustering_enabled': clustering_enabled,
         'dt_minutes': metadata['dt_minutes']
     }
     
@@ -778,7 +800,11 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"Target strategy: {args.target}")
     print(f"Graph connectivity: {args.k_neighbors} neighbors, {args.distance_threshold}km threshold")
-    print(f"Graph structure: {metadata['n_clusters']} nodes, {edge_index.shape[1]} edges")
+    actual_nodes = len(metadata['cluster_centroids'])
+    if clustering_enabled:
+        print(f"Graph structure: {actual_nodes} cluster nodes, {edge_index.shape[1]} edges")
+    else:
+        print(f"Graph structure: {actual_nodes} station nodes, {edge_index.shape[1]} edges")
     
     print(f"\nFiles created:")
     total_size_mb = 0
