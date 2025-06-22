@@ -1,0 +1,580 @@
+"""
+Training module for Graph Neural Network models in EcoBici demand prediction.
+
+This module provides comprehensive training functionality for GNN models including
+training loops, validation, early stopping, model checkpointing, and experiment tracking.
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch_geometric.data import Data, DataLoader
+from torch_geometric.loader import DataLoader as GeometricDataLoader
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import json
+import time
+from typing import Dict, List, Optional, Tuple, Any, Union
+import logging
+from datetime import datetime
+
+from ..models.gnn_models import (
+    TemporalGCN, SpatialGAT, GraphSAGE, GraphTransformer, 
+    HybridSpatioTemporalGNN, calculate_gnn_metrics, create_gnn_model
+)
+
+
+class EarlyStopping:
+    """Early stopping utility to prevent overfitting"""
+    
+    def __init__(self, patience: int = 10, min_delta: float = 0.001, restore_best_weights: bool = True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.best_weights = None
+        
+    def __call__(self, val_loss: float, model: nn.Module) -> bool:
+        """
+        Check if training should stop early
+        
+        Returns:
+            True if training should stop, False otherwise
+        """
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            if self.restore_best_weights:
+                self.best_weights = model.state_dict().copy()
+        else:
+            self.counter += 1
+            
+        if self.counter >= self.patience:
+            if self.restore_best_weights and self.best_weights is not None:
+                model.load_state_dict(self.best_weights)
+            return True
+        return False
+
+
+class GNNTrainer:
+    """
+    Comprehensive trainer for Graph Neural Network models.
+    
+    Handles training, validation, model checkpointing, and experiment tracking
+    for various GNN architectures on bike demand prediction.
+    """
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        device: str = 'auto',
+        experiment_name: str = None,
+        save_dir: str = 'experiments'
+    ):
+        """
+        Initialize GNN trainer.
+        
+        Args:
+            model: GNN model to train
+            device: Device to use ('cuda', 'cpu', or 'auto')
+            experiment_name: Name for this experiment
+            save_dir: Directory to save experiment results
+        """
+        # set device
+        if device == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+        
+        # move model to device
+        self.model = model.to(self.device)
+        
+        # experiment setup
+        self.experiment_name = experiment_name or f"gnn_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.save_dir = Path(save_dir) / self.experiment_name
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # setup logging
+        self.setup_logging()
+        
+        # training state
+        self.optimizer = None
+        self.scheduler = None
+        self.criterion = None
+        self.history = {
+            'train_loss': [],
+            'val_loss': [],
+            'train_metrics': [],
+            'val_metrics': [],
+            'learning_rates': []
+        }
+        
+        self.logger.info(f"Initialized GNN trainer for {model.__class__.__name__}")
+        self.logger.info(f"Device: {self.device}")
+        self.logger.info(f"Experiment: {self.experiment_name}")
+        
+    def setup_logging(self):
+        """Setup logging for the experiment"""
+        log_file = self.save_dir / 'training.log'
+        
+        # create logger
+        self.logger = logging.getLogger(f'gnn_trainer_{self.experiment_name}')
+        self.logger.setLevel(logging.INFO)
+        
+        # clear existing handlers
+        self.logger.handlers.clear()
+        
+        # create file handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        
+        # create console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # create formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # add handlers
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+        
+    def setup_training(
+        self,
+        optimizer_name: str = 'adam',
+        learning_rate: float = 0.001,
+        weight_decay: float = 1e-5,
+        scheduler_name: str = 'plateau',
+        loss_function: str = 'mse',
+        **optimizer_kwargs
+    ):
+        """
+        Setup training components (optimizer, scheduler, loss function).
+        
+        Args:
+            optimizer_name: Name of optimizer ('adam', 'adamw', 'sgd')
+            learning_rate: Learning rate
+            weight_decay: Weight decay for regularization
+            scheduler_name: Learning rate scheduler ('plateau', 'cosine', 'none')
+            loss_function: Loss function ('mse', 'mae', 'huber')
+            **optimizer_kwargs: Additional optimizer arguments
+        """
+        # setup optimizer
+        if optimizer_name.lower() == 'adam':
+            self.optimizer = optim.Adam(
+                self.model.parameters(),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+                **optimizer_kwargs
+            )
+        elif optimizer_name.lower() == 'adamw':
+            self.optimizer = optim.AdamW(
+                self.model.parameters(),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+                **optimizer_kwargs
+            )
+        elif optimizer_name.lower() == 'sgd':
+            self.optimizer = optim.SGD(
+                self.model.parameters(),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+                momentum=optimizer_kwargs.get('momentum', 0.9),
+                **{k: v for k, v in optimizer_kwargs.items() if k != 'momentum'}
+            )
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer_name}")
+        
+        # setup scheduler
+        if scheduler_name.lower() == 'plateau':
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.5,
+                patience=5,
+                verbose=True
+            )
+        elif scheduler_name.lower() == 'cosine':
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=50,
+                eta_min=learning_rate * 0.01
+            )
+        elif scheduler_name.lower() == 'none':
+            self.scheduler = None
+        else:
+            raise ValueError(f"Unknown scheduler: {scheduler_name}")
+        
+        # setup loss function
+        if loss_function.lower() == 'mse':
+            self.criterion = nn.MSELoss()
+        elif loss_function.lower() == 'mae':
+            self.criterion = nn.L1Loss()
+        elif loss_function.lower() == 'huber':
+            self.criterion = nn.HuberLoss()
+        else:
+            raise ValueError(f"Unknown loss function: {loss_function}")
+        
+        self.logger.info(f"Training setup complete:")
+        self.logger.info(f"  Optimizer: {optimizer_name} (lr={learning_rate}, wd={weight_decay})")
+        self.logger.info(f"  Scheduler: {scheduler_name}")
+        self.logger.info(f"  Loss: {loss_function}")
+        
+    def train_epoch(self, train_data: Data) -> Tuple[float, Dict[str, float]]:
+        """
+        Train for one epoch.
+        
+        Args:
+            train_data: Training data
+            
+        Returns:
+            Tuple of (average_loss, metrics_dict)
+        """
+        self.model.train()
+        total_loss = 0.0
+        all_predictions = []
+        all_targets = []
+        
+        # move data to device
+        train_data = train_data.to(self.device)
+        
+        # forward pass
+        self.optimizer.zero_grad()
+        predictions = self.model(train_data)
+        targets = train_data.y
+        
+        # calculate loss
+        loss = self.criterion(predictions, targets)
+        
+        # backward pass
+        loss.backward()
+        
+        # gradient clipping (optional)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
+        # optimizer step
+        self.optimizer.step()
+        
+        total_loss += loss.item()
+        all_predictions.append(predictions.detach())
+        all_targets.append(targets.detach())
+        
+        # calculate metrics
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        
+        return total_loss, metrics
+        
+    def validate_epoch(self, val_data: Data) -> Tuple[float, Dict[str, float]]:
+        """
+        Validate for one epoch.
+        
+        Args:
+            val_data: Validation data
+            
+        Returns:
+            Tuple of (average_loss, metrics_dict)
+        """
+        self.model.eval()
+        total_loss = 0.0
+        all_predictions = []
+        all_targets = []
+        
+        with torch.no_grad():
+            # move data to device
+            val_data = val_data.to(self.device)
+            
+            # forward pass
+            predictions = self.model(val_data)
+            targets = val_data.y
+            
+            # calculate loss
+            loss = self.criterion(predictions, targets)
+            
+            total_loss += loss.item()
+            all_predictions.append(predictions)
+            all_targets.append(targets)
+        
+        # calculate metrics
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        
+        return total_loss, metrics
+    
+    def fit(
+        self,
+        train_data: Data,
+        val_data: Optional[Data] = None,
+        epochs: int = 100,
+        early_stopping_patience: int = 15,
+        save_best_model: bool = True,
+        save_checkpoints: bool = True,
+        checkpoint_frequency: int = 10,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Train the GNN model.
+        
+        Args:
+            train_data: Training data
+            val_data: Validation data (optional)
+            epochs: Number of training epochs
+            early_stopping_patience: Patience for early stopping
+            save_best_model: Whether to save the best model
+            save_checkpoints: Whether to save periodic checkpoints
+            checkpoint_frequency: How often to save checkpoints
+            verbose: Whether to print progress
+            
+        Returns:
+            Training history dictionary
+        """
+        if self.optimizer is None:
+            self.setup_training()
+        
+        # setup early stopping
+        early_stopping = EarlyStopping(
+            patience=early_stopping_patience,
+            restore_best_weights=True
+        ) if val_data is not None else None
+        
+        best_val_loss = float('inf')
+        start_time = time.time()
+        
+        self.logger.info(f"Starting training for {epochs} epochs")
+        self.logger.info(f"Training samples: {train_data.x.shape[0]}")
+        if val_data is not None:
+            self.logger.info(f"Validation samples: {val_data.x.shape[0]}")
+        
+        for epoch in range(epochs):
+            epoch_start = time.time()
+            
+            # training step
+            train_loss, train_metrics = self.train_epoch(train_data)
+            
+            # validation step
+            if val_data is not None:
+                val_loss, val_metrics = self.validate_epoch(val_data)
+            else:
+                val_loss, val_metrics = float('nan'), {}
+            
+            # update learning rate
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, ReduceLROnPlateau):
+                    self.scheduler.step(val_loss if val_data is not None else train_loss)
+                else:
+                    self.scheduler.step()
+            
+            # record history
+            self.history['train_loss'].append(train_loss)
+            self.history['val_loss'].append(val_loss)
+            self.history['train_metrics'].append(train_metrics)
+            self.history['val_metrics'].append(val_metrics)
+            self.history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
+            
+            # logging
+            epoch_time = time.time() - epoch_start
+            if verbose and (epoch + 1) % 5 == 0:
+                log_msg = f"Epoch {epoch+1:3d}/{epochs} | "
+                log_msg += f"Train Loss: {train_loss:.4f} | "
+                if val_data is not None:
+                    log_msg += f"Val Loss: {val_loss:.4f} | "
+                log_msg += f"Train R²: {train_metrics.get('r2', 0):.4f} | "
+                if val_data is not None:
+                    log_msg += f"Val R²: {val_metrics.get('r2', 0):.4f} | "
+                log_msg += f"Time: {epoch_time:.2f}s"
+                self.logger.info(log_msg)
+            
+            # save best model
+            if save_best_model and val_data is not None and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                self.save_model('best_model.pt')
+            
+            # save checkpoints
+            if save_checkpoints and (epoch + 1) % checkpoint_frequency == 0:
+                self.save_checkpoint(epoch, f'checkpoint_epoch_{epoch+1}.pt')
+            
+            # early stopping
+            if early_stopping is not None and early_stopping(val_loss, self.model):
+                self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                break
+        
+        total_time = time.time() - start_time
+        self.logger.info(f"Training completed in {total_time:.2f} seconds")
+        
+        # save final model and history
+        self.save_model('final_model.pt')
+        self.save_history()
+        
+        return self.history
+    
+    def save_model(self, filename: str):
+        """Save model state dict"""
+        model_path = self.save_dir / filename
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'model_class': self.model.__class__.__name__,
+            'model_config': getattr(self.model, 'config', {}),
+        }, model_path)
+        self.logger.info(f"Model saved to {model_path}")
+    
+    def save_checkpoint(self, epoch: int, filename: str):
+        """Save training checkpoint"""
+        checkpoint_path = self.save_dir / filename
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'history': self.history,
+        }, checkpoint_path)
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load training checkpoint"""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        if self.optimizer and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if self.scheduler and checkpoint.get('scheduler_state_dict'):
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if 'history' in checkpoint:
+            self.history = checkpoint['history']
+        self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
+        return checkpoint.get('epoch', 0)
+    
+    def save_history(self):
+        """Save training history"""
+        history_path = self.save_dir / 'training_history.json'
+        
+        # convert numpy arrays to lists for JSON serialization
+        history_json = {}
+        for key, value in self.history.items():
+            if isinstance(value, list):
+                history_json[key] = [
+                    item.tolist() if hasattr(item, 'tolist') else item 
+                    for item in value
+                ]
+            else:
+                history_json[key] = value
+        
+        with open(history_path, 'w') as f:
+            json.dump(history_json, f, indent=2)
+        
+        self.logger.info(f"Training history saved to {history_path}")
+    
+    def evaluate(self, test_data: Data) -> Dict[str, float]:
+        """
+        Evaluate model on test data.
+        
+        Args:
+            test_data: Test data
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        self.model.eval()
+        test_data = test_data.to(self.device)
+        
+        with torch.no_grad():
+            predictions = self.model(test_data)
+            targets = test_data.y
+            
+            # calculate metrics
+            metrics = calculate_gnn_metrics(predictions, targets)
+            
+            # add additional evaluation metrics
+            metrics['test_loss'] = self.criterion(predictions, targets).item()
+            
+        self.logger.info("Test Results:")
+        for metric, value in metrics.items():
+            self.logger.info(f"  {metric}: {value:.4f}")
+        
+        return metrics
+    
+    def predict(self, data: Data) -> np.ndarray:
+        """
+        Make predictions on new data.
+        
+        Args:
+            data: Input data
+            
+        Returns:
+            Predictions as numpy array
+        """
+        self.model.eval()
+        data = data.to(self.device)
+        
+        with torch.no_grad():
+            predictions = self.model(data)
+            return predictions.cpu().numpy()
+
+
+def train_gnn_experiment(
+    model_type: str,
+    train_data: Data,
+    val_data: Data,
+    test_data: Data,
+    config: Dict[str, Any],
+    experiment_name: str = None
+) -> Tuple[nn.Module, Dict[str, Any]]:
+    """
+    Run a complete GNN training experiment.
+    
+    Args:
+        model_type: Type of GNN model to train
+        train_data: Training data
+        val_data: Validation data  
+        test_data: Test data
+        config: Configuration dictionary
+        experiment_name: Name for the experiment
+        
+    Returns:
+        Tuple of (trained_model, results_dict)
+    """
+    # create model
+    num_features = train_data.x.shape[1]
+    num_targets = train_data.y.shape[1] if len(train_data.y.shape) > 1 else 1
+    
+    model = create_gnn_model(
+        model_type=model_type,
+        num_features=num_features,
+        num_targets=num_targets,
+        **config.get('model_params', {})
+    )
+    
+    # create trainer
+    trainer = GNNTrainer(
+        model=model,
+        experiment_name=experiment_name,
+        **config.get('trainer_params', {})
+    )
+    
+    # setup training
+    trainer.setup_training(**config.get('training_params', {}))
+    
+    # train model
+    history = trainer.fit(
+        train_data=train_data,
+        val_data=val_data,
+        **config.get('fit_params', {})
+    )
+    
+    # evaluate on test set
+    test_metrics = trainer.evaluate(test_data)
+    
+    results = {
+        'model_type': model_type,
+        'history': history,
+        'test_metrics': test_metrics,
+        'config': config,
+        'experiment_name': trainer.experiment_name
+    }
+    
+    return model, results 
