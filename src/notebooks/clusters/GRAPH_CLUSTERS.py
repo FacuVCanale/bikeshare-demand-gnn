@@ -354,24 +354,40 @@ if __name__ == "__main__":
         # --- Val ---
         model.eval()
         val_loss = 0.0
+        val_y_true, val_y_pred = [], []
         with torch.no_grad():
             for xv, yv in ld_val:
                 xv, yv = xv.to(dev), yv.to(dev)
                 y_pred = model(xv)
                 val_loss += mse(y_pred, yv).item() * xv.size(0)
+                # Guardar predicciones para R² desnormalizado
+                val_y_true.append(yv.cpu())
+                val_y_pred.append(y_pred.cpu())
 
         tr_loss /= len(ld_train.dataset)
         val_loss /= len(ld_val.dataset)
+        
+        # Calcular R² desnormalizado en validación
+        val_y_true_cat = torch.cat(val_y_true).numpy().ravel()
+        val_y_pred_cat = torch.cat(val_y_pred).numpy().ravel()
+        
+        # Desnormalizar usando el scaler del target
+        targ_scaler = scalers[2]
+        val_y_true_denorm = targ_scaler.inverse_transform(val_y_true_cat.reshape(-1, 1)).ravel()
+        val_y_pred_denorm = targ_scaler.inverse_transform(val_y_pred_cat.reshape(-1, 1)).ravel()
+        
+        # Calcular R² desnormalizado
+        val_r2_denorm = r2_score(val_y_true_denorm, val_y_pred_denorm)
 
         if epoch % 10 == 0 or epoch <= 5:
-            print(f"Epoch {epoch:03d} | train MSE={tr_loss:.5f} | val MSE={val_loss:.5f}")
+            print(f"Epoch {epoch:03d} | train MSE={tr_loss:.5f} | val MSE={val_loss:.5f} | val R²={val_r2_denorm:.4f}")
 
         # Early-stopping
         if val_loss < best_val:
             best_val, wait = val_loss, 0
             torch.save(model.state_dict(), "best_tgcn_learnable.pt")
             if epoch % 10 == 0:
-                print(f"   ✓ Nuevo mejor modelo guardado (val_loss={val_loss:.5f})")
+                print(f"   ✓ Nuevo mejor modelo guardado (val_loss={val_loss:.5f}, R²={val_r2_denorm:.4f})")
         else:
             wait += 1
             if wait >= patience:
