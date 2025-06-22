@@ -192,25 +192,58 @@ class DataPreparator:
         )
         df_test = df.filter(pl.col(date_col).dt.date() >= val_cutoff)
         
-        # log split statistics
+        # get detailed date ranges for each split
+        train_min_date = df_train.select(pl.col(date_col).dt.date().min()).item() if df_train.height > 0 else None
+        train_max_date = df_train.select(pl.col(date_col).dt.date().max()).item() if df_train.height > 0 else None
+        
+        val_min_date = df_val.select(pl.col(date_col).dt.date().min()).item() if df_val.height > 0 else None
+        val_max_date = df_val.select(pl.col(date_col).dt.date().max()).item() if df_val.height > 0 else None
+        
+        test_min_date = df_test.select(pl.col(date_col).dt.date().min()).item() if df_test.height > 0 else None
+        test_max_date = df_test.select(pl.col(date_col).dt.date().max()).item() if df_test.height > 0 else None
+        
+        # calculate durations in days
+        def calculate_days(start_date, end_date):
+            if start_date and end_date:
+                return (end_date - start_date).days + 1
+            return 0
+        
+        train_days = calculate_days(train_min_date, train_max_date)
+        val_days = calculate_days(val_min_date, val_max_date)
+        test_days = calculate_days(test_min_date, test_max_date)
+        
+        # log detailed split statistics
         self.logger.info(f"Temporal split results:")
-        self.logger.info(f"  -> Train: {df_train.shape[0]:,} rows (< {train_end_date})")
-        self.logger.info(f"  -> Val: {df_val.shape[0]:,} rows ({train_end_date} to {val_end_date})")
-        self.logger.info(f"  -> Test: {df_test.shape[0]:,} rows (>= {val_end_date})")
+        self.logger.info(f"  -> Train: {df_train.shape[0]:,} rows")
+        if train_min_date and train_max_date:
+            self.logger.info(f"     Time range: {train_min_date} to {train_max_date} ({train_days} days)")
+        else:
+            self.logger.info(f"     Time range: No data")
+            
+        self.logger.info(f"  -> Validation: {df_val.shape[0]:,} rows")
+        if val_min_date and val_max_date:
+            self.logger.info(f"     Time range: {val_min_date} to {val_max_date} ({val_days} days)")
+        else:
+            self.logger.info(f"     Time range: No data")
+            
+        self.logger.info(f"  -> Test: {df_test.shape[0]:,} rows")
+        if test_min_date and test_max_date:
+            self.logger.info(f"     Time range: {test_min_date} to {test_max_date} ({test_days} days)")
+        else:
+            self.logger.info(f"     Time range: No data")
         
-        # validate no leakage
-        train_max_date = df_train.select(pl.col(date_col).dt.date().max()).item()
-        val_min_date = df_val.select(pl.col(date_col).dt.date().min()).item()
-        val_max_date = df_val.select(pl.col(date_col).dt.date().max()).item()
-        test_min_date = df_test.select(pl.col(date_col).dt.date().min()).item()
+        # log split configuration
+        self.logger.info(f"Split configuration:")
+        self.logger.info(f"  -> Train cutoff: < {train_end_date}")
+        self.logger.info(f"  -> Validation range: {train_end_date} to < {val_end_date}")
+        self.logger.info(f"  -> Test range: >= {val_end_date}")
         
-        self.logger.info(f"Date ranges:")
-        self.logger.info(f"  -> Train: ends {train_max_date}")
-        self.logger.info(f"  -> Val: {val_min_date} to {val_max_date}")
-        self.logger.info(f"  -> Test: starts {test_min_date}")
+        # validate no leakage (only if data exists)
+        if train_max_date and val_min_date:
+            assert train_max_date < val_min_date, f"Data leakage detected: train max ({train_max_date}) >= val min ({val_min_date})"
         
-        assert train_max_date < val_min_date, "Data leakage detected: train max >= val min"
-        assert val_max_date < test_min_date, "Data leakage detected: val max >= test min"
+        if val_max_date and test_min_date:
+            assert val_max_date < test_min_date, f"Data leakage detected: val max ({val_max_date}) >= test min ({test_min_date})"
         
         self.logger.info("✓ No data leakage detected in temporal splits")
         
