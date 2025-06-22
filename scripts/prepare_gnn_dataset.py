@@ -8,7 +8,7 @@ This script processes the clustered dataset to:
 3. Structure data for GNN with spatial relationships between clusters
 4. Save the processed dataset in PyTorch Geometric format
 
-Focus: Predict external arrivals (inter-cluster trips) only.
+Focus: Predict external movements (inter-cluster trips) - arrivals, departures, or both.
 Internal movements within clusters are excluded as they're not useful for prediction.
 
 Author: EcoBici-AI
@@ -73,22 +73,30 @@ def identify_features_to_remove(columns: List[str]) -> List[str]:
 
 def identify_target_features(columns: List[str]) -> List[str]:
     """Identify target features for prediction."""
-    # Primary targets: only external arrival counts
-    targets = [
-        'arr_external_count'
+    # Primary targets: external counts
+    primary_targets = [
+        'arr_external_count',
+        'dep_external_count'
     ]
     
     # Additional demographic targets (only external)
     demographic_targets = [
+        # arrival demographics
         'arr_external_male',
         'arr_external_female', 
         'arr_external_young',
         'arr_external_adult',
-        'arr_external_senior'
+        'arr_external_senior',
+        # departure demographics
+        'dep_external_male',
+        'dep_external_female',
+        'dep_external_young', 
+        'dep_external_adult',
+        'dep_external_senior'
     ]
     
     # Only include targets that exist in the dataset
-    available_targets = [t for t in targets + demographic_targets if t in columns]
+    available_targets = [t for t in primary_targets + demographic_targets if t in columns]
     return available_targets
 
 def create_cluster_adjacency_matrix(
@@ -295,8 +303,8 @@ def main():
     parser.add_argument('--distance_threshold', type=float, default=5.0,
                         help='Maximum distance (km) for cluster connectivity')
     parser.add_argument('--target', type=str, default='arr_external_count',
-                        choices=['arr_external_count', 'arr_external_demographics'],
-                        help='Target variable to predict')
+                        choices=['arr_external_count', 'dep_external_count', 'both_external_counts', 'arr_external_demographics', 'dep_external_demographics', 'all_external_demographics'],
+                        help='Target variable(s) to predict')
     
     args = parser.parse_args()
     
@@ -323,14 +331,26 @@ def main():
         
         # Determine target columns first (before cleaning)
         all_target_cols = identify_target_features(df.columns)
+        
+        # Select targets based on user choice
         if args.target == 'arr_external_count':
             target_cols = ['arr_external_count']
-        else:  # arr_external_demographics
-            target_cols = all_target_cols  # Include all external demographic targets
+        elif args.target == 'dep_external_count':
+            target_cols = ['dep_external_count']
+        elif args.target == 'both_external_counts':
+            target_cols = ['arr_external_count', 'dep_external_count']
+        elif args.target == 'arr_external_demographics':
+            target_cols = [t for t in all_target_cols if 'arr_external' in t]
+        elif args.target == 'dep_external_demographics':
+            target_cols = [t for t in all_target_cols if 'dep_external' in t]
+        elif args.target == 'all_external_demographics':
+            target_cols = all_target_cols  # Include all external targets
+        else:
+            raise ValueError(f"Unknown target option: {args.target}")
         
         # Filter targets that exist in data
         target_cols = [t for t in target_cols if t in all_target_cols]
-        print(f"Target columns: {target_cols}")
+        print(f"Target columns ({args.target}): {target_cols}")
         
         # Identify and remove data leakage features (but keep targets for now)
         features_to_remove = identify_features_to_remove(df.columns)
@@ -398,7 +418,7 @@ def main():
         node_features = cluster_stats.select([c for c in cluster_stats.columns if c != 'cluster_id']).to_numpy()
         node_features = np.nan_to_num(node_features, 0)  # Replace NaN with 0
         
-        # Create targets (average arrivals per cluster)
+        # Create targets (average values per cluster for selected targets)
         cluster_targets = df_clean.group_by('cluster_id').agg([
             pl.col(target_cols).mean()
         ]).sort('cluster_id')

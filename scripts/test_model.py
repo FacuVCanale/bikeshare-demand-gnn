@@ -65,8 +65,7 @@ def load_model_from_checkpoint(
     num_features: int,
     num_targets: int,
     model_type: str = None,
-    device: str = 'auto',
-    **override_config
+    device: str = 'auto'
 ):
     """
     Load a trained GNN model from checkpoint.
@@ -77,7 +76,6 @@ def load_model_from_checkpoint(
         num_targets: Number of target variables
         model_type: Type of model ('gat', 'gcn', etc.). If None, tries to infer from checkpoint
         device: Device to load model on
-        **override_config: Override model configuration parameters
         
     Returns:
         Loaded model
@@ -94,7 +92,6 @@ def load_model_from_checkpoint(
     checkpoint = torch.load(model_path, map_location=device)
     
     # get model info from checkpoint if available
-    model_class = None
     if 'model_class' in checkpoint:
         model_class = checkpoint['model_class']
         print(f"Model class from checkpoint: {model_class}")
@@ -114,58 +111,48 @@ def load_model_from_checkpoint(
     if model_type is None:
         raise ValueError("Could not determine model type. Please specify --model_type")
     
-    # try to get model config from checkpoint first
-    config = {}
-    if 'model_config' in checkpoint:
-        config = checkpoint['model_config'].copy()
-        print(f"Using model config from checkpoint: {config}")
-    else:
-        print("No model config in checkpoint, using defaults")
-        # fallback to default configurations
-        model_configs = {
-            'gcn': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'dropout': 0.2,
-                'use_batch_norm': True,
-                'activation': 'relu'
-            },
-            'gat': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'num_heads': 8,
-                'dropout': 0.2,
-                'attention_dropout': 0.1,
-                'use_batch_norm': True
-            },
-            'sage': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'dropout': 0.2,
-                'aggregation': 'mean',
-                'use_batch_norm': True
-            },
-            'transformer': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'num_heads': 8,
-                'dropout': 0.2,
-                'use_batch_norm': True
-            },
-            'hybrid': {
-                'hidden_dim': 128,
-                'dropout': 0.2,
-                'use_temporal': True,
-                'temporal_dim': 64
-            }
-        }
-        config = model_configs.get(model_type, {})
-    
-    # apply command line overrides
-    config.update(override_config)
-    
     print(f"Creating {model_type.upper()} model with {num_features} features, {num_targets} targets")
-    print(f"Model config: {config}")
+    
+    # get default model configurations (same as train_gnn.py)
+    model_configs = {
+        'gcn': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'dropout': 0.2,
+            'use_batch_norm': True,
+            'activation': 'relu'
+        },
+        'gat': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'num_heads': 8,
+            'dropout': 0.2,
+            'attention_dropout': 0.1,
+            'use_batch_norm': True
+        },
+        'sage': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'dropout': 0.2,
+            'aggregation': 'mean',
+            'use_batch_norm': True
+        },
+        'transformer': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'num_heads': 8,
+            'dropout': 0.2,
+            'use_batch_norm': True
+        },
+        'hybrid': {
+            'hidden_dim': 128,
+            'dropout': 0.2,
+            'use_temporal': True,
+            'temporal_dim': 64
+        }
+    }
+    
+    config = model_configs.get(model_type, {})
     
     # create model
     model = create_gnn_model(
@@ -176,19 +163,7 @@ def load_model_from_checkpoint(
     )
     
     # load state dict
-    try:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print("Model state loaded successfully")
-    except RuntimeError as e:
-        print(f"Error loading model state: {e}")
-        if "size mismatch" in str(e):
-            print("\nModel configuration mismatch detected!")
-            print("The saved model has different dimensions than the current configuration.")
-            print("Try specifying the correct model parameters:")
-            print("  --hidden_dim, --num_layers, --num_heads, etc.")
-            print("\nOr check the experiment directory for config.json with the original settings.")
-        raise
-    
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
     
@@ -249,18 +224,6 @@ def main():
     parser.add_argument('--save_predictions', action='store_true',
                         help='Save predictions to file')
     
-    # model configuration overrides
-    parser.add_argument('--hidden_dim', type=int,
-                        help='Hidden dimension size (override checkpoint config)')
-    parser.add_argument('--num_layers', type=int,
-                        help='Number of layers (override checkpoint config)')
-    parser.add_argument('--num_heads', type=int,
-                        help='Number of attention heads for GAT/Transformer (override checkpoint config)')
-    parser.add_argument('--dropout', type=float,
-                        help='Dropout rate (override checkpoint config)')
-    parser.add_argument('--attention_dropout', type=float,
-                        help='Attention dropout for GAT (override checkpoint config)')
-    
     args = parser.parse_args()
     
     print("="*60)
@@ -282,27 +245,13 @@ def main():
         print(f"  Targets: {data['n_targets']}")
         print(f"  Graph edges: {data['test_data'].edge_index.shape[1]}")
         
-        # prepare model config overrides
-        model_config_overrides = {}
-        if args.hidden_dim is not None:
-            model_config_overrides['hidden_dim'] = args.hidden_dim
-        if args.num_layers is not None:
-            model_config_overrides['num_layers'] = args.num_layers
-        if args.num_heads is not None:
-            model_config_overrides['num_heads'] = args.num_heads
-        if args.dropout is not None:
-            model_config_overrides['dropout'] = args.dropout
-        if args.attention_dropout is not None:
-            model_config_overrides['attention_dropout'] = args.attention_dropout
-        
         # load model
         model = load_model_from_checkpoint(
             model_path=args.model_path,
             num_features=data['n_features'],
             num_targets=data['n_targets'],
             model_type=args.model_type,
-            device=args.device,
-            **model_config_overrides
+            device=args.device
         )
         
         # evaluate model using same logic as trainer
