@@ -164,21 +164,15 @@ def create_edge_index_from_adjacency(adj_matrix: np.ndarray) -> torch.Tensor:
 
 def process_cluster_sequences(args):
     """Process sequences for a single cluster - for multiprocessing."""
-    cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon = args
+    # Unpack pre-converted numpy arrays instead of Polars DataFrames
+    cluster_features, cluster_targets, cluster_timestamps, feature_cols, target_cols, sequence_length, prediction_horizon = args
     
-    n_samples = len(cluster_data)
+    n_samples = len(cluster_features)
     if n_samples < sequence_length + prediction_horizon:
         return [], [], []
     
-    # Check if target columns exist in data
-    available_targets = [t for t in target_cols if t in cluster_data.columns]
-    if not available_targets:
+    if cluster_targets is None or len(cluster_targets) == 0:
         return [], [], []
-    
-    # Convert to numpy once per cluster (more efficient)
-    cluster_features = cluster_data.select(feature_cols).to_numpy()
-    cluster_targets = cluster_data.select(available_targets).to_numpy()
-    cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
     
     sequences = []
     targets = []
@@ -246,12 +240,30 @@ def prepare_temporal_sequences_optimized(
     if use_multiprocessing and len(unique_clusters) > 4:
         print("  Using multiprocessing for faster processing...")
         
-        # Prepare arguments for multiprocessing
+        # Prepare arguments for multiprocessing - convert to numpy first
         process_args = []
         for cluster_id in unique_clusters:
             if cluster_id in cluster_partitions:
                 cluster_data = cluster_partitions[cluster_id]
-                process_args.append((cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon))
+                
+                # Check if target columns exist in data
+                available_targets = [t for t in target_cols if t in cluster_data.columns]
+                if not available_targets:
+                    continue
+                
+                # Convert to numpy arrays before multiprocessing (avoids serialization issues)
+                try:
+                    cluster_features = cluster_data.select(feature_cols).to_numpy()
+                    cluster_targets = cluster_data.select(available_targets).to_numpy()
+                    cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
+                    
+                    process_args.append((
+                        cluster_features, cluster_targets, cluster_timestamps,
+                        feature_cols, available_targets, sequence_length, prediction_horizon
+                    ))
+                except Exception as e:
+                    print(f"    Warning: Could not process cluster {cluster_id}: {e}")
+                    continue
         
         # Process in chunks to manage memory
         n_processes = min(mp.cpu_count() - 1, 4)  # Leave one core free
@@ -266,10 +278,13 @@ def prepare_temporal_sequences_optimized(
                 
                 # Collect results as they complete
                 for future in as_completed(futures):
-                    sequences, targets, timestamps = future.result()
-                    all_sequences.extend(sequences)
-                    all_targets.extend(targets)
-                    all_timestamps.extend(timestamps)
+                    try:
+                        sequences, targets, timestamps = future.result()
+                        all_sequences.extend(sequences)
+                        all_targets.extend(targets)
+                        all_timestamps.extend(timestamps)
+                    except Exception as e:
+                        print(f"    Warning: Failed to process a cluster chunk: {e}")
                 
                 # Force garbage collection between chunks
                 gc.collect()
@@ -415,6 +430,8 @@ def main():
     parser.add_argument('--target', type=str, default='arr_external_count',
                         choices=['arr_external_count', 'dep_external_count', 'both_external_counts', 'arr_external_demographics', 'dep_external_demographics', 'all_external_demographics'],
                         help='Target variable(s) to predict')
+    parser.add_argument('--no_multiprocessing', action='store_true',
+                        help='Disable multiprocessing for sequence creation (useful for debugging)')
     
     args = parser.parse_args()
     
@@ -501,11 +518,12 @@ def main():
         print(f"  Sequence parameters: length={args.sequence_length}, horizon=1")
         
         # Use optimized sequence preparation
-        X, y, timestamps, feature_names = prepare_temporal_sequences(
+        X, y, timestamps, feature_names = prepare_temporal_sequences_optimized(
             df_clean, 
             target_cols,  # Pass target columns explicitly
             sequence_length=args.sequence_length,
-            prediction_horizon=1
+            prediction_horizon=1,
+            use_multiprocessing=not args.no_multiprocessing  # Disable if flag is set
         )
         
         if len(X) > 0:
