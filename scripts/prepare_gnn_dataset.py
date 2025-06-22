@@ -151,7 +151,8 @@ def create_edge_index_from_adjacency(adj_matrix: np.ndarray) -> torch.Tensor:
     return edge_index
 
 def prepare_temporal_sequences(
-    df: pl.DataFrame, 
+    df: pl.DataFrame,
+    target_cols: List[str],
     sequence_length: int = 24,  # 24 * 30min = 12 hours
     prediction_horizon: int = 1
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -170,7 +171,6 @@ def prepare_temporal_sequences(
     df_sorted = df.sort(['cluster_id', 'ts_start'])
     
     # Get feature columns (excluding cluster_id, ts_start, and targets)
-    target_cols = identify_target_features(df.columns)
     exclude_cols = ['cluster_id', 'ts_start'] + target_cols
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     
@@ -187,7 +187,14 @@ def prepare_temporal_sequences(
             continue
             
         cluster_features = cluster_data.select(feature_cols).to_numpy()
-        cluster_targets = cluster_data.select(target_cols).to_numpy()
+        
+        # Check if target columns exist in data
+        available_targets = [t for t in target_cols if t in cluster_data.columns]
+        if not available_targets:
+            print(f"Warning: No target columns found for cluster {cluster_id}. Available columns: {cluster_data.columns[:10]}")
+            continue
+            
+        cluster_targets = cluster_data.select(available_targets).to_numpy()
         cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
         
         # Create sequences
@@ -312,13 +319,28 @@ def main():
         
         print(f"Loaded {split} data: {df.shape}")
         
-        # Identify and remove data leakage features
-        features_to_remove = identify_features_to_remove(df.columns)
-        print(f"Removing {len(features_to_remove)} features that cause data leakage:")
-        print(f"  {features_to_remove[:10]}{'...' if len(features_to_remove) > 10 else ''}")
+        # Determine target columns first (before cleaning)
+        all_target_cols = identify_target_features(df.columns)
+        if args.target == 'arr_external_count':
+            target_cols = ['arr_external_count']
+        else:  # arr_external_demographics
+            target_cols = all_target_cols  # Include all external demographic targets
         
-        # Keep only valid features
-        valid_columns = [c for c in df.columns if c not in features_to_remove]
+        # Filter targets that exist in data
+        target_cols = [t for t in target_cols if t in all_target_cols]
+        print(f"Target columns: {target_cols}")
+        
+        # Identify and remove data leakage features (but keep targets for now)
+        features_to_remove = identify_features_to_remove(df.columns)
+        
+        # Don't remove target columns yet - we need them to create sequences
+        features_to_remove_filtered = [f for f in features_to_remove if f not in target_cols]
+        
+        print(f"Removing {len(features_to_remove_filtered)} features that cause data leakage:")
+        print(f"  {features_to_remove_filtered[:10]}{'...' if len(features_to_remove_filtered) > 10 else ''}")
+        
+        # Keep only valid features + targets
+        valid_columns = [c for c in df.columns if c not in features_to_remove_filtered]
         df_clean = df.select(valid_columns)
         
         print(f"Cleaned dataset shape: {df_clean.shape}")
@@ -327,6 +349,7 @@ def main():
         print("Creating temporal sequences...")
         X, y, timestamps, feature_names = prepare_temporal_sequences(
             df_clean, 
+            target_cols,  # Pass target columns explicitly
             sequence_length=args.sequence_length,
             prediction_horizon=1
         )
@@ -353,15 +376,7 @@ def main():
             # Load edge index for val/test
             edge_index = torch.load(output_dir / 'edge_index.pt')
         
-        # Determine target columns based on argument
-        all_target_cols = identify_target_features(df.columns)
-        if args.target == 'arr_external_count':
-            target_cols = ['arr_external_count']
-        else:  # arr_external_demographics
-            target_cols = all_target_cols  # Include all external demographic targets
-        
-        # Filter targets that exist in data
-        target_cols = [t for t in target_cols if t in all_target_cols]
+
         
         # Create PyTorch Geometric data
         print("Creating PyTorch Geometric data object...")
