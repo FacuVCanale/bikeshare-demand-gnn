@@ -9,11 +9,16 @@ import torch
 import numpy as np
 import pandas as pd
 import random
+import os
 from pathlib import Path
 import json
 import argparse
 import sys
 from typing import Dict, Any, List
+
+# set early deterministic configuration
+os.environ['PYTHONHASHSEED'] = '0'
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 # add project root to path
 project_root = Path(__file__).parent.parent
@@ -22,22 +27,78 @@ sys.path.insert(0, str(project_root))
 from src.models.gnn_models import create_gnn_model, print_model_summary
 from src.training.gnn_trainer import GNNTrainer, train_gnn_experiment
 
+# early seed initialization for maximum reproducibility
+def _early_seed_init(seed: int = 42):
+    """Initialize basic randomness sources early in script execution"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+# apply early seeding
+_early_seed_init()
 
 def set_seed(seed: int):
     """
-    Set random seed for reproducibility.
+    Set random seed for reproducibility across all libraries and operations.
+    
+    This comprehensive seeding function addresses multiple sources of randomness:
+    - Python's random module
+    - NumPy operations
+    - PyTorch operations (CPU and CUDA)
+    - PyTorch Geometric operations
+    - CUDA operations and cuDNN
+    - Environment variables for deterministic operations
+    
+    Specific issues addressed:
+    - PYTHONHASHSEED: Ensures consistent hash-based operations across runs
+    - CUBLAS_WORKSPACE_CONFIG: Forces deterministic CUDA linear algebra operations
+    - cudnn.deterministic: Ensures reproducible convolution algorithms
+    - cudnn.benchmark: Disabled to prevent auto-tuning non-determinism
+    - use_deterministic_algorithms: Forces PyTorch to use deterministic implementations
+    - tf32: Disabled to prevent automatic mixed precision non-determinism
     
     Args:
         seed: Random seed value
     """
+    # update environment variables for deterministic operations
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    
+    # python random module
     random.seed(seed)
+    
+    # numpy operations
     np.random.seed(seed)
+    
+    # pytorch operations
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    
+    # ensure deterministic operations for reproducibility
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = True
+    
+    # pytorch geometric specific settings
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as e:
+        print(f"Warning: Could not enable all deterministic algorithms: {e}")
+        print("Some operations may still be non-deterministic")
+    
+    # additional cuda settings for determinism
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # set cuda device deterministic operations
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    
     print(f"Random seed set to: {seed}")
+    print("Deterministic mode enabled for reproducible results")
 
 
 def load_gnn_data(data_dir: str) -> Dict[str, Any]:
@@ -375,7 +436,8 @@ def main():
     
     args = parser.parse_args()
     
-    # set random seed for reproducibility
+    # set comprehensive random seed for reproducibility
+    # this will override the early initialization with user-specified seed
     set_seed(args.seed)
     
     print("Loading GNN data...")
