@@ -90,7 +90,7 @@ python scripts/train_gate_model.py \
 
 # Feature group selection
 python scripts/train_gate_model.py \
-    --feature-groups temporal_base weather_base activity_counts
+    --feature-groups temporal_base weather_base activity_lags
 
 # Custom output
 python scripts/train_gate_model.py \
