@@ -321,6 +321,8 @@ def main():
                         help='Name for the experiment')
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
+    parser.add_argument('--patience', type=int, default=15,
+                        help='Early stopping patience (epochs without improvement)')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                         help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=128,
@@ -370,6 +372,7 @@ def main():
     for model_type in configs:
         # fit params
         configs[model_type]['fit_params']['epochs'] = args.epochs
+        configs[model_type]['fit_params']['early_stopping_patience'] = args.patience
         
         # training params
         configs[model_type]['training_params']['learning_rate'] = args.learning_rate
