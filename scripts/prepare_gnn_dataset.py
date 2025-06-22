@@ -243,7 +243,8 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
         logger.info(f"📊 Calculating dataset statistics for {split}...")
         stats_start = time.time()
         
-        n_timesteps = len(temporal_signal)
+        # StaticGraphTemporalSignal doesn't implement __len__, use snapshot_count
+        n_timesteps = temporal_signal.snapshot_count if hasattr(temporal_signal, 'snapshot_count') else 0
         n_nodes = temporal_signal.edge_index.max().item() + 1
         n_edges = temporal_signal.edge_index.shape[1]
         n_features = temporal_signal[0].x.shape[1] if n_timesteps > 0 else 0
@@ -400,12 +401,13 @@ def save_dataset_with_logging(temporal_signal, output_file: Path, compression: s
     save_start = time.time()
     logger.debug(f"   🔍 Pre-save validation...")
     
-    if not temporal_signal or len(temporal_signal) == 0:
+    # check if temporal signal is valid
+    dataset_size = temporal_signal.snapshot_count if hasattr(temporal_signal, 'snapshot_count') else 0
+    if not temporal_signal or dataset_size == 0:
         logger.error(f"❌ Cannot save empty temporal signal for {split}")
         raise ValueError(f"Empty temporal signal for {split}")
     
     # calculate dataset metrics
-    dataset_size = len(temporal_signal)
     if dataset_size > 0:
         sample_data = temporal_signal[0]
         n_nodes = sample_data.x.shape[0] if hasattr(sample_data, 'x') else 0
@@ -808,11 +810,13 @@ Examples:
                 
                 # show statistics
                 logger.info(f"📈 {split.capitalize()} Dataset Statistics:")
-                logger.info(f"   🔢 Number of time steps: {len(temporal_signal):,}")
+                # StaticGraphTemporalSignal doesn't implement __len__, use snapshot_count
+                n_timesteps = temporal_signal.snapshot_count if hasattr(temporal_signal, 'snapshot_count') else 0
+                logger.info(f"   🔢 Number of time steps: {n_timesteps:,}")
                 logger.info(f"   🏠 Number of nodes (clusters): {temporal_signal.edge_index.max().item() + 1}")
                 logger.info(f"   🔗 Number of edges: {temporal_signal.edge_index.shape[1]:,}")
                 
-                if len(temporal_signal) > 0:
+                if n_timesteps > 0:
                     sample_features = temporal_signal[0].x
                     sample_targets = temporal_signal[0].y
                     logger.info(f"   📊 Features per node: {sample_features.shape[1]}")
@@ -835,8 +839,8 @@ Examples:
                     info = {
                         'n_nodes': temporal_signal.edge_index.max().item() + 1,
                         'n_edges': temporal_signal.edge_index.shape[1],
-                        'n_timesteps': len(temporal_signal),
-                        'n_features': temporal_signal[0].x.shape[1] if len(temporal_signal) > 0 else 0,
+                        'n_timesteps': n_timesteps,
+                        'n_features': temporal_signal[0].x.shape[1] if n_timesteps > 0 else 0,
                         'sequence_length': args.sequence_length,
                         'k_neighbors': args.k_neighbors,
                         'compression': config.compression_format,
