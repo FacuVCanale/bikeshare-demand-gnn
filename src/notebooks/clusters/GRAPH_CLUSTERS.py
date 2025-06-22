@@ -120,7 +120,7 @@ class TGCNLearnableEdges(nn.Module):
 
         self.gcn1 = GCNConv(in_feats, hidden_feats, add_self_loops=True)
         self.gcn2 = GCNConv(hidden_feats, hidden_feats, add_self_loops=True)
-        self.gru = nn.GRU(hidden_feats, hidden_feats, batch_first=True)
+        self.gru = nn.GRU(hidden_feats, hidden_feats, num_layers=2, batch_first=True)
         self.fc = nn.Linear(hidden_feats, 1)
 
     def forward(self, x_seq):
@@ -138,8 +138,8 @@ class TGCNLearnableEdges(nn.Module):
         g_stack = torch.stack(g_outputs, dim=1)  # (B, p, N, H)
         B, p, N, H = g_stack.shape
         gru_in = g_stack.permute(0, 2, 1, 3).reshape(B * N, p, H)
-        _, h_last = self.gru(gru_in)             # (1, B*N, H)
-        out = self.fc(h_last.squeeze(0))         # (B*N, 1)
+        gru_out, h_last = self.gru(gru_in)       # gru_out: (B*N, p, H), h_last: (num_layers, B*N, H)
+        out = self.fc(gru_out[:, -1, :])         # Use last timestep output: (B*N, 1)
         return out.view(B, N)
 
 
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     
     coords = pd.DataFrame(coords_list).set_index("cluster")[["lat", "lon"]].reset_index(drop=True)
 
-    edge_index, edge_weight_init = build_edge_index(coords, k=5)
+    edge_index, edge_weight_init = build_edge_index(coords, k=15)
     print(f"   ✓ Grafo construido: {edge_index.shape[1]} aristas")
 
     # 3.2 Tensores ----------------------------------------------------------
@@ -328,7 +328,7 @@ if __name__ == "__main__":
         in_feats=X_tensor.size(-1),
         edge_index=edge_index,
         edge_weight_init=edge_weight_init,
-        hidden_feats=64,
+        hidden_feats=256,
     ).to(dev)
     print(f"   ✓ Modelo creado con {sum(p.numel() for p in model.parameters())} parámetros")
 
@@ -337,8 +337,8 @@ if __name__ == "__main__":
 
     # 3.5 Entrenamiento -----------------------------------------------------
     print("🎯 Comenzando entrenamiento...")
-    best_val, wait, patience = np.inf, 0, 20
-    for epoch in range(1, 151):
+    best_val, wait, patience = np.inf, 0, 200
+    for epoch in range(1, 1500):
         # --- Train ---
         model.train()
         tr_loss = 0.0
