@@ -38,15 +38,17 @@ class DataPreparator:
         self.logger = logging.getLogger(__name__)
         
     def load_datasets(self) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        """Load all required datasets with temporal filtering to exclude August 2024 onward.
+        """Load all required datasets with temporal filtering to exclude September 2024 onward.
+        
+        August 2024 data is included, but September 2024 onward is filtered out as reserved data.
         
         Returns:
             Tuple of (trips_with_weather, trips, users) DataFrames
         """
         self.logger.info("Loading datasets...")
         
-        # cutoff date to exclude august 2024 onward
-        cutoff_date = pl.lit("2024-08-01").str.strptime(pl.Date, "%Y-%m-%d")
+        # cutoff date to exclude september 2024 onward (august 2024 inclusive is allowed)
+        cutoff_date = pl.lit("2024-09-01").str.strptime(pl.Date, "%Y-%m-%d")
         
         # load main dataset
         trips_weather_path = self.data_dir / "processed" / "trips_with_weather.parquet"
@@ -60,7 +62,7 @@ class DataPreparator:
         
         filtered_count = trips_with_weather.height - trips_with_weather_filtered.height
         if filtered_count > 0:
-            self.logger.info(f"  -> Filtered out {filtered_count:,} trips from August 2024 onward")
+            self.logger.info(f"  -> Filtered out {filtered_count:,} trips from September 2024 onward")
         
         self.logger.info(f"  -> trips_with_weather shape after filtering: {trips_with_weather_filtered.shape}")
         
@@ -76,7 +78,7 @@ class DataPreparator:
         
         filtered_count_trips = trips.height - trips_filtered.height
         if filtered_count_trips > 0:
-            self.logger.info(f"  -> Filtered out {filtered_count_trips:,} trips from August 2024 onward")
+            self.logger.info(f"  -> Filtered out {filtered_count_trips:,} trips from September 2024 onward")
         
         self.logger.info(f"  -> trips shape after filtering: {trips_filtered.shape}")
         
