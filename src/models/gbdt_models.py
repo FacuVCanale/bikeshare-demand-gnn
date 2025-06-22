@@ -1,4 +1,4 @@
-from src.models.base_model import BaseModel
+from .base_model import BaseModel
 from abc import abstractmethod
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, precision_score, 
