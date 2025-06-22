@@ -588,7 +588,7 @@ def main():
         
         # Extract node features
         node_features = cluster_stats.select(feature_cols_expanded).to_numpy(writable=False)
-        node_features = np.nan_to_num(node_features, 0, copy=False)  # In-place replacement
+        node_features = np.nan_to_num(node_features, copy=False, nan=0.0)  # In-place replacement
         
         # Extract targets
         target_values = cluster_stats.select(target_cols_aggregated).to_numpy(writable=False)
