@@ -69,9 +69,9 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
     data_path = Path(data_dir)
     
     # load data
-    train_data = torch.load(data_path / 'train_data.pt')
-    val_data = torch.load(data_path / 'val_data.pt')
-    test_data = torch.load(data_path / 'test_data.pt')
+    train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
+    val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
+    test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
     
     # load metadata
     with open(data_path / 'train_feature_names.json', 'r') as f:
