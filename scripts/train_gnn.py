@@ -25,7 +25,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from src.models.gnn_models import create_gnn_model
-from src.dataset.gnn_dataset import create_gnn_dataset
 from src.training.gnn_trainer import GNNTrainer, get_device_info
 
 
@@ -55,6 +54,42 @@ def set_seed(seed: int = 42):
     torch.use_deterministic_algorithms(True, warn_only=True)
     
     print(f"Set global seed to {seed} for reproducibility")
+
+
+def load_gnn_data(data_dir: str) -> Dict[str, Any]:
+    """
+    Load preprocessed GNN data.
+    
+    Args:
+        data_dir: Directory containing GNN data files
+        
+    Returns:
+        Dictionary containing train/val/test data and metadata
+    """
+    data_path = Path(data_dir)
+    
+    # load data
+    train_data = torch.load(data_path / 'train_data.pt')
+    val_data = torch.load(data_path / 'val_data.pt')
+    test_data = torch.load(data_path / 'test_data.pt')
+    
+    # load metadata
+    with open(data_path / 'train_feature_names.json', 'r') as f:
+        train_metadata = json.load(f)
+    
+    with open(data_path / 'processing_config.json', 'r') as f:
+        processing_config = json.load(f)
+    
+    return {
+        'train_data': train_data,
+        'val_data': val_data,
+        'test_data': test_data,
+        'feature_names': train_metadata['features'],
+        'target_names': train_metadata['targets'],
+        'n_features': train_metadata['n_features'],
+        'n_targets': train_metadata['n_targets'],
+        'processing_config': processing_config
+    }
 
 
 def get_default_model_config(model_type: str, num_features: int, num_targets: int) -> Dict[str, Any]:
@@ -168,25 +203,17 @@ def load_and_prepare_data(args: argparse.Namespace) -> Tuple[Any, Any, Any]:
     
     print(f"\nLoading GNN dataset from: {args.data_path}")
     
-    # create dataset with specified parameters
-    train_data, val_data, test_data = create_gnn_dataset(
-        data_path=args.data_path,
-        spatial_threshold=args.spatial_threshold,
-        temporal_window=args.temporal_window,
-        target_column=args.target_column,
-        val_split=args.val_split,
-        test_split=args.test_split,
-        seed=args.seed
-    )
+    # load preprocessed data directly
+    data = load_gnn_data(args.data_path)
     
     print(f"Dataset loaded successfully:")
-    print(f"  Training samples: {train_data.x.shape[0]}")
-    print(f"  Validation samples: {val_data.x.shape[0]}")
-    print(f"  Test samples: {test_data.x.shape[0]}")
-    print(f"  Features per node: {train_data.x.shape[1]}")
-    print(f"  Edges in training graph: {train_data.edge_index.shape[1]}")
+    print(f"  Training samples: {data['train_data'].x.shape[0]}")
+    print(f"  Validation samples: {data['val_data'].x.shape[0]}")
+    print(f"  Test samples: {data['test_data'].x.shape[0]}")
+    print(f"  Features per node: {data['n_features']}")
+    print(f"  Edges in training graph: {data['train_data'].edge_index.shape[1]}")
     
-    return train_data, val_data, test_data
+    return data['train_data'], data['val_data'], data['test_data']
 
 
 def display_device_info(device_spec: str):
@@ -256,7 +283,7 @@ def main():
     
     # data configuration
     data_group = parser.add_argument_group('Data Configuration')
-    data_group.add_argument('--data-path', type=str, default='data/processed/gnn_features.parquet',
+    data_group.add_argument('--data-path', type=str, default='data/93k_gnn_ready',
                            help='Path to processed GNN data')
     data_group.add_argument('--spatial-threshold', type=float, default=1000.0,
                            help='Spatial threshold for graph edges (meters)')
