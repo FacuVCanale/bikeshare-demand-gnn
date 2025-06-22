@@ -200,10 +200,10 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
     
     try:
         # create dataset instance
-        logger.info(f"🏗️  Creating EcoBiciSpatialTemporalDataset for {split}...")
-        logger.debug(f"   📂 Data path: {config['data_path']}")
-        logger.debug(f"   ⏰ Sequence length: {config['sequence_length']}")
-        logger.debug(f"   🔗 K-neighbors: {config['k_neighbors']}")
+        logger.info(f"Creating EcoBiciSpatialTemporalDataset for {split}")
+        logger.debug(f"Data path: {config['data_path']}")
+        logger.debug(f"Sequence length: {config['sequence_length']}")
+        logger.debug(f"K-neighbors: {config['k_neighbors']}")
         
         dataset_start = time.time()
         dataset = EcoBiciSpatialTemporalDataset(
@@ -212,35 +212,35 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
             k_neighbors=config['k_neighbors']
         )
         dataset_time = time.time() - dataset_start
-        logger.info(f"✅ Dataset instance created in {dataset_time:.2f}s")
+        logger.info(f"Dataset instance created in {dataset_time:.2f}s")
         
         # for non-training splits, try to load pre-fitted scalers
         scalers_path = Path(config.get('output_path', 'data/gnn')) / 'scalers_temp.pkl'
         if split != 'train' and scalers_path.exists():
-            logger.info(f"🔧 Loading pre-fitted scalers for {split} split...")
-            logger.debug(f"   📂 Scalers path: {scalers_path}")
+            logger.info(f"Loading pre-fitted scalers for {split} split")
+            logger.debug(f"Scalers path: {scalers_path}")
             try:
                 scalers_start = time.time()
                 scalers = load_compressed(scalers_path, 'auto', logger)
                 dataset.feature_scaler = scalers['feature_scaler']
                 dataset.target_scaler = scalers['target_scaler']
                 scalers_time = time.time() - scalers_start
-                logger.info(f"✅ Successfully loaded scalers for {split} in {scalers_time:.2f}s")
-                logger.debug(f"   📊 Feature scaler shape: {dataset.feature_scaler.mean_.shape}")
-                logger.debug(f"   🎯 Target scaler shape: {dataset.target_scaler.mean_.shape}")
+                logger.info(f"Successfully loaded scalers for {split} in {scalers_time:.2f}s")
+                logger.debug(f"Feature scaler shape: {dataset.feature_scaler.mean_.shape}")
+                logger.debug(f"Target scaler shape: {dataset.target_scaler.mean_.shape}")
             except Exception as e:
-                logger.warning(f"⚠️  Could not load scalers for {split}: {e}")
-                logger.debug(f"   📂 Scalers file exists: {scalers_path.exists()}")
+                logger.warning(f"Could not load scalers for {split}: {e}")
+                logger.debug(f"Scalers file exists: {scalers_path.exists()}")
         
         # load data with progress tracking
-        logger.info(f"📖 Loading {split} data...")
+        logger.info(f"Loading {split} data")
         data_start = time.time()
         temporal_signal = dataset.load_data(split)
         data_time = time.time() - data_start
-        logger.info(f"✅ Data loaded successfully in {data_time:.2f}s")
+        logger.info(f"Data loaded successfully in {data_time:.2f}s")
         
         # gather detailed statistics
-        logger.info(f"📊 Calculating dataset statistics for {split}...")
+        logger.info(f"Calculating dataset statistics for {split}")
         stats_start = time.time()
         
         # StaticGraphTemporalSignal doesn't implement __len__, use snapshot_count
@@ -249,7 +249,7 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
         n_edges = temporal_signal.edge_index.shape[1]
         n_features = temporal_signal[0].x.shape[1] if n_timesteps > 0 else 0
         
-        logger.debug(f"   🔢 Basic stats: timesteps={n_timesteps}, nodes={n_nodes}, edges={n_edges}, features={n_features}")
+        logger.debug(f"Basic stats: timesteps={n_timesteps}, nodes={n_nodes}, edges={n_edges}, features={n_features}")
         
         stats = {
             'split': split,
@@ -261,7 +261,7 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
         }
         
         if n_timesteps > 0:
-            logger.debug(f"   📈 Analyzing target statistics...")
+            logger.debug("Analyzing target statistics")
             sample_targets = temporal_signal[0].y
             sample_features = temporal_signal[0].x
             
@@ -296,25 +296,25 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
                 'feature_inf_count': feature_inf_count
             })
             
-            logger.debug(f"   🎯 Target stats: mean={target_mean:.4f}, std={target_std:.4f}, "
+            logger.debug(f"Target stats: mean={target_mean:.4f}, std={target_std:.4f}, "
                         f"range=[{target_min:.4f}, {target_max:.4f}]")
-            logger.debug(f"   📊 Target distribution: {target_nonzero_ratio:.1%} non-zero, {target_zeros} zeros")
-            logger.debug(f"   🔧 Feature stats: mean={feature_mean:.4f}, std={feature_std:.4f}, "
+            logger.debug(f"Target distribution: {target_nonzero_ratio:.1%} non-zero, {target_zeros} zeros")
+            logger.debug(f"Feature stats: mean={feature_mean:.4f}, std={feature_std:.4f}, "
                         f"range=[{feature_min:.4f}, {feature_max:.4f}]")
             
             if feature_nan_count > 0 or feature_inf_count > 0:
-                logger.warning(f"   ⚠️  Data quality issues: {feature_nan_count} NaN, {feature_inf_count} Inf values")
+                logger.warning(f"Data quality issues: {feature_nan_count} NaN, {feature_inf_count} Inf values")
         
         stats_time = time.time() - stats_start
         total_time = time.time() - start_time
         
-        logger.info(f"📈 Statistics calculated in {stats_time:.2f}s")
-        logger.info(f"✅ Completed processing {split} split in {total_time:.2f}s:")
-        logger.info(f"   📊 {stats['n_timesteps']} timesteps × {stats['n_nodes']} nodes × {stats['n_features']} features")
-        logger.info(f"   🔗 {stats['n_edges']} spatial edges (avg degree: {stats['n_edges']/stats['n_nodes']:.1f})")
+        logger.info(f"Statistics calculated in {stats_time:.2f}s")
+        logger.info(f"Completed processing {split} split in {total_time:.2f}s:")
+        logger.info(f"{stats['n_timesteps']} timesteps × {stats['n_nodes']} nodes × {stats['n_features']} features")
+        logger.info(f"{stats['n_edges']} spatial edges (avg degree: {stats['n_edges']/stats['n_nodes']:.1f})")
         
         if n_timesteps > 0:
-            logger.info(f"   🎯 Target range: [{stats['target_min']:.3f}, {stats['target_max']:.3f}], "
+            logger.info(f"Target range: [{stats['target_min']:.3f}, {stats['target_max']:.3f}], "
                        f"{stats['target_nonzero_ratio']:.1%} non-zero")
         
         return {
@@ -328,8 +328,8 @@ def process_single_split(args: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
         
     except Exception as e:
         error_time = time.time() - start_time
-        logger.error(f"❌ Error processing {split} split after {error_time:.2f}s: {e}")
-        logger.debug(f"   📍 Error details: {type(e).__name__}: {str(e)}")
+        logger.error(f"Error processing {split} split after {error_time:.2f}s: {e}")
+        logger.debug(f"Error details: {type(e).__name__}: {str(e)}")
         return {
             'split': split,
             'error': str(e),
@@ -343,26 +343,26 @@ def validate_data_leakage_parallel(dataset: EcoBiciSpatialTemporalDataset,
                                  sample_size: int,
                                  logger: logging.Logger) -> bool:
     """Validate data leakage in parallel for multiple splits"""
-    logger.info("🔍 Validating data leakage across all splits...")
-    logger.debug(f"   📊 Splits to validate: {splits}")
-    logger.debug(f"   🎲 Sample size per split: {sample_size}")
+    logger.info("Validating data leakage across all splits")
+    logger.debug(f"Splits to validate: {splits}")
+    logger.debug(f"Sample size per split: {sample_size}")
     
     validation_start = time.time()
     validation_tasks = []
     
     with ThreadPoolExecutor(max_workers=len(splits)) as executor:
-        logger.debug(f"   🔄 Starting {len(splits)} validation tasks in parallel...")
+        logger.debug(f"Starting {len(splits)} validation tasks in parallel")
         
         for split in splits:
             file_path = Path(dataset.data_path) / "clustered" / f"{split}_cluster_features.parquet"
             if file_path.exists():
-                logger.debug(f"   ✅ {split} data file found, submitting validation task")
+                logger.debug(f"{split} data file found, submitting validation task")
                 future = executor.submit(dataset.validate_no_data_leakage, split, sample_size)
                 validation_tasks.append((split, future))
             else:
-                logger.warning(f"   ⏭️  {split} data file not found: {file_path}")
+                logger.warning(f"{split} data file not found: {file_path}")
         
-        logger.info(f"📋 Submitted {len(validation_tasks)} validation tasks")
+        logger.info(f"Submitted {len(validation_tasks)} validation tasks")
         
         # collect results with progress tracking
         all_passed = True
@@ -371,40 +371,40 @@ def validate_data_leakage_parallel(dataset: EcoBiciSpatialTemporalDataset,
         for split, future in tqdm(validation_tasks, desc="Validating splits"):
             task_start = time.time()
             try:
-                logger.debug(f"   🔍 Waiting for {split} validation to complete...")
+                logger.debug(f"Waiting for {split} validation to complete")
                 result = future.result(timeout=300)  # 5 min timeout
                 task_time = time.time() - task_start
                 completed_tasks += 1
                 
-                logger.info(f"✅ {split} split passed data leakage validation in {task_time:.2f}s")
-                logger.debug(f"   📊 Progress: {completed_tasks}/{len(validation_tasks)} validations complete")
+                logger.info(f"{split} split passed data leakage validation in {task_time:.2f}s")
+                logger.debug(f"Progress: {completed_tasks}/{len(validation_tasks)} validations complete")
                 
             except Exception as e:
                 task_time = time.time() - task_start
-                logger.error(f"❌ {split} split failed validation after {task_time:.2f}s: {e}")
-                logger.debug(f"   📍 Error type: {type(e).__name__}")
+                logger.error(f"{split} split failed validation after {task_time:.2f}s: {e}")
+                logger.debug(f"Error type: {type(e).__name__}")
                 all_passed = False
     
     total_time = time.time() - validation_start
-    logger.info(f"🏁 Data leakage validation complete in {total_time:.2f}s")
-    logger.info(f"   📊 Results: {completed_tasks} passed, {len(validation_tasks) - completed_tasks} failed")
+    logger.info(f"Data leakage validation complete in {total_time:.2f}s")
+    logger.info(f"Results: {completed_tasks} passed, {len(validation_tasks) - completed_tasks} failed")
     
     return all_passed
 
 def save_dataset_with_logging(temporal_signal, output_file: Path, compression: str, split: str, logger: logging.Logger):
     """Save dataset with detailed logging and validation"""
-    logger.info(f"💾 Saving {split} temporal signal dataset...")
-    logger.debug(f"   📂 Output path: {output_file}")
-    logger.debug(f"   🗜️  Compression: {compression}")
+    logger.info(f"Saving {split} temporal signal dataset")
+    logger.debug(f"Output path: {output_file}")
+    logger.debug(f"Compression: {compression}")
     
     # pre-save validation
     save_start = time.time()
-    logger.debug(f"   🔍 Pre-save validation...")
+    logger.debug("Pre-save validation")
     
     # check if temporal signal is valid
     dataset_size = temporal_signal.snapshot_count if hasattr(temporal_signal, 'snapshot_count') else 0
     if not temporal_signal or dataset_size == 0:
-        logger.error(f"❌ Cannot save empty temporal signal for {split}")
+        logger.error(f"Cannot save empty temporal signal for {split}")
         raise ValueError(f"Empty temporal signal for {split}")
     
     # calculate dataset metrics
@@ -414,27 +414,27 @@ def save_dataset_with_logging(temporal_signal, output_file: Path, compression: s
         n_features = sample_data.x.shape[1] if hasattr(sample_data, 'x') else 0
         n_targets = sample_data.y.shape[0] if hasattr(sample_data, 'y') else 0
         
-        logger.debug(f"   📊 Dataset metrics: {dataset_size} timesteps, {n_nodes} nodes, {n_features} features, {n_targets} targets")
+        logger.debug(f"Dataset metrics: {dataset_size} timesteps, {n_nodes} nodes, {n_features} features, {n_targets} targets")
         
         # estimate memory usage
         if hasattr(sample_data, 'x') and hasattr(sample_data, 'y'):
             estimated_size_mb = (dataset_size * n_nodes * n_features * 4 + dataset_size * n_targets * 4) / (1024 * 1024)
-            logger.debug(f"   💾 Estimated dataset size: {estimated_size_mb:.1f} MB")
+            logger.debug(f"Estimated dataset size: {estimated_size_mb:.1f} MB")
     
     # perform save
-    logger.debug(f"   💾 Writing to disk...")
+    logger.debug("Writing to disk")
     save_compressed(temporal_signal, output_file, compression, logger)
     save_time = time.time() - save_start
     
     # post-save validation
     if output_file.exists():
         file_size_mb = output_file.stat().st_size / 1024 / 1024
-        logger.info(f"✅ Successfully saved {split} dataset in {save_time:.2f}s")
-        logger.info(f"   📁 File: {output_file.name}")
-        logger.info(f"   📊 Size: {file_size_mb:.1f} MB")
-        logger.debug(f"   🗜️  Compression ratio: {estimated_size_mb/file_size_mb:.1f}x" if 'estimated_size_mb' in locals() else "")
+        logger.info(f"Successfully saved {split} dataset in {save_time:.2f}s")
+        logger.info(f"File: {output_file.name}")
+        logger.info(f"Size: {file_size_mb:.1f} MB")
+        logger.debug(f"Compression ratio: {estimated_size_mb/file_size_mb:.1f}x" if 'estimated_size_mb' in locals() else "")
     else:
-        logger.error(f"❌ Failed to save {split} dataset - file not found after save")
+        logger.error(f"Failed to save {split} dataset - file not found after save")
         raise FileNotFoundError(f"Dataset file was not created: {output_file}")
 
 def main():
@@ -512,134 +512,123 @@ Examples:
     parser.add_argument('--no_progress', action='store_true',
                        help='Disable progress bars')
     
-    logger.info("🎬 Starting GNN dataset preparation script...")
-    logger.debug("⚙️  Parsing command line arguments...")
-    
     args = parser.parse_args()
     args_parse_time = time.time() - overall_start
     
-    logger.debug(f"✅ Arguments parsed in {args_parse_time:.3f}s")
-    logger.debug(f"   📋 Arguments: {vars(args)}")
-    
     # setup optimized configuration
-    logger.debug("🔧 Setting up optimized configuration...")
     config_start = time.time()
     
     config = OptimizedConfig()
     
     if args.optimized:
-        logger.info("🚀 Optimized mode enabled - activating all optimizations")
         config.parallel_processing = True
         config.cache_intermediate = True
         config.use_compression = True
     
     # override with specific arguments
     if args.no_parallel:
-        logger.info("🔄 Parallel processing disabled by user")
         config.parallel_processing = False
     elif args.parallel:
-        logger.info("🔄 Parallel processing enabled by user")
         config.parallel_processing = True
         
     if args.cache:
-        logger.info("💾 Caching enabled by user")
         config.cache_intermediate = True
     if args.compression:
         config.compression_format = args.compression
         config.use_compression = args.compression != 'none'
-        logger.info(f"🗜️  Compression format: {config.compression_format}")
     if args.chunk_size:
         config.chunk_size = args.chunk_size
-        logger.debug(f"📦 Chunk size: {config.chunk_size}")
     if args.max_workers:
         config.max_workers = args.max_workers
-        logger.debug(f"👥 Max workers: {config.max_workers}")
     if args.log_level:
         config.log_level = args.log_level
     if args.no_progress:
         config.show_progress = False
-        logger.debug("📊 Progress bars disabled")
     
     config_time = time.time() - config_start
-    logger.debug(f"✅ Configuration setup complete in {config_time:.3f}s")
     
-    # setup logging and monitoring
-    logger.info("📝 Setting up logging and resource monitoring...")
+    # setup logging and monitoring FIRST
     setup_start = time.time()
     
     logger = setup_logging(config.log_level)
+    
+    logger.info("Starting GNN dataset preparation script")
+    logger.debug("Arguments parsed successfully")
+    logger.debug(f"Arguments: {vars(args)}")
+    logger.debug("Configuration setup complete")
+    logger.info("Setting up logging and resource monitoring")
     monitor = ResourceMonitor(logger)
     
     # setup cache
     cache = OptimizedCache(config.cache_dir, logger) if config.cache_intermediate else None
     if args.clear_cache and cache:
-        logger.info("🧹 Clearing cache as requested...")
+        logger.info("Clearing cache as requested")
         cache.clear()
     
     setup_time = time.time() - setup_start
-    logger.debug(f"✅ Setup complete in {setup_time:.3f}s")
+    logger.debug(f"Setup complete in {setup_time:.3f}s")
     
     # create output directory
-    logger.info("📁 Setting up output directory...")
+    logger.info("Setting up output directory")
     output_path = Path(args.output_path)
     if not args.stats_only:
         output_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"✅ Output directory ready: {output_path.absolute()}")
+        logger.info(f"Output directory ready: {output_path.absolute()}")
     else:
-        logger.info("📊 Stats-only mode - no output directory needed")
+        logger.info("Stats-only mode - no output directory needed")
     
     # validate input data directory
-    logger.info("🔍 Validating input data directory...")
+    logger.info("Validating input data directory")
     input_validation_start = time.time()
     
     data_path = Path(args.data_path)
     clustered_path = data_path / "clustered"
     
     if not data_path.exists():
-        logger.error(f"❌ Data directory not found: {data_path}")
+        logger.error(f"Data directory not found: {data_path}")
         raise FileNotFoundError(f"Data directory not found: {data_path}")
     
     if not clustered_path.exists():
-        logger.error(f"❌ Clustered data directory not found: {clustered_path}")
+        logger.error(f"Clustered data directory not found: {clustered_path}")
         raise FileNotFoundError(f"Clustered data directory not found: {clustered_path}")
     
     # check for required files
     metadata_file = clustered_path / "dataset_metadata.json"
     if not metadata_file.exists():
-        logger.error(f"❌ Dataset metadata not found: {metadata_file}")
+        logger.error(f"Dataset metadata not found: {metadata_file}")
         raise FileNotFoundError(f"Dataset metadata not found: {metadata_file}")
     
-    logger.info(f"✅ Input data validation passed")
-    logger.debug(f"   📂 Data path: {data_path.absolute()}")
-    logger.debug(f"   📂 Clustered path: {clustered_path.absolute()}")
+    logger.info("Input data validation passed")
+    logger.debug(f"Data path: {data_path.absolute()}")
+    logger.debug(f"Clustered path: {clustered_path.absolute()}")
     
     input_validation_time = time.time() - input_validation_start
-    logger.debug(f"   ⏱️  Validation time: {input_validation_time:.3f}s")
+    logger.debug(f"Validation time: {input_validation_time:.3f}s")
     
-    logger.info("🚴 Optimized EcoBici GNN Dataset Preparation")
-    logger.info("=" * 60)
-    logger.info(f"📂 Data path: {args.data_path}")
-    logger.info(f"⏰ Sequence length: {args.sequence_length}")
-    logger.info(f"🔗 K-neighbors: {args.k_neighbors}")
-    logger.info(f"📁 Output path: {args.output_path}")
-    logger.info(f"🗜️  Compression: {config.compression_format}")
-    logger.info(f"🔄 Parallel processing: {config.parallel_processing}")
-    logger.info(f"💾 Caching: {config.cache_intermediate}")
-    logger.info(f"📊 Stats only: {args.stats_only}")
+    logger.info("EcoBici GNN Dataset Preparation")
+    logger.info("=" * 50)
+    logger.info(f"Data path: {args.data_path}")
+    logger.info(f"Sequence length: {args.sequence_length}")
+    logger.info(f"K-neighbors: {args.k_neighbors}")
+    logger.info(f"Output path: {args.output_path}")
+    logger.info(f"Compression: {config.compression_format}")
+    logger.info(f"Parallel processing: {config.parallel_processing}")
+    logger.info(f"Caching: {config.cache_intermediate}")
+    logger.info(f"Stats only: {args.stats_only}")
     logger.info("")
     
     monitor.log_resources("Initialization")
     
     # determine splits to process
-    logger.info("📋 Determining splits to process...")
+    logger.info("Determining splits to process")
     splits_start = time.time()
     
     if args.split == 'all':
         splits = ['train', 'val', 'test']
-        logger.info("🎯 Processing all splits: train, val, test")
+        logger.info("Processing all splits: train, val, test")
     else:
         splits = [args.split]
-        logger.info(f"🎯 Processing single split: {args.split}")
+        logger.info(f"Processing single split: {args.split}")
     
     # validate split files exist
     available_splits = []
@@ -648,20 +637,20 @@ Examples:
         if split_file.exists():
             file_size_mb = split_file.stat().st_size / 1024 / 1024
             available_splits.append(split)
-            logger.info(f"   ✅ {split} split available: {file_size_mb:.1f} MB")
+            logger.info(f"{split} split available: {file_size_mb:.1f} MB")
         else:
-            logger.warning(f"   ⚠️  {split} split file not found: {split_file}")
+            logger.warning(f"{split} split file not found: {split_file}")
     
     if not available_splits:
-        logger.error(f"❌ No valid split files found for: {splits}")
+        logger.error(f"No valid split files found for: {splits}")
         raise FileNotFoundError(f"No valid split files found")
     
     splits = available_splits
     splits_time = time.time() - splits_start
-    logger.info(f"📋 Split determination complete in {splits_time:.3f}s: {len(splits)} splits to process")
+    logger.info(f"Split determination complete in {splits_time:.3f}s: {len(splits)} splits to process")
     
     # prepare processing configuration
-    logger.debug("⚙️  Preparing processing configuration...")
+    logger.debug("Preparing processing configuration")
     process_config = {
         'data_path': args.data_path,
         'sequence_length': args.sequence_length,
@@ -669,37 +658,37 @@ Examples:
         'log_level': config.log_level,
         'output_path': args.output_path
     }
-    logger.debug(f"   📋 Process config: {process_config}")
+    logger.debug(f"Process config: {process_config}")
     
     # process splits with smart dependency handling
     processing_start = time.time()
     
     if config.parallel_processing and len(splits) > 1 and not args.stats_only:
-        logger.info("🔄 Processing splits with dependency management...")
-        logger.debug(f"   📊 Total splits: {len(splits)}")
-        logger.debug(f"   🎯 Target: Smart parallel processing with train-first dependency")
+        logger.info("Processing splits with dependency management")
+        logger.debug(f"Total splits: {len(splits)}")
+        logger.debug("Target: Smart parallel processing with train-first dependency")
         
         results = {}
         
         # step 1: process training split first (required for scaler fitting)
         if 'train' in splits:
-            logger.info("🏋️  Step 1: Processing training split first (required for scalers)...")
+            logger.info("Step 1: Processing training split first (required for scalers)")
             train_start = time.time()
             
             train_result = process_single_split(('train', process_config))
             results['train'] = train_result
             
             train_time = time.time() - train_start
-            logger.info(f"⏱️  Training split processing time: {train_time:.2f}s")
+            logger.info(f"Training split processing time: {train_time:.2f}s")
             
             if not train_result.get('success', False):
-                logger.error("❌ Training split failed - cannot proceed with other splits")
-                logger.error(f"   📍 Error: {train_result.get('error', 'Unknown error')}")
+                logger.error("Training split failed - cannot proceed with other splits")
+                logger.error(f"Error: {train_result.get('error', 'Unknown error')}")
                 return
             
             # save scalers temporarily for parallel processing
             if train_result.get('dataset'):
-                logger.info("💾 Saving temporary scalers for parallel processing...")
+                logger.info("Saving temporary scalers for parallel processing")
                 scalers_save_start = time.time()
                 try:
                     temp_scalers = {
@@ -709,30 +698,30 @@ Examples:
                     temp_scalers_path = output_path / 'scalers_temp.pkl'
                     save_compressed(temp_scalers, temp_scalers_path, 'none', logger)  # use no compression for speed
                     scalers_save_time = time.time() - scalers_save_start
-                    logger.info(f"✅ Temporary scalers saved in {scalers_save_time:.2f}s")
-                    logger.debug(f"   📂 Scalers path: {temp_scalers_path}")
+                    logger.info(f"Temporary scalers saved in {scalers_save_time:.2f}s")
+                    logger.debug(f"Scalers path: {temp_scalers_path}")
                 except Exception as e:
-                    logger.warning(f"⚠️  Could not save temporary scalers: {e}")
-                    logger.debug(f"   📍 Error details: {type(e).__name__}: {str(e)}")
+                    logger.warning(f"Could not save temporary scalers: {e}")
+                    logger.debug(f"Error details: {type(e).__name__}: {str(e)}")
             
-            logger.info("✅ Training split completed - scalers are now available")
+            logger.info("Training split completed - scalers are now available")
             remaining_splits = [s for s in splits if s != 'train']
-            logger.debug(f"   📋 Remaining splits for parallel processing: {remaining_splits}")
+            logger.debug(f"Remaining splits for parallel processing: {remaining_splits}")
         else:
-            logger.info("ℹ️  No training split found - proceeding with available splits")
+            logger.info("No training split found - proceeding with available splits")
             remaining_splits = splits
         
         # step 2: process remaining splits in parallel (if any)
         if remaining_splits:
-            logger.info(f"🔄 Step 2: Processing remaining splits in parallel: {remaining_splits}")
+            logger.info(f"Step 2: Processing remaining splits in parallel: {remaining_splits}")
             parallel_start = time.time()
             
             max_workers = config.max_workers or min(len(remaining_splits), psutil.cpu_count())
-            logger.info(f"👥 Using {max_workers} parallel workers for {len(remaining_splits)} splits")
+            logger.info(f"Using {max_workers} parallel workers for {len(remaining_splits)} splits")
             
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 # submit remaining split processing tasks
-                logger.debug("📋 Submitting parallel processing tasks...")
+                logger.debug("Submitting parallel processing tasks")
                 future_to_split = {
                     executor.submit(process_single_split, (split, process_config)): split 
                     for split in remaining_splits
@@ -748,11 +737,11 @@ Examples:
                     
                     split_name = result['split']
                     if result.get('success', False):
-                        logger.info(f"✅ Parallel task completed: {split_name} ({completed_parallel}/{len(remaining_splits)})")
-                        logger.debug(f"   ⏱️  Processing time: {result.get('processing_time', 0):.2f}s")
+                        logger.info(f"Parallel task completed: {split_name} ({completed_parallel}/{len(remaining_splits)})")
+                        logger.debug(f"Processing time: {result.get('processing_time', 0):.2f}s")
                     else:
-                        logger.error(f"❌ Parallel task failed: {split_name} ({completed_parallel}/{len(remaining_splits)})")
-                        logger.error(f"   📍 Error: {result.get('error', 'Unknown error')}")
+                        logger.error(f"Parallel task failed: {split_name} ({completed_parallel}/{len(remaining_splits)})")
+                        logger.error(f"Error: {result.get('error', 'Unknown error')}")
                     
                     if progress_bar:
                         progress_bar.update(1)
@@ -762,13 +751,13 @@ Examples:
                     progress_bar.close()
             
             parallel_time = time.time() - parallel_start
-            logger.info(f"⏱️  Parallel processing time: {parallel_time:.2f}s")
+            logger.info(f"Parallel processing time: {parallel_time:.2f}s")
         
         monitor.log_resources("Smart parallel processing completed")
         
     else:
-        logger.info("🔄 Processing splits sequentially...")
-        logger.debug(f"   📊 Reason: {'stats_only mode' if args.stats_only else 'single split or parallel disabled'}")
+        logger.info("Processing splits sequentially")
+        logger.debug(f"Reason: {'stats_only mode' if args.stats_only else 'single split or parallel disabled'}")
         
         results = {}
         
@@ -776,12 +765,12 @@ Examples:
         splits_iter = tqdm(splits, desc="Processing splits") if config.show_progress else splits
         
         for i, split in enumerate(splits_iter):
-            logger.info(f"🔄 Processing split {i+1}/{len(splits)}: {split}")
+            logger.info(f"Processing split {i+1}/{len(splits)}: {split}")
             split_start = time.time()
             
             try:
                 # initialize dataset
-                logger.info(f"🏗️  Initializing dataset for {split}...")
+                logger.info(f"Initializing dataset for {split}")
                 dataset_init_start = time.time()
                 
                 dataset = EcoBiciSpatialTemporalDataset(
@@ -791,45 +780,45 @@ Examples:
                 )
                 
                 dataset_init_time = time.time() - dataset_init_start
-                logger.debug(f"   ⏱️  Dataset initialization: {dataset_init_time:.2f}s")
+                logger.debug(f"Dataset initialization: {dataset_init_time:.2f}s")
                 
                 # generate leakage report if requested
                 if args.leakage_report and split == 'train':
-                    logger.info("📋 Generating data leakage prevention report...")
+                    logger.info("Generating data leakage prevention report")
                     report_start = time.time()
                     dataset.print_data_leakage_report()
                     report_time = time.time() - report_start
-                    logger.debug(f"   ⏱️  Report generation: {report_time:.2f}s")
+                    logger.debug(f"Report generation: {report_time:.2f}s")
                 
                 # load data
-                logger.info(f"📖 Loading {split} data...")
+                logger.info(f"Loading {split} data")
                 data_load_start = time.time()
                 temporal_signal = dataset.load_data(split)
                 data_load_time = time.time() - data_load_start
-                logger.info(f"✅ Data loaded in {data_load_time:.2f}s")
+                logger.info(f"Data loaded in {data_load_time:.2f}s")
                 
                 # show statistics
-                logger.info(f"📈 {split.capitalize()} Dataset Statistics:")
+                logger.info(f"{split.capitalize()} Dataset Statistics:")
                 # StaticGraphTemporalSignal doesn't implement __len__, use snapshot_count
                 n_timesteps = temporal_signal.snapshot_count if hasattr(temporal_signal, 'snapshot_count') else 0
-                logger.info(f"   🔢 Number of time steps: {n_timesteps:,}")
-                logger.info(f"   🏠 Number of nodes (clusters): {temporal_signal.edge_index.max().item() + 1}")
-                logger.info(f"   🔗 Number of edges: {temporal_signal.edge_index.shape[1]:,}")
+                logger.info(f"Number of time steps: {n_timesteps:,}")
+                logger.info(f"Number of nodes (clusters): {temporal_signal.edge_index.max().item() + 1}")
+                logger.info(f"Number of edges: {temporal_signal.edge_index.shape[1]:,}")
                 
                 if n_timesteps > 0:
                     sample_features = temporal_signal[0].x
                     sample_targets = temporal_signal[0].y
-                    logger.info(f"   📊 Features per node: {sample_features.shape[1]}")
-                    logger.info(f"   🎯 Target statistics:")
-                    logger.info(f"     - Mean: {sample_targets.mean().item():.4f}")
-                    logger.info(f"     - Std: {sample_targets.std().item():.4f}")
-                    logger.info(f"     - Min: {sample_targets.min().item():.4f}")
-                    logger.info(f"     - Max: {sample_targets.max().item():.4f}")
-                    logger.info(f"     - Non-zero ratio: {(sample_targets > 0).float().mean().item():.4f}")
+                    logger.info(f"Features per node: {sample_features.shape[1]}")
+                    logger.info("Target statistics:")
+                    logger.info(f"  - Mean: {sample_targets.mean().item():.4f}")
+                    logger.info(f"  - Std: {sample_targets.std().item():.4f}")
+                    logger.info(f"  - Min: {sample_targets.min().item():.4f}")
+                    logger.info(f"  - Max: {sample_targets.max().item():.4f}")
+                    logger.info(f"  - Non-zero ratio: {(sample_targets > 0).float().mean().item():.4f}")
                 
                 # save if not stats only
                 if not args.stats_only:
-                    logger.info(f"💾 Saving {split} dataset...")
+                    logger.info(f"Saving {split} dataset")
                     save_start = time.time()
                     
                     output_file = output_path / f"{split}_temporal_signal.pkl"
@@ -849,12 +838,12 @@ Examples:
                     }
                     
                     info_file = output_path / f"{split}_info.json"
-                    logger.debug(f"   📄 Saving metadata to: {info_file}")
+                    logger.debug(f"Saving metadata to: {info_file}")
                     with open(info_file, 'w') as f:
                         json.dump(info, f, indent=2)
                     
                     save_time = time.time() - save_start
-                    logger.debug(f"   ⏱️  Total save time: {save_time:.2f}s")
+                    logger.debug(f"Total save time: {save_time:.2f}s")
                 
                 results[split] = {
                     'split': split,
@@ -865,14 +854,14 @@ Examples:
                 }
                 
                 split_total_time = time.time() - split_start
-                logger.info(f"✅ Completed {split} in {split_total_time:.2f}s")
+                logger.info(f"Completed {split} in {split_total_time:.2f}s")
                 
                 monitor.log_resources(f"Completed {split}")
                 
             except Exception as e:
                 error_time = time.time() - split_start
-                logger.error(f"❌ Error processing {split} split after {error_time:.2f}s: {e}")
-                logger.debug(f"   📍 Error details: {type(e).__name__}: {str(e)}")
+                logger.error(f"Error processing {split} split after {error_time:.2f}s: {e}")
+                logger.debug(f"Error details: {type(e).__name__}: {str(e)}")
                 results[split] = {
                     'split': split, 
                     'error': str(e), 
@@ -883,15 +872,15 @@ Examples:
                 continue
     
     processing_time = time.time() - processing_start
-    logger.info(f"⏱️  Total processing time: {processing_time:.2f}s")
+    logger.info(f"Total processing time: {processing_time:.2f}s")
     
     # validate data leakage if requested
     if args.validate_leakage:
-        logger.info("🔍 Starting data leakage validation...")
+        logger.info("Starting data leakage validation")
         validation_start = time.time()
         
         valid_splits = [split for split, result in results.items() if result.get('success', False)]
-        logger.info(f"   📋 Validating {len(valid_splits)} successful splits: {valid_splits}")
+        logger.info(f"Validating {len(valid_splits)} successful splits: {valid_splits}")
         
         if valid_splits:
             # get a dataset instance for validation
@@ -899,18 +888,18 @@ Examples:
             leakage_ok = validate_data_leakage_parallel(dataset, valid_splits, config.validate_sample_size, logger)
             
             validation_time = time.time() - validation_start
-            logger.info(f"⏱️  Validation time: {validation_time:.2f}s")
+            logger.info(f"Validation time: {validation_time:.2f}s")
             
             if not leakage_ok and not args.stats_only:
-                logger.error("❌ Data leakage detected! Stopping processing.")
+                logger.error("Data leakage detected! Stopping processing.")
                 return
-            logger.info("✅ All data leakage validations passed!")
+            logger.info("All data leakage validations passed!")
         else:
-            logger.warning("⚠️  No successful splits to validate")
+            logger.warning("No successful splits to validate")
     
     # save scalers if requested and we processed training data
     if args.save_scalers and 'train' in results and results['train'].get('success', False) and not args.stats_only:
-        logger.info("💾 Saving final scalers...")
+        logger.info("Saving final scalers")
         scalers_start = time.time()
         
         try:
@@ -931,12 +920,12 @@ Examples:
             save_compressed(scalers, scalers_file, config.compression_format, logger)
             
             scalers_time = time.time() - scalers_start
-            logger.info(f"✅ Final scalers saved in {scalers_time:.2f}s")
-            logger.debug(f"   📂 Scalers file: {scalers_file}")
+            logger.info(f"Final scalers saved in {scalers_time:.2f}s")
+            logger.debug(f"Scalers file: {scalers_file}")
         
         except Exception as e:
-            logger.warning(f"⚠️  Warning: Could not save final scalers: {e}")
-            logger.debug(f"   📍 Error details: {type(e).__name__}: {str(e)}")
+            logger.warning(f"Warning: Could not save final scalers: {e}")
+            logger.debug(f"Error details: {type(e).__name__}: {str(e)}")
     
     # cleanup temporary files
     cleanup_start = time.time()
@@ -944,37 +933,37 @@ Examples:
     if temp_scalers_path.exists():
         try:
             temp_scalers_path.unlink()
-            logger.info("🧹 Cleaned up temporary scalers file")
+            logger.info("Cleaned up temporary scalers file")
         except Exception as e:
-            logger.warning(f"⚠️  Could not remove temporary scalers file: {e}")
+            logger.warning(f"Could not remove temporary scalers file: {e}")
     
     cleanup_time = time.time() - cleanup_start
-    logger.debug(f"   ⏱️  Cleanup time: {cleanup_time:.3f}s")
+    logger.debug(f"Cleanup time: {cleanup_time:.3f}s")
     
     # comprehensive summary
-    logger.info("🎉 Dataset preparation complete!")
-    logger.info("=" * 60)
+    logger.info("Dataset preparation complete!")
+    logger.info("=" * 50)
     
     # results summary
     successful_splits = [split for split, result in results.items() if result.get('success', False)]
     failed_splits = [split for split, result in results.items() if not result.get('success', False)]
     
-    logger.info(f"📊 PROCESSING SUMMARY:")
-    logger.info(f"   ✅ Successfully processed: {len(successful_splits)} splits")
+    logger.info("PROCESSING SUMMARY:")
+    logger.info(f"Successfully processed: {len(successful_splits)} splits")
     for split in successful_splits:
         processing_time = results[split].get('processing_time', 0)
-        logger.info(f"     • {split}: {processing_time:.2f}s")
+        logger.info(f"  • {split}: {processing_time:.2f}s")
     
     if failed_splits:
-        logger.warning(f"   ❌ Failed splits: {len(failed_splits)}")
+        logger.warning(f"Failed splits: {len(failed_splits)}")
         for split in failed_splits:
             error = results[split].get('error', 'Unknown error')
             processing_time = results[split].get('processing_time', 0)
-            logger.warning(f"     • {split}: {error} (after {processing_time:.2f}s)")
+            logger.warning(f"  • {split}: {error} (after {processing_time:.2f}s)")
     
     # file summary
     if not args.stats_only and successful_splits:
-        logger.info(f"📁 GENERATED FILES in {args.output_path}:")
+        logger.info(f"GENERATED FILES in {args.output_path}:")
         total_size_mb = 0
         file_count = 0
         
@@ -986,30 +975,30 @@ Examples:
                 
                 # categorize files
                 if file.suffix in ['.pkl', '.xz', '.gz']:
-                    file_type = "📦 Dataset"
+                    file_type = "Dataset"
                 elif file.suffix == '.json':
-                    file_type = "📄 Metadata"
+                    file_type = "Metadata"
                 else:
-                    file_type = "📁 Other"
+                    file_type = "Other"
                 
-                logger.info(f"   {file_type}: {file.name} ({size_mb:.1f} MB)")
+                logger.info(f"  {file_type}: {file.name} ({size_mb:.1f} MB)")
         
-        logger.info(f"   📊 Total: {file_count} files, {total_size_mb:.1f} MB")
+        logger.info(f"Total: {file_count} files, {total_size_mb:.1f} MB")
     
     # timing summary
     total_time = time.time() - overall_start
-    logger.info(f"⏱️  TIMING SUMMARY:")
-    logger.info(f"   • Total execution time: {total_time:.2f}s")
-    logger.info(f"   • Processing time: {processing_time:.2f}s ({processing_time/total_time*100:.1f}%)")
+    logger.info("TIMING SUMMARY:")
+    logger.info(f"  • Total execution time: {total_time:.2f}s")
+    logger.info(f"  • Processing time: {processing_time:.2f}s ({processing_time/total_time*100:.1f}%)")
     if args.validate_leakage and 'validation_time' in locals():
-        logger.info(f"   • Validation time: {validation_time:.2f}s ({validation_time/total_time*100:.1f}%)")
+        logger.info(f"  • Validation time: {validation_time:.2f}s ({validation_time/total_time*100:.1f}%)")
     
     monitor.log_resources("Final")
     
     if successful_splits:
-        logger.info("🎊 All requested datasets prepared successfully!")
+        logger.info("All requested datasets prepared successfully!")
     else:
-        logger.error("💥 No datasets were successfully prepared!")
+        logger.error("No datasets were successfully prepared!")
         return 1  # exit code for failure
     
     return 0  # exit code for success
