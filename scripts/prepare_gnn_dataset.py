@@ -229,6 +229,12 @@ def prepare_temporal_sequences_optimized(
     print("  Partitioning data by cluster...")
     cluster_partitions = df_sorted.partition_by('cluster_id', as_dict=True)
     
+    # Debug: Check partition keys
+    print(f"  Debug: Partition keys type: {type(list(cluster_partitions.keys())[0] if cluster_partitions else 'None')}")
+    print(f"  Debug: First 5 partition keys: {list(cluster_partitions.keys())[:5] if cluster_partitions else 'None'}")
+    print(f"  Debug: First 5 unique clusters: {unique_clusters[:5]}")
+    print(f"  Debug: Unique clusters type: {type(unique_clusters[0]) if unique_clusters else 'None'}")
+    
     # Clean up the sorted dataframe to free memory
     del df_sorted
     gc.collect()
@@ -246,12 +252,20 @@ def prepare_temporal_sequences_optimized(
         
         print(f"  Preparing data for {len(unique_clusters)} clusters...")
         for cluster_id in unique_clusters:
+            # Try different key formats due to Polars partition_by behavior
+            partition_key = cluster_id
             if cluster_id not in cluster_partitions:
-                print(f"    Debug: Cluster {cluster_id} not in partitions")
-                failed_clusters += 1
-                continue
+                # Try as tuple (common Polars behavior)
+                partition_key = (cluster_id,)
+                if partition_key not in cluster_partitions:
+                    # Try as string
+                    partition_key = str(cluster_id)
+                    if partition_key not in cluster_partitions:
+                        print(f"    Debug: Cluster {cluster_id} not in partitions (tried multiple key formats)")
+                        failed_clusters += 1
+                        continue
                 
-            cluster_data = cluster_partitions[cluster_id]
+            cluster_data = cluster_partitions[partition_key]
             
             # Debug: Check cluster data structure
             if len(cluster_data) == 0:
@@ -324,14 +338,40 @@ def prepare_temporal_sequences_optimized(
         # Single-threaded processing with progress bar
         for cluster_id in tqdm(unique_clusters, desc="Processing clusters"):
             try:
-                if cluster_id in cluster_partitions:
-                    cluster_data = cluster_partitions[cluster_id]
-                    sequences, targets, timestamps = process_cluster_sequences(
-                        (cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon)
-                    )
-                    all_sequences.extend(sequences)
-                    all_targets.extend(targets)
-                    all_timestamps.extend(timestamps)
+                # Try different key formats due to Polars partition_by behavior
+                partition_key = cluster_id
+                if cluster_id not in cluster_partitions:
+                    # Try as tuple (common Polars behavior)
+                    partition_key = (cluster_id,)
+                    if partition_key not in cluster_partitions:
+                        # Try as string
+                        partition_key = str(cluster_id)
+                        if partition_key not in cluster_partitions:
+                            continue
+                
+                cluster_data = cluster_partitions[partition_key]
+                
+                # Check if target columns exist in data
+                available_targets = [t for t in target_cols if t in cluster_data.columns]
+                if not available_targets:
+                    continue
+                
+                # Check if we have enough data for sequences
+                if len(cluster_data) < sequence_length + prediction_horizon:
+                    continue
+                
+                # Convert to numpy arrays for processing
+                cluster_features = cluster_data.select(feature_cols).to_numpy()
+                cluster_targets = cluster_data.select(available_targets).to_numpy()
+                cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
+                
+                sequences, targets, timestamps = process_cluster_sequences(
+                    (cluster_features, cluster_targets, cluster_timestamps, 
+                     feature_cols, available_targets, sequence_length, prediction_horizon)
+                )
+                all_sequences.extend(sequences)
+                all_targets.extend(targets)
+                all_timestamps.extend(timestamps)
             except Exception as e:
                 print(f"Warning: Error processing cluster {cluster_id}: {e}")
                 continue
