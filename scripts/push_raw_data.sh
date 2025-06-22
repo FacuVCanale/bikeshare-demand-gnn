@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# push raw data for generate_cluster_dataset script
+# push raw data for generate_cluster_dataset script using rsync
 # usage: ./scripts/push_raw_data.sh "ssh -p 44386 root@24.124.32.70 -L 8080:localhost:8080"
 
 set -e  # exit on any error
@@ -31,12 +31,26 @@ show_usage() {
     echo "Example:"
     echo "  $0 \"ssh -p 44386 root@24.124.32.70 -L 8080:localhost:8080\""
     echo ""
-    echo "This script transfers the raw data files needed for generate_cluster_dataset:"
+    echo "This script transfers the raw data files needed for generate_cluster_dataset using rsync:"
     echo "  - data/processed/trips_with_weather.parquet (378MB)"
     echo "  - data/raw/combined/trips.parquet (499MB)"
     echo "  - data/raw/combined/users.parquet (5.4MB)"
     echo ""
+    echo "Benefits of rsync:"
+    echo "  - Can resume interrupted transfers"
+    echo "  - Shows detailed progress"
+    echo "  - Compresses data during transfer"
+    echo "  - More reliable for large files"
+    echo ""
 }
+
+# check if rsync is available
+if ! command -v rsync &> /dev/null; then
+    print_error "rsync is not available. Please install rsync first."
+    print_info "On macOS: brew install rsync"
+    print_info "On Ubuntu/Debian: sudo apt-get install rsync"
+    exit 1
+fi
 
 # check arguments
 if [ $# -ne 1 ]; then
@@ -60,8 +74,8 @@ else
     exit 1
 fi
 
-print_info "Starting raw data transfer for EcoBici-AI"
-print_info "SSH Host: $SSH_HOST"
+print_info "Starting raw data transfer for EcoBici-AI using rsync"
+print_info "SSH Host: $SSH_HOST"  
 print_info "SSH Options: $SSH_OPTIONS"
 
 # define required files with their sizes (for verification)
@@ -111,7 +125,7 @@ print_info "Creating remote directory structure..."
 $SSH_CMD_CLEAN "mkdir -p data/processed data/raw/combined"
 print_success "Remote directories created"
 
-# function to transfer file with progress and verification
+# function to transfer file with rsync
 transfer_file() {
     local local_file="$1"
     local remote_path="$2"
@@ -119,16 +133,16 @@ transfer_file() {
     
     print_info "Transferring: $local_file -> $remote_path"
     
-    # extract scp options from ssh command
-    SCP_OPTIONS=""
+    # extract SSH options for rsync
+    RSYNC_SSH_CMD="ssh"
     if [[ $SSH_OPTIONS =~ -p[[:space:]]+([0-9]+) ]]; then
-        SCP_OPTIONS="-P ${BASH_REMATCH[1]}"
+        RSYNC_SSH_CMD="ssh -p ${BASH_REMATCH[1]}"
     elif [[ $SSH_OPTIONS =~ -p([0-9]+) ]]; then
-        SCP_OPTIONS="-P ${BASH_REMATCH[1]}"
+        RSYNC_SSH_CMD="ssh -p ${BASH_REMATCH[1]}"
     fi
     
-    # perform transfer with progress
-    if scp $SCP_OPTIONS "$local_file" "$SSH_HOST:$remote_path" 2>&1; then
+    # perform transfer with rsync using progress, compression, and partial resume
+    if rsync -avz --progress --partial -e "$RSYNC_SSH_CMD" "$local_file" "$SSH_HOST:$REMOTE_PWD/$remote_path" 2>&1; then
         print_success "Transfer completed: $local_file"
         
         # verify remote file exists and get size
@@ -143,12 +157,13 @@ transfer_file() {
         fi
     else
         print_error "Transfer failed: $local_file"
+        print_warning "You can retry this command - rsync will resume from where it left off"
         return 1
     fi
 }
 
 # transfer all required files
-print_info "Starting file transfers..."
+print_info "Starting file transfers with rsync..."
 transfer_errors=0
 
 # transfer processed data
@@ -156,7 +171,7 @@ if ! transfer_file "data/processed/trips_with_weather.parquet" "data/processed/t
     transfer_errors=$((transfer_errors + 1))
 fi
 
-# transfer raw data
+# transfer raw data  
 if ! transfer_file "data/raw/combined/trips.parquet" "data/raw/combined/trips.parquet" "499MB"; then
     transfer_errors=$((transfer_errors + 1))
 fi
@@ -184,13 +199,14 @@ du -sh data 2>/dev/null || echo 'Could not calculate total size'
 "
 
 if [ $transfer_errors -eq 0 ]; then
-    print_success "All files transferred successfully!"
+    print_success "All files transferred successfully with rsync!"
     print_info "You can now run generate_cluster_dataset on the remote server:"
     print_info "  cd /workspace/EcoBici-AI"
-    print_info "  python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/clustered"
+    print_info "  python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/clustered --n_clusters none --dt_minutes 5"
 else
     print_error "$transfer_errors file transfers failed"
+    print_warning "You can re-run this script - rsync will resume interrupted transfers"
     exit 1
 fi
 
-print_success "Raw data transfer completed successfully!" 
+print_success "Raw data transfer completed successfully with rsync!" 
