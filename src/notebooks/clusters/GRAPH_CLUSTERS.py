@@ -342,6 +342,7 @@ if __name__ == "__main__":
         # --- Train ---
         model.train()
         tr_loss = 0.0
+        tr_y_true, tr_y_pred = [], []
         for xb, yb in ld_train:
             xb, yb = xb.to(dev), yb.to(dev)
             optimizer.zero_grad()
@@ -350,6 +351,9 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             tr_loss += loss.item() * xb.size(0)
+            # Save for R2 unnormalized
+            tr_y_true.append(yb.cpu())
+            tr_y_pred.append(y_hat.detach().cpu())
 
         # --- Val ---
         model.eval()
@@ -379,8 +383,15 @@ if __name__ == "__main__":
         # Calcular R² desnormalizado
         val_r2_denorm = r2_score(val_y_true_denorm, val_y_pred_denorm)
 
+        # Calcular R² desnormalizado en entrenamiento
+        tr_y_true_cat = torch.cat(tr_y_true).numpy().ravel()
+        tr_y_pred_cat = torch.cat(tr_y_pred).numpy().ravel()
+        tr_y_true_denorm = targ_scaler.inverse_transform(tr_y_true_cat.reshape(-1, 1)).ravel()
+        tr_y_pred_denorm = targ_scaler.inverse_transform(tr_y_pred_cat.reshape(-1, 1)).ravel()
+        tr_r2_denorm = r2_score(tr_y_true_denorm, tr_y_pred_denorm)
+
         if epoch % 10 == 0 or epoch <= 5:
-            print(f"Epoch {epoch:03d} | train MSE={tr_loss:.5f} | val MSE={val_loss:.5f} | val R²={val_r2_denorm:.4f}")
+            print(f"Epoch {epoch:03d} | train MSE={tr_loss:.5f} | train R²={tr_r2_denorm:.4f} | val MSE={val_loss:.5f} | val R²={val_r2_denorm:.4f}")
 
         # Early-stopping
         if val_loss < best_val:
