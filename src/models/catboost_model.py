@@ -1,4 +1,4 @@
-from src.models.base_model import BaseModel
+from .base_model import BaseModel
 from sklearn.metrics import (
     accuracy_score, 
     precision_score, 
