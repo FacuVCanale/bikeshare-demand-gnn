@@ -252,7 +252,7 @@ class EcoBiciSpatialTemporalDataset:
         
         # check for temporal continuity (detect gaps that could indicate data issues)
         time_diffs = df.sort('ts_start')['ts_start'].diff().drop_nulls().unique()
-        expected_diff = time_diffs.mode().item() if len(time_diffs) > 0 else None
+        expected_diff = time_diffs.mode()[0] if len(time_diffs) > 0 else None
         
         # filter to only include relevant columns
         available_cols = [col for col in self.feature_columns if col in df.columns]
