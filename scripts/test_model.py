@@ -1,12 +1,16 @@
 """
 Script simple para probar modelos GNN entrenados en el conjunto de test.
 
+Usa exactamente la misma lógica de carga de datos y evaluación que el script de entrenamiento.
+
 Uso:
+    python scripts/test_model.py --model_path final_model.pt
     python scripts/test_model.py --model_path final_model.pt --data_dir data/gnn_ready
-    python scripts/test_model.py --model_path final_model.pt --data_dir data/gnn_ready --model_type gat
+    python scripts/test_model.py --model_path final_model.pt --model_type gat
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 import json
 import argparse
@@ -20,11 +24,47 @@ sys.path.insert(0, str(project_root))
 from src.models.gnn_models import create_gnn_model, calculate_gnn_metrics
 
 
+def load_gnn_data(data_dir: str):
+    """
+    Load preprocessed GNN data - same function as train_gnn.py
+    
+    Args:
+        data_dir: Directory containing GNN data files
+        
+    Returns:
+        Dictionary containing train/val/test data and metadata
+    """
+    data_path = Path(data_dir)
+    
+    # load data
+    train_data = torch.load(data_path / 'train_data.pt')
+    val_data = torch.load(data_path / 'val_data.pt')
+    test_data = torch.load(data_path / 'test_data.pt')
+    
+    # load metadata
+    with open(data_path / 'train_feature_names.json', 'r') as f:
+        train_metadata = json.load(f)
+    
+    with open(data_path / 'processing_config.json', 'r') as f:
+        processing_config = json.load(f)
+    
+    return {
+        'train_data': train_data,
+        'val_data': val_data,
+        'test_data': test_data,
+        'feature_names': train_metadata['features'],
+        'target_names': train_metadata['targets'],
+        'n_features': train_metadata['n_features'],
+        'n_targets': train_metadata['n_targets'],
+        'processing_config': processing_config
+    }
+
+
 def load_model_from_checkpoint(
     model_path: str,
+    num_features: int,
+    num_targets: int,
     model_type: str = None,
-    num_features: int = None,
-    num_targets: int = 1,
     device: str = 'auto'
 ):
     """
@@ -32,9 +72,9 @@ def load_model_from_checkpoint(
     
     Args:
         model_path: Path to the saved model (.pt file)
-        model_type: Type of model ('gat', 'gcn', etc.). If None, tries to infer from checkpoint
-        num_features: Number of input features. If None, tries to infer from data
+        num_features: Number of input features
         num_targets: Number of target variables
+        model_type: Type of model ('gat', 'gcn', etc.). If None, tries to infer from checkpoint
         device: Device to load model on
         
     Returns:
@@ -71,36 +111,50 @@ def load_model_from_checkpoint(
     if model_type is None:
         raise ValueError("Could not determine model type. Please specify --model_type")
     
-    # get model config from checkpoint if available
-    model_config = checkpoint.get('model_config', {})
-    
-    # infer num_features from state_dict if not provided
-    if num_features is None:
-        state_dict = checkpoint['model_state_dict']
-        # look for first layer input size
-        for key, tensor in state_dict.items():
-            if 'convs.0' in key and 'weight' in key:
-                if len(tensor.shape) >= 2:
-                    num_features = tensor.shape[1]  # input dim
-                    break
-        
-        if num_features is None:
-            raise ValueError("Could not infer num_features. Please specify in data or provide manually")
-    
     print(f"Creating {model_type.upper()} model with {num_features} features, {num_targets} targets")
     
-    # create model with default config (will be overridden by state_dict)
-    default_configs = {
-        'gat': {'hidden_dim': 128, 'num_heads': 8, 'num_layers': 3},
-        'gcn': {'hidden_dim': 128, 'num_layers': 3},
-        'sage': {'hidden_dim': 128, 'num_layers': 3},
-        'transformer': {'hidden_dim': 128, 'num_heads': 8, 'num_layers': 3},
-        'hybrid': {'hidden_dim': 128}
+    # get default model configurations (same as train_gnn.py)
+    model_configs = {
+        'gcn': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'dropout': 0.2,
+            'use_batch_norm': True,
+            'activation': 'relu'
+        },
+        'gat': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'num_heads': 8,
+            'dropout': 0.2,
+            'attention_dropout': 0.1,
+            'use_batch_norm': True
+        },
+        'sage': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'dropout': 0.2,
+            'aggregation': 'mean',
+            'use_batch_norm': True
+        },
+        'transformer': {
+            'hidden_dim': 128,
+            'num_layers': 3,
+            'num_heads': 8,
+            'dropout': 0.2,
+            'use_batch_norm': True
+        },
+        'hybrid': {
+            'hidden_dim': 128,
+            'dropout': 0.2,
+            'use_temporal': True,
+            'temporal_dim': 64
+        }
     }
     
-    config = default_configs.get(model_type, {})
-    config.update(model_config)  # use saved config if available
+    config = model_configs.get(model_type, {})
     
+    # create model
     model = create_gnn_model(
         model_type=model_type,
         num_features=num_features,
@@ -117,45 +171,9 @@ def load_model_from_checkpoint(
     return model
 
 
-def load_test_data(data_dir: str):
+def evaluate_model_on_test(model, test_data, device='auto'):
     """
-    Load test data and metadata.
-    
-    Args:
-        data_dir: Directory containing GNN data files
-        
-    Returns:
-        Dictionary with test data and metadata
-    """
-    data_path = Path(data_dir)
-    
-    print(f"Loading test data from: {data_dir}")
-    
-    # load test data
-    test_data = torch.load(data_path / 'test_data.pt')
-    
-    # load metadata
-    with open(data_path / 'train_feature_names.json', 'r') as f:
-        metadata = json.load(f)
-    
-    print(f"Test data loaded:")
-    print(f"  Nodes: {test_data.x.shape[0]}")
-    print(f"  Features: {test_data.x.shape[1]}")
-    print(f"  Edges: {test_data.edge_index.shape[1]}")
-    print(f"  Targets: {test_data.y.shape}")
-    
-    return {
-        'test_data': test_data,
-        'n_features': metadata['n_features'],
-        'n_targets': metadata['n_targets'],
-        'feature_names': metadata['features'],
-        'target_names': metadata['targets']
-    }
-
-
-def evaluate_model(model, test_data, device='auto'):
-    """
-    Evaluate model on test data.
+    Evaluate model on test data using same logic as gnn_trainer.py
     
     Args:
         model: Trained model
@@ -163,7 +181,7 @@ def evaluate_model(model, test_data, device='auto'):
         device: Device to use
         
     Returns:
-        Dictionary of metrics
+        Dictionary of metrics and predictions
     """
     if device == 'auto':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -173,19 +191,21 @@ def evaluate_model(model, test_data, device='auto'):
     model.eval()
     test_data = test_data.to(device)
     
-    print("\nRunning evaluation...")
+    # setup loss function (same as trainer)
+    criterion = nn.MSELoss()
+    
+    print("\nRunning evaluation on test set...")
     
     with torch.no_grad():
-        # get predictions
+        # forward pass
         predictions = model(test_data)
         targets = test_data.y
         
-        # calculate metrics
+        # calculate metrics using same function as trainer
         metrics = calculate_gnn_metrics(predictions, targets)
         
-        # additional metrics
-        mse_loss = torch.nn.functional.mse_loss(predictions, targets)
-        metrics['test_loss'] = mse_loss.item()
+        # add test loss (same as trainer evaluate method)
+        metrics['test_loss'] = criterion(predictions, targets).item()
     
     return metrics, predictions.cpu().numpy(), targets.cpu().numpy()
 
@@ -195,7 +215,7 @@ def main():
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the saved model (.pt file)')
     parser.add_argument('--data_dir', type=str, default='data/gnn_ready',
-                        help='Directory containing test data')
+                        help='Directory containing preprocessed GNN data')
     parser.add_argument('--model_type', type=str, 
                         choices=['gcn', 'gat', 'sage', 'transformer', 'hybrid'],
                         help='Model type (if not inferable from checkpoint)')
@@ -211,37 +231,42 @@ def main():
     print("="*60)
     
     try:
-        # load test data
-        data_info = load_test_data(args.data_dir)
+        # load GNN data using same function as train_gnn.py
+        print("Loading GNN data...")
+        data = load_gnn_data(args.data_dir)
+        print(f"Data loaded successfully from {args.data_dir}")
+        
+        # print data info (same as train_gnn.py)
+        print(f"\nDataset Information:")
+        print(f"  Train nodes: {data['train_data'].x.shape[0]}")
+        print(f"  Val nodes: {data['val_data'].x.shape[0]}")
+        print(f"  Test nodes: {data['test_data'].x.shape[0]}")
+        print(f"  Features: {data['n_features']}")
+        print(f"  Targets: {data['n_targets']}")
+        print(f"  Graph edges: {data['test_data'].edge_index.shape[1]}")
         
         # load model
         model = load_model_from_checkpoint(
             model_path=args.model_path,
+            num_features=data['n_features'],
+            num_targets=data['n_targets'],
             model_type=args.model_type,
-            num_features=data_info['n_features'],
-            num_targets=data_info['n_targets'],
             device=args.device
         )
         
-        # evaluate model
-        metrics, predictions, targets = evaluate_model(
+        # evaluate model using same logic as trainer
+        metrics, predictions, targets = evaluate_model_on_test(
             model=model,
-            test_data=data_info['test_data'],
+            test_data=data['test_data'],
             device=args.device
         )
         
-        # print results
+        # print results (same format as trainer)
         print("\n" + "="*60)
         print("TEST RESULTS")
         print("="*60)
-        print(f"Test samples: {len(predictions)}")
-        print(f"Features: {data_info['n_features']}")
-        print(f"Targets: {data_info['n_targets']}")
-        print()
-        
-        print("Metrics:")
         for metric, value in metrics.items():
-            print(f"  {metric.upper()}: {value:.4f}")
+            print(f"  {metric}: {value:.4f}")
         
         # save predictions if requested
         if args.save_predictions:
@@ -259,6 +284,8 @@ def main():
         
     except Exception as e:
         print(f"Error during testing: {str(e)}")
+        print("Make sure you have run the data preparation script first:")
+        print("  python scripts/prepare_gnn_dataset.py")
         return 1
     
     return 0
