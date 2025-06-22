@@ -110,6 +110,11 @@ def parse_args():
         help='Name of target column'
     )
     parser.add_argument(
+        '--force-cpu',
+        action='store_true',
+        help='Force CPU training (disable GPU)'
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose output'
@@ -169,6 +174,20 @@ def override_hyperparameters(hyperparameters, args):
             hyperparameters['depth'] = args.depth
         else:
             hyperparameters['max_depth'] = args.depth
+    
+    # force CPU if requested
+    if args.force_cpu:
+        print("🔧 Forcing CPU training (GPU disabled)")
+        if args.model_type == 'catboost':
+            hyperparameters['task_type'] = 'CPU'
+            hyperparameters.pop('devices', None)
+        elif args.model_type == 'lightgbm':
+            hyperparameters['device'] = 'cpu'
+            hyperparameters.pop('gpu_platform_id', None)
+            hyperparameters.pop('gpu_device_id', None)
+        elif args.model_type == 'xgboost':
+            hyperparameters['tree_method'] = 'hist'  # CPU version
+            hyperparameters.pop('gpu_id', None)
     
     return hyperparameters
 

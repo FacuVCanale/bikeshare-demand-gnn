@@ -230,12 +230,29 @@ Make sure you have the required packages:
 pip install catboost lightgbm xgboost polars pandas scikit-learn
 ```
 
+## Hyperparameter Optimization
+
+For automatic hyperparameter tuning, use the OPTUNA-based optimization script:
+
+```bash
+# basic optimization with 50 trials
+python scripts/optimize_gate_hyperparameters.py --model-type catboost --n-trials 50
+
+# optimize for different metrics
+python scripts/optimize_gate_hyperparameters.py --optimization-metric auc --n-trials 100
+
+# see all options
+python scripts/optimize_gate_hyperparameters.py --help
+```
+
+See [README_gate_hyperparameter_optimization.md](README_gate_hyperparameter_optimization.md) for complete documentation.
+
 ## Next Steps
 
 After training a Gate model:
 
 1. Evaluate performance on the test set
 2. Analyze feature importance to understand what drives predictions
-3. Consider hyperparameter tuning with Optuna or similar
+3. **Use hyperparameter optimization** with the OPTUNA script for better performance
 4. Deploy the model for the first stage of the two-stage pipeline
 5. Train the second-stage Informer model for detailed predictions 

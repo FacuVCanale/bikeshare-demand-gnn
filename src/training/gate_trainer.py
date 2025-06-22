@@ -14,6 +14,54 @@ from src.models.catboost_model import CatBoostModel
 from src.models.gbdt_models import LightGBMModel, XGBoostModel
 
 
+def detect_gpu_availability():
+    """
+    Detect available GPU devices for different frameworks.
+    
+    Returns:
+        Dict with GPU availability for each framework
+    """
+    gpu_info = {
+        'catboost': False,
+        'lightgbm': False,
+        'xgboost': False,
+        'cuda_available': False,
+        'mps_available': False  # for apple silicon
+    }
+    
+    # check CUDA availability
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_info['cuda_available'] = True
+            gpu_info['cuda_device_count'] = torch.cuda.device_count()
+            gpu_info['cuda_device_name'] = torch.cuda.get_device_name(0)
+            print(f"✅ CUDA detected: {gpu_info['cuda_device_name']}")
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            gpu_info['mps_available'] = True
+            print("✅ Apple Metal Performance Shaders (MPS) detected")
+        else:
+            print("⚠️  No GPU acceleration detected")
+    except ImportError:
+        print("⚠️  PyTorch not available for GPU detection")
+    
+    # check catboost gpu support
+    try:
+        from catboost.utils import get_gpu_device_count
+        if get_gpu_device_count() > 0:
+            gpu_info['catboost'] = True
+            print(f"✅ CatBoost GPU support available: {get_gpu_device_count()} devices")
+    except:
+        print("⚠️  CatBoost GPU support not available")
+    
+    # lightgbm and xgboost gpu support depends on compilation
+    # we'll try to use GPU and fallback to CPU if it fails
+    gpu_info['lightgbm'] = gpu_info['cuda_available']
+    gpu_info['xgboost'] = gpu_info['cuda_available']
+    
+    return gpu_info
+
+
 class ModelFactory:
     """Factory for creating different model types."""
     
@@ -87,6 +135,10 @@ class GateTrainer:
     def prepare_data(self):
         """Load and prepare the dataset."""
         print("=== Preparing Data ===")
+        
+        # check GPU availability
+        print("\n=== GPU Detection ===")
+        gpu_info = detect_gpu_availability()
         
         # load raw data
         self.dataset.load_data()
@@ -174,7 +226,10 @@ class GateTrainer:
         return self
     
     def _get_default_hyperparameters(self, model_type: str) -> Dict[str, Any]:
-        """Get default hyperparameters for each model type."""
+        """Get default hyperparameters for each model type with GPU support."""
+        # detect GPU availability
+        gpu_info = detect_gpu_availability()
+        
         defaults = {
             'catboost': {
                 'iterations': 1000,
@@ -208,6 +263,23 @@ class GateTrainer:
                 'eval_metric': 'auc'
             }
         }
+        
+        # add GPU configurations
+        if model_type.lower() == 'catboost' and gpu_info['catboost']:
+            defaults['catboost']['task_type'] = 'GPU'
+            defaults['catboost']['devices'] = '0'  # use first GPU
+            print("🚀 CatBoost configured for GPU training")
+        
+        if model_type.lower() == 'lightgbm' and gpu_info['lightgbm']:
+            defaults['lightgbm']['device'] = 'gpu'
+            defaults['lightgbm']['gpu_platform_id'] = 0
+            defaults['lightgbm']['gpu_device_id'] = 0
+            print("🚀 LightGBM configured for GPU training")
+        
+        if model_type.lower() == 'xgboost' and gpu_info['xgboost']:
+            defaults['xgboost']['tree_method'] = 'gpu_hist'
+            defaults['xgboost']['gpu_id'] = 0
+            print("🚀 XGBoost configured for GPU training")
         
         return defaults.get(model_type.lower(), {})
     
