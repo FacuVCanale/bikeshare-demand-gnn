@@ -295,12 +295,12 @@ class EcoBiciSpatialTemporalDataset:
         # group features and targets by timestamp for efficient access
         features_by_ts = {
             ts: group.drop('ts_start').sort('cluster_id') 
-            for ts, group in features_df.groupby('ts_start', maintain_order=True)
+            for ts, group in features_df.group_by('ts_start', maintain_order=True)
         }
         
         targets_by_ts = {
             ts: group.drop('ts_start').sort('cluster_id')
-            for ts, group in targets_df.groupby('ts_start', maintain_order=True)
+            for ts, group in targets_df.group_by('ts_start', maintain_order=True)
         }
         
         valid_count = 0
