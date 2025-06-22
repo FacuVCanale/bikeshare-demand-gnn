@@ -3,6 +3,7 @@
 Generate clustered or station-level dataset for EcoBici analysis.
 
 This script:
+0. Filters out stations with less than 5000 trips across all years (both as origin and destination)
 1. Loads and merges all datasets (trips_with_weather, trips, users)
 2. Creates temporal splits without data leakage  
 3. Optionally fits K-means clustering on training stations (if --n_clusters specified)
@@ -16,6 +17,11 @@ Usage:
     
     # Without clustering (station-level features):
     python scripts/generate_cluster_dataset.py --data_dir data --output_dir data/station_level --n_clusters none
+    
+Station Filtering:
+- Only stations with >= 5000 total trips (origin + destination) are included
+- Low-activity stations are filtered out before any processing to ensure robustness
+- Filtering statistics are logged and included in metadata
     
 Features generated:
 - Metadata (cluster centroids/station coordinates, counts)
@@ -213,16 +219,46 @@ def main():
             log_level=args.log_level
         )
         
-        # step 1: load and merge datasets
+        # step 0: filter low-activity stations (before any processing)
         logger.info("\n" + "="*60)
-        logger.info("STEP 1: LOADING AND MERGING DATASETS")
+        logger.info("STEP 0: FILTERING LOW-ACTIVITY STATIONS")
+        logger.info("="*60)
+        
+        filtered_checkpoint = checkpoints_dir / "00_filtered_datasets.pkl"
+        
+        if args.use_checkpoints and filtered_checkpoint.exists():
+            logger.info(f"Loading filtered datasets from checkpoint: {filtered_checkpoint}")
+            with open(filtered_checkpoint, 'rb') as f:
+                trips_weather, trips, users, filtering_stats = pickle.load(f)
+            
+            # log filtering statistics from checkpoint
+            logger.info("Loaded filtering statistics:")
+            logger.info(f"  -> Stations retained: {filtering_stats['active_stations']:,} / {filtering_stats['total_stations']:,} ({filtering_stats['station_retention_rate']*100:.1f}%)")
+            logger.info(f"  -> trips_weather trips retained: {filtering_stats['filtered_weather_trips']:,} / {filtering_stats['original_weather_trips']:,} ({filtering_stats['weather_trip_retention_rate']*100:.1f}%)")
+            logger.info(f"  -> trips trips retained: {filtering_stats['filtered_trips']:,} / {filtering_stats['original_trips']:,} ({filtering_stats['trip_retention_rate']*100:.1f}%)")
+        else:
+            # load raw datasets
+            trips_weather, trips, users = data_prep.load_datasets()
+            
+            # filter stations with less than 5000 trips
+            trips_weather, trips, filtering_stats = data_prep.filter_low_activity_stations(
+                trips_weather, trips, min_trips=5000
+            )
+            
+            if args.use_checkpoints:
+                logger.info(f"Saving filtered datasets to checkpoint: {filtered_checkpoint}")
+                with open(filtered_checkpoint, 'wb') as f:
+                    pickle.dump((trips_weather, trips, users, filtering_stats), f)
+        
+        # step 1: merge filtered datasets
+        logger.info("\n" + "="*60)
+        logger.info("STEP 1: MERGING FILTERED DATASETS")
         logger.info("="*60)
         
         merged_checkpoint = checkpoints_dir / "01_merged_datasets.parquet"
         merged_data = load_checkpoint_if_exists(merged_checkpoint, "merged datasets", logger) if args.use_checkpoints else None
         
         if merged_data is None:
-            trips_weather, trips, users = data_prep.load_datasets()
             merged_data = data_prep.merge_datasets(trips_weather, trips, users)
             data_prep.validate_data_quality(merged_data)
             
@@ -386,6 +422,13 @@ def main():
             'feature_columns': final_datasets['train'].columns
         }
         
+        # add station filtering statistics to metadata
+        if 'filtering_stats' in locals():
+            metadata['station_filtering'] = filtering_stats
+            metadata['station_filtering']['applied'] = True
+        else:
+            metadata['station_filtering'] = {'applied': False}
+        
         metadata_path = output_dir / "dataset_metadata.json"
         import json
         import numpy as np
@@ -471,6 +514,11 @@ def main():
             f"  Train end date: {args.train_end_date}",
             f"  Validation end date: {args.val_end_date}",
             f"  Random state: {args.random_state}",
+            "",
+            "STATION FILTERING:",
+            f"  Minimum trips per station: 5,000",
+            f"  Stations retained: {filtering_stats['active_stations']:,} / {filtering_stats['total_stations']:,} ({filtering_stats['station_retention_rate']*100:.1f}%)",
+            f"  Trips retained: {filtering_stats['filtered_weather_trips']:,} / {filtering_stats['original_weather_trips']:,} ({filtering_stats['weather_trip_retention_rate']*100:.1f}%)",
             "",
             "DATASET SHAPES:",
             f"  Train: {final_datasets['train'].shape}",

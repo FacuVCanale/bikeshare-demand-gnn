@@ -288,6 +288,108 @@ class DataPreparator:
         
         return stations
         
+    def filter_low_activity_stations(self, trips_weather: pl.DataFrame, 
+                                    trips: pl.DataFrame, 
+                                    min_trips: int = 5000) -> Tuple[pl.DataFrame, pl.DataFrame, Dict[str, int]]:
+        """Filter stations with less than minimum number of trips across all years.
+        
+        Args:
+            trips_weather: Main trips dataset with weather data
+            trips: Complete trips dataset 
+            min_trips: Minimum number of trips required per station (default: 5000)
+            
+        Returns:
+            Tuple of (filtered_trips_weather, filtered_trips, filtering_stats)
+        """
+        self.logger.info(f"Filtering stations with less than {min_trips:,} trips...")
+        
+        # count trips per station using the more complete trips dataset
+        # count both as origin and destination
+        origin_counts = trips.group_by("id_estacion_origen").len().rename({"len": "origin_count"})
+        dest_counts = trips.group_by("id_estacion_destino").len().rename({"len": "dest_count"})
+        
+        # combine origin and destination counts
+        station_counts = origin_counts.join(
+            dest_counts, 
+            left_on="id_estacion_origen", 
+            right_on="id_estacion_destino", 
+            how="outer"
+        ).fill_null(0)
+        
+        # calculate total trips per station
+        station_counts = station_counts.with_columns([
+            (pl.col("origin_count") + pl.col("dest_count")).alias("total_trips"),
+            pl.coalesce(["id_estacion_origen", "id_estacion_destino"]).alias("station_id")
+        ]).select(["station_id", "total_trips", "origin_count", "dest_count"])
+        
+        # identify stations with sufficient activity
+        active_stations = station_counts.filter(pl.col("total_trips") >= min_trips)
+        valid_station_ids = set(active_stations.get_column("station_id").to_list())
+        
+        # filter out low-activity stations
+        low_activity_stations = station_counts.filter(pl.col("total_trips") < min_trips)
+        
+        # log detailed statistics
+        total_stations = station_counts.height
+        active_station_count = active_stations.height
+        filtered_station_count = low_activity_stations.height
+        
+        self.logger.info(f"Station activity analysis:")
+        self.logger.info(f"  -> Total stations found: {total_stations:,}")
+        self.logger.info(f"  -> Stations with >= {min_trips:,} trips: {active_station_count:,}")
+        self.logger.info(f"  -> Stations filtered out: {filtered_station_count:,}")
+        self.logger.info(f"  -> Retention rate: {active_station_count/total_stations*100:.1f}%")
+        
+        # show some examples of filtered stations
+        if filtered_station_count > 0:
+            sample_filtered = low_activity_stations.head(5)
+            self.logger.info(f"  -> Sample filtered stations (showing first 5):")
+            for row in sample_filtered.iter_rows():
+                station_id, total_trips, origin_count, dest_count = row
+                self.logger.info(f"     Station {station_id}: {total_trips:,} trips ({origin_count:,} origins + {dest_count:,} destinations)")
+        
+        # filter trips datasets to only include valid stations
+        self.logger.info("Filtering trip datasets...")
+        
+        # filter trips_weather dataset
+        original_weather_trips = trips_weather.height
+        filtered_trips_weather = trips_weather.filter(
+            pl.col("id_estacion_origen").is_in(valid_station_ids) &
+            pl.col("id_estacion_destino").is_in(valid_station_ids)
+        )
+        weather_trips_filtered = original_weather_trips - filtered_trips_weather.height
+        
+        # filter complete trips dataset  
+        original_trips = trips.height
+        filtered_trips = trips.filter(
+            pl.col("id_estacion_origen").is_in(valid_station_ids) &
+            pl.col("id_estacion_destino").is_in(valid_station_ids)
+        )
+        trips_filtered = original_trips - filtered_trips.height
+        
+        # calculate filtering statistics
+        filtering_stats = {
+            'min_trips_threshold': min_trips,
+            'total_stations': total_stations,
+            'active_stations': active_station_count,
+            'filtered_stations': filtered_station_count,
+            'station_retention_rate': active_station_count / total_stations if total_stations > 0 else 0,
+            'original_weather_trips': original_weather_trips,
+            'filtered_weather_trips': filtered_trips_weather.height,
+            'weather_trips_removed': weather_trips_filtered,
+            'weather_trip_retention_rate': filtered_trips_weather.height / original_weather_trips if original_weather_trips > 0 else 0,
+            'original_trips': original_trips,
+            'filtered_trips': filtered_trips.height,
+            'trips_removed': trips_filtered,
+            'trip_retention_rate': filtered_trips.height / original_trips if original_trips > 0 else 0
+        }
+        
+        self.logger.info(f"Trip filtering results:")
+        self.logger.info(f"  -> trips_with_weather: {original_weather_trips:,} -> {filtered_trips_weather.height:,} ({weather_trips_filtered:,} removed, {filtering_stats['weather_trip_retention_rate']*100:.1f}% retained)")
+        self.logger.info(f"  -> trips: {original_trips:,} -> {filtered_trips.height:,} ({trips_filtered:,} removed, {filtering_stats['trip_retention_rate']*100:.1f}% retained)")
+        
+        return filtered_trips_weather, filtered_trips, filtering_stats
+
     def validate_data_quality(self, df: pl.DataFrame) -> Dict[str, int]:
         """Validate data quality and return statistics.
         
