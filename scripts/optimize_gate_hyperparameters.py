@@ -15,8 +15,8 @@ import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
 
-# add src to path
-sys.path.append(str(Path(__file__).parent.parent / 'src'))
+# add project root to path so we can import src
+sys.path.append(str(Path(__file__).parent.parent))
 
 from src.training.gate_trainer import GateTrainer
 
