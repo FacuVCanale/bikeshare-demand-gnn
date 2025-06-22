@@ -46,7 +46,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.models.gnn_models import create_gnn_model
-from src.training.gnn_trainer import train_gnn_experiment
+from src.training.gnn_trainer import train_gnn_experiment, get_device_info
 from scripts.train_gnn import load_gnn_data, set_seed
 
 
@@ -447,11 +447,11 @@ class GNNOptunaObjective:
             return float('inf') if 'loss' in self.objective_metric.lower() else float('-inf')
 
 
-def create_base_config() -> Dict[str, Any]:
+def create_base_config(device: str = 'auto') -> Dict[str, Any]:
     """Create base configuration template for optimization"""
     return {
         'trainer_params': {
-            'device': 'auto',
+            'device': device,
             'save_dir': 'experiments/optuna'
         },
         'training_params': {
@@ -487,6 +487,7 @@ def optimize_model_hyperparameters(
     timeout: int = None,
     seed: int = 42,
     timestamp: str = None,
+    device: str = 'auto',
     **objective_kwargs
 ) -> optuna.Study:
     """
@@ -526,12 +527,13 @@ def optimize_model_hyperparameters(
     )
     
     # create objective
-    base_config = create_base_config()
+    base_config = create_base_config(device=device)
     objective = GNNOptunaObjective(
         model_type=model_type,
         data=data,
         base_config=base_config,
         objective_metric=objective_metric,
+        device=device,
         seed=seed,
         timestamp=timestamp,
         **objective_kwargs
@@ -714,6 +716,38 @@ def create_optimization_summary(
     return df_summary
 
 
+def display_device_info(device_spec: str):
+    """Display comprehensive device information"""
+    
+    device_info = get_device_info()
+    
+    print(f"\n{'='*60}")
+    print(f"DEVICE CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"Requested device: {device_spec}")
+    print(f"CUDA available: {device_info['cuda_available']}")
+    print(f"Number of GPUs: {device_info['num_gpus']}")
+    
+    if device_info['cuda_available']:
+        print(f"Primary device: {device_info['primary_device']}")
+        
+        print(f"\nGPU Information:")
+        for i in range(device_info['num_gpus']):
+            name = device_info['gpu_names'][i]
+            memory_gb = device_info['total_memory'][i] / (1024**3)
+            print(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
+        
+        if device_info['use_multi_gpu']:
+            print(f"\n🚀 Multi-GPU optimization will be enabled!")
+            print(f"   Using {device_info['num_gpus']} GPUs for accelerated training")
+        else:
+            print(f"\n⚡ Single GPU optimization enabled")
+    else:
+        print(f"🐌 CPU optimization mode")
+    
+    print(f"{'='*60}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Optuna hyperparameter optimization for GNN models',
@@ -768,7 +802,8 @@ Results Structure:
     parser.add_argument('--patience', type=int, default=10,
                         help='Early stopping patience')
     parser.add_argument('--device', type=str, default='auto',
-                        help='Training device (cuda/cpu/auto)')
+                        choices=['auto', 'cpu', 'cuda', 'cuda:0', 'cuda:1', 'multi-gpu'],
+                        help='Training device (auto/cpu/cuda/multi-gpu)')
     
     # parallel and persistence
     parser.add_argument('--jobs', type=int, default=1,
@@ -828,6 +863,9 @@ Results Structure:
         print("  python scripts/prepare_gnn_dataset.py")
         return
     
+    # display device information
+    display_device_info(args.device)
+    
     # run optimization for each model
     results = {}
     
@@ -861,10 +899,10 @@ Results Structure:
                 timeout=args.timeout,
                 seed=args.seed,
                 timestamp=timestamp,
+                device=args.device,
                 use_test_metric=args.use_test_metric,
                 max_epochs=args.max_epochs,
                 early_stopping_patience=args.patience,
-                device=args.device,
                 base_save_dir=args.save_dir
             )
             

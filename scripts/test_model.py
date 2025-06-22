@@ -2,6 +2,7 @@
 Script simple para probar modelos GNN entrenados en el conjunto de test.
 
 Usa exactamente la misma lógica de carga de datos y evaluación que el script de entrenamiento.
+Includes multi-GPU support for consistency with training scripts.
 
 Uso:
     python scripts/test_model.py --model_path final_model.pt
@@ -22,6 +23,39 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.models.gnn_models import create_gnn_model, calculate_gnn_metrics
+from src.training.gnn_trainer import get_device_info, setup_device
+
+
+def display_device_info(device_spec: str):
+    """Display comprehensive device information"""
+    
+    device_info = get_device_info()
+    
+    print(f"\n{'='*60}")
+    print(f"DEVICE CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"Requested device: {device_spec}")
+    print(f"CUDA available: {device_info['cuda_available']}")
+    print(f"Number of GPUs: {device_info['num_gpus']}")
+    
+    if device_info['cuda_available']:
+        print(f"Primary device: {device_info['primary_device']}")
+        
+        print(f"\nGPU Information:")
+        for i in range(device_info['num_gpus']):
+            name = device_info['gpu_names'][i]
+            memory_gb = device_info['total_memory'][i] / (1024**3)
+            print(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
+        
+        if device_info['use_multi_gpu']:
+            print(f"\n🚀 Multi-GPU inference available!")
+            print(f"   {device_info['num_gpus']} GPUs detected for accelerated inference")
+        else:
+            print(f"\n⚡ Single GPU inference enabled")
+    else:
+        print(f"🐌 CPU inference mode")
+    
+    print(f"{'='*60}\n")
 
 
 def load_gnn_data(data_dir: str):
@@ -68,28 +102,25 @@ def load_model_from_checkpoint(
     device: str = 'auto'
 ):
     """
-    Load a trained GNN model from checkpoint.
+    Load a trained GNN model from checkpoint with multi-GPU support.
     
     Args:
         model_path: Path to the saved model (.pt file)
         num_features: Number of input features
         num_targets: Number of target variables
         model_type: Type of model ('gat', 'gcn', etc.). If None, tries to infer from checkpoint
-        device: Device to load model on
+        device: Device specification ('auto', 'cpu', 'cuda', 'multi-gpu')
         
     Returns:
-        Loaded model
+        Tuple of (loaded_model, use_multi_gpu, device_info)
     """
-    # set device
-    if device == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(device)
+    # setup device configuration
+    primary_device, use_multi_gpu, device_info = setup_device(device)
     
     print(f"Loading model from: {model_path}")
     
     # load checkpoint
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(model_path, map_location=primary_device, weights_only=False)
     
     # get model info from checkpoint if available
     if 'model_class' in checkpoint:
@@ -112,6 +143,11 @@ def load_model_from_checkpoint(
         raise ValueError("Could not determine model type. Please specify --model_type")
     
     print(f"Creating {model_type.upper()} model with {num_features} features, {num_targets} targets")
+    
+    # check if model was trained with multi-GPU
+    multi_gpu_trained = checkpoint.get('multi_gpu_trained', False)
+    if multi_gpu_trained:
+        print("Model was trained with multi-GPU")
     
     # get default model configurations (same as train_gnn.py)
     model_configs = {
@@ -162,13 +198,33 @@ def load_model_from_checkpoint(
         **config
     )
     
-    # load state dict
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
+    # load state dict (handle both single-GPU and multi-GPU trained models)
+    state_dict = checkpoint['model_state_dict']
+    
+    # if model was trained with DataParallel but we're loading for single GPU,
+    # remove 'module.' prefix from keys
+    if multi_gpu_trained and not use_multi_gpu:
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    # if model was trained single-GPU but we want to use multi-GPU,
+    # add 'module.' prefix
+    elif not multi_gpu_trained and use_multi_gpu:
+        state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+    
+    # setup multi-GPU if requested and available
+    if use_multi_gpu:
+        print(f"Setting up multi-GPU inference on {device_info['num_gpus']} GPUs")
+        model = nn.DataParallel(model)
+    
+    # load state dict and move to device
+    model.load_state_dict(state_dict)
+    model = model.to(primary_device)
     model.eval()
     
-    print(f"Model loaded successfully on {device}")
-    return model
+    print(f"Model loaded successfully on {primary_device}")
+    if use_multi_gpu:
+        print(f"Multi-GPU inference enabled using {device_info['num_gpus']} GPUs")
+    
+    return model, use_multi_gpu, device_info
 
 
 def evaluate_model_on_test(model, test_data, device='auto'):
@@ -176,25 +232,25 @@ def evaluate_model_on_test(model, test_data, device='auto'):
     Evaluate model on test data using same logic as gnn_trainer.py
     
     Args:
-        model: Trained model
+        model: Trained model (potentially wrapped with DataParallel)
         test_data: Test data
-        device: Device to use
+        device: Device specification
         
     Returns:
         Dictionary of metrics and predictions
     """
-    if device == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(device)
+    # setup device configuration
+    primary_device, use_multi_gpu, device_info = setup_device(device)
     
     model.eval()
-    test_data = test_data.to(device)
+    test_data = test_data.to(primary_device)
     
     # setup loss function (same as trainer)
     criterion = nn.MSELoss()
     
     print("\nRunning evaluation on test set...")
+    if use_multi_gpu:
+        print(f"Using {device_info['num_gpus']} GPUs for inference")
     
     with torch.no_grad():
         # forward pass
@@ -211,7 +267,7 @@ def evaluate_model_on_test(model, test_data, device='auto'):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test a trained GNN model')
+    parser = argparse.ArgumentParser(description='Test a trained GNN model with multi-GPU support')
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the saved model (.pt file)')
     parser.add_argument('--data_dir', type=str, default='data/gnn_ready',
@@ -220,15 +276,19 @@ def main():
                         choices=['gcn', 'gat', 'sage', 'transformer', 'hybrid'],
                         help='Model type (if not inferable from checkpoint)')
     parser.add_argument('--device', type=str, default='auto',
-                        help='Device to use (cuda/cpu/auto)')
+                        choices=['auto', 'cpu', 'cuda', 'cuda:0', 'cuda:1', 'multi-gpu'],
+                        help='Device to use (auto/cpu/cuda/multi-gpu)')
     parser.add_argument('--save_predictions', action='store_true',
                         help='Save predictions to file')
     
     args = parser.parse_args()
     
     print("="*60)
-    print("GNN Model Testing")
+    print("GNN Model Testing with Multi-GPU Support")
     print("="*60)
+    
+    # display device information
+    display_device_info(args.device)
     
     try:
         # load GNN data using same function as train_gnn.py
@@ -246,7 +306,7 @@ def main():
         print(f"  Graph edges: {data['test_data'].edge_index.shape[1]}")
         
         # load model
-        model = load_model_from_checkpoint(
+        model, use_multi_gpu, device_info = load_model_from_checkpoint(
             model_path=args.model_path,
             num_features=data['n_features'],
             num_targets=data['n_targets'],
@@ -275,12 +335,16 @@ def main():
                 output_file,
                 predictions=predictions,
                 targets=targets,
-                metrics=metrics
+                metrics=metrics,
+                device_info=device_info,
+                multi_gpu_used=use_multi_gpu
             )
             print(f"\nPredictions saved to: {output_file}")
         
         print(f"\n{'='*60}")
         print("Testing completed successfully!")
+        if use_multi_gpu:
+            print(f"Multi-GPU inference was used with {device_info['num_gpus']} GPUs")
         
     except Exception as e:
         print(f"Error during testing: {str(e)}")

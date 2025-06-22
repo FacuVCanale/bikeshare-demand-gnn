@@ -1,521 +1,454 @@
+#!/usr/bin/env python3
 """
-Training script for Graph Neural Networks on EcoBici clustered data.
+Enhanced Graph Neural Network Training Script for EcoBici Demand Prediction
 
-This script loads the preprocessed GNN data and trains various GNN architectures
-for bike demand prediction, including model comparison and evaluation.
+This script provides a comprehensive interface for training GNN models with multi-GPU support
+on EcoBici demand prediction data. It includes various model architectures, extensive 
+hyperparameter configuration, data handling, and experiment tracking.
+
+Multi-GPU support is automatically enabled when multiple GPUs are available.
 """
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import numpy as np
-import pandas as pd
-import random
-import os
-from pathlib import Path
-import json
+import torch.nn as nn
 import argparse
-import sys
-from typing import Dict, Any, List
+import json
+import random
+import numpy as np
+from pathlib import Path
+from typing import Dict, Any, Tuple
+import warnings
+warnings.filterwarnings('ignore')
 
-# set early deterministic configuration
-os.environ['PYTHONHASHSEED'] = '0'
-os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+from src.models.gnn_models import create_gnn_model
+from src.dataset.gnn_dataset import create_gnn_dataset
+from src.training.gnn_trainer import GNNTrainer, get_device_info
 
-# add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
-from src.models.gnn_models import create_gnn_model, print_model_summary
-from src.training.gnn_trainer import GNNTrainer, train_gnn_experiment
-
-# early seed initialization for maximum reproducibility
-def _early_seed_init(seed: int = 42):
-    """Initialize basic randomness sources early in script execution"""
+def set_seed(seed: int = 42):
+    """Set seeds for reproducibility across all libraries and operations"""
+    
+    # python random
     random.seed(seed)
+    
+    # numpy
     np.random.seed(seed)
+    
+    # pytorch
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-# apply early seeding
-_early_seed_init()
-
-def set_seed(seed: int):
-    """
-    Set random seed for reproducibility across all libraries and operations.
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # for multi-GPU
     
-    This comprehensive seeding function addresses multiple sources of randomness:
-    - Python's random module
-    - NumPy operations
-    - PyTorch operations (CPU and CUDA)
-    - PyTorch Geometric operations
-    - CUDA operations and cuDNN
-    - Environment variables for deterministic operations
+    # ensure deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
-    Specific issues addressed:
-    - PYTHONHASHSEED: Ensures consistent hash-based operations across runs
-    - CUBLAS_WORKSPACE_CONFIG: Forces deterministic CUDA linear algebra operations
-    - cudnn.deterministic: Ensures reproducible convolution algorithms
-    - cudnn.benchmark: Disabled to prevent auto-tuning non-determinism
-    - use_deterministic_algorithms: Forces PyTorch to use deterministic implementations
-    - tf32: Disabled to prevent automatic mixed precision non-determinism
-    
-    Args:
-        seed: Random seed value
-    """
-    # update environment variables for deterministic operations
+    # additional environment variables for reproducibility
     os.environ['PYTHONHASHSEED'] = str(seed)
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     
-    # python random module
-    random.seed(seed)
+    # use deterministic algorithms when available
+    torch.use_deterministic_algorithms(True, warn_only=True)
     
-    # numpy operations
-    np.random.seed(seed)
-    
-    # pytorch operations
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    
-    # ensure deterministic operations for reproducibility
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.enabled = True
-    
-    # pytorch geometric specific settings
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except Exception as e:
-        print(f"Warning: Could not enable all deterministic algorithms: {e}")
-        print("Some operations may still be non-deterministic")
-    
-    # additional cuda settings for determinism
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        # set cuda device deterministic operations
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-    
-    print(f"Random seed set to: {seed}")
-    print("Deterministic mode enabled for reproducible results")
+    print(f"Set global seed to {seed} for reproducibility")
 
 
-def load_gnn_data(data_dir: str) -> Dict[str, Any]:
-    """
-    Load preprocessed GNN data.
+def get_default_model_config(model_type: str, num_features: int, num_targets: int) -> Dict[str, Any]:
+    """Get default configuration for a specific model type"""
     
-    Args:
-        data_dir: Directory containing GNN data files
-        
-    Returns:
-        Dictionary containing train/val/test data and metadata
-    """
-    data_path = Path(data_dir)
-    
-    # load data
-    train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
-    val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
-    test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
-    
-    # load metadata
-    with open(data_path / 'train_feature_names.json', 'r') as f:
-        train_metadata = json.load(f)
-    
-    with open(data_path / 'processing_config.json', 'r') as f:
-        processing_config = json.load(f)
-    
-    return {
-        'train_data': train_data,
-        'val_data': val_data,
-        'test_data': test_data,
-        'feature_names': train_metadata['features'],
-        'target_names': train_metadata['targets'],
-        'n_features': train_metadata['n_features'],
-        'n_targets': train_metadata['n_targets'],
-        'processing_config': processing_config
-    }
-
-
-def get_model_configs() -> Dict[str, Dict[str, Any]]:
-    """
-    Get predefined configurations for different GNN models.
-    
-    Returns:
-        Dictionary of model configurations
-    """
     base_config = {
+        'num_features': num_features,
+        'num_targets': num_targets,
+        'hidden_dim': 64,
+        'dropout': 0.2,
+    }
+    
+    if model_type == 'gcn':
+        base_config.update({
+            'num_layers': 3,
+            'use_batch_norm': True,
+        })
+    elif model_type == 'gat':
+        base_config.update({
+            'num_layers': 2,
+            'num_heads': 4,
+            'use_batch_norm': True,
+            'attention_dropout': 0.1,
+        })
+    elif model_type == 'sage':
+        base_config.update({
+            'num_layers': 3,
+            'aggregation': 'mean',
+            'use_batch_norm': True,
+        })
+    elif model_type == 'transformer':
+        base_config.update({
+            'num_layers': 2,
+            'num_heads': 8,
+            'use_batch_norm': True,
+        })
+    elif model_type == 'hybrid':
+        base_config.update({
+            'use_temporal': True,
+            'temporal_dim': 64,
+        })
+    
+    return base_config
+
+
+def create_training_config(args: argparse.Namespace) -> Dict[str, Any]:
+    """Create comprehensive training configuration from arguments"""
+    
+    config = {
         'trainer_params': {
-            'device': 'auto',
-            'save_dir': 'experiments/gnn'
+            'device': args.device,
+            'save_dir': args.output_dir
         },
         'training_params': {
-            'optimizer_name': 'adam',
-            'learning_rate': 0.001,
-            'weight_decay': 1e-5,
-            'scheduler_name': 'plateau',
-            'loss_function': 'mse'
+            'optimizer_name': args.optimizer,
+            'learning_rate': args.learning_rate,
+            'weight_decay': args.weight_decay,
+            'scheduler_name': args.scheduler,
+            'loss_function': args.loss_function,
         },
         'fit_params': {
-            'epochs': 100,
-            'early_stopping_patience': 15,
-            'save_best_model': True,
-            'verbose': True
+            'epochs': args.epochs,
+            'early_stopping_patience': args.early_stopping_patience,
+            'save_best_model': args.save_best_model,
+            'save_checkpoints': args.save_checkpoints,
+            'checkpoint_frequency': args.checkpoint_frequency,
+            'verbose': args.verbose
+        },
+        'model_params': {
+            'hidden_dim': args.hidden_dim,
+            'dropout': args.dropout,
         }
     }
     
-    configs = {
-        'gcn': {
-            **base_config,
-            'model_params': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'dropout': 0.2,
-                'use_batch_norm': True,
-                'activation': 'relu'
-            }
-        },
-        
-        'gat': {
-            **base_config,
-            'model_params': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'num_heads': 8,
-                'dropout': 0.2,
-                'attention_dropout': 0.1,
-                'use_batch_norm': True
-            }
-        },
-        
-        'sage': {
-            **base_config,
-            'model_params': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'dropout': 0.2,
-                'aggregation': 'mean',
-                'use_batch_norm': True
-            }
-        },
-        
-        'transformer': {
-            **base_config,
-            'model_params': {
-                'hidden_dim': 128,
-                'num_layers': 3,
-                'num_heads': 8,
-                'dropout': 0.2,
-                'use_batch_norm': True
-            },
-            'training_params': {
-                **base_config['training_params'],
-                'learning_rate': 0.0005,  # lower lr for transformer
-            }
-        },
-        
-        'hybrid': {
-            **base_config,
-            'model_params': {
-                'hidden_dim': 128,
-                'dropout': 0.2,
-                'use_temporal': True,
-                'temporal_dim': 64
-            },
-            'training_params': {
-                **base_config['training_params'],
-                'learning_rate': 0.0008,
-                'weight_decay': 1e-4
-            }
-        }
-    }
+    # add model-specific parameters
+    if args.model_type == 'gcn':
+        config['model_params'].update({
+            'num_layers': args.num_layers,
+            'use_batch_norm': args.use_batch_norm,
+        })
+    elif args.model_type == 'gat':
+        config['model_params'].update({
+            'num_layers': args.num_layers,
+            'num_heads': args.num_heads,
+            'use_batch_norm': args.use_batch_norm,
+            'attention_dropout': args.attention_dropout,
+        })
+    elif args.model_type == 'sage':
+        config['model_params'].update({
+            'num_layers': args.num_layers,
+            'aggregation': args.aggregation,
+            'use_batch_norm': args.use_batch_norm,
+        })
+    elif args.model_type == 'transformer':
+        config['model_params'].update({
+            'num_layers': args.num_layers,
+            'num_heads': args.num_heads,
+            'use_batch_norm': args.use_batch_norm,
+        })
+    elif args.model_type == 'hybrid':
+        config['model_params'].update({
+            'use_temporal': args.use_temporal,
+            'temporal_dim': args.temporal_dim,
+        })
     
-    return configs
+    return config
 
 
-def run_single_experiment(
-    model_type: str,
-    data: Dict[str, Any],
-    config: Dict[str, Any],
-    experiment_name: str = None
-) -> Dict[str, Any]:
-    """
-    Run a single GNN training experiment.
+def load_and_prepare_data(args: argparse.Namespace) -> Tuple[Any, Any, Any]:
+    """Load and prepare GNN datasets"""
     
-    Args:
-        model_type: Type of GNN model
-        data: Data dictionary
-        config: Model configuration
-        experiment_name: Name for the experiment
-        
-    Returns:
-        Experiment results
-    """
+    print(f"\nLoading GNN dataset from: {args.data_path}")
+    
+    # create dataset with specified parameters
+    train_data, val_data, test_data = create_gnn_dataset(
+        data_path=args.data_path,
+        spatial_threshold=args.spatial_threshold,
+        temporal_window=args.temporal_window,
+        target_column=args.target_column,
+        val_split=args.val_split,
+        test_split=args.test_split,
+        seed=args.seed
+    )
+    
+    print(f"Dataset loaded successfully:")
+    print(f"  Training samples: {train_data.x.shape[0]}")
+    print(f"  Validation samples: {val_data.x.shape[0]}")
+    print(f"  Test samples: {test_data.x.shape[0]}")
+    print(f"  Features per node: {train_data.x.shape[1]}")
+    print(f"  Edges in training graph: {train_data.edge_index.shape[1]}")
+    
+    return train_data, val_data, test_data
+
+
+def display_device_info(device_spec: str):
+    """Display comprehensive device information"""
+    
+    device_info = get_device_info()
+    
     print(f"\n{'='*60}")
-    print(f"Training {model_type.upper()} Model")
+    print(f"DEVICE CONFIGURATION")
     print(f"{'='*60}")
+    print(f"Requested device: {device_spec}")
+    print(f"CUDA available: {device_info['cuda_available']}")
+    print(f"Number of GPUs: {device_info['num_gpus']}")
     
-    # print data info
-    print(f"Dataset Information:")
-    print(f"  Train nodes: {data['train_data'].x.shape[0]}")
-    print(f"  Val nodes: {data['val_data'].x.shape[0]}")
-    print(f"  Test nodes: {data['test_data'].x.shape[0]}")
-    print(f"  Features: {data['n_features']}")
-    print(f"  Targets: {data['n_targets']}")
-    print(f"  Graph edges: {data['train_data'].edge_index.shape[1]}")
-    
-    # create and print model summary
-    model = create_gnn_model(
-        model_type=model_type,
-        num_features=data['n_features'],
-        num_targets=data['n_targets'],
-        **config['model_params']
-    )
-    
-    print(f"\nModel Summary:")
-    print_model_summary(model, (data['train_data'].x.shape[0], data['n_features']))
-    
-    # train model
-    trained_model, results = train_gnn_experiment(
-        model_type=model_type,
-        train_data=data['train_data'],
-        val_data=data['val_data'],
-        test_data=data['test_data'],
-        config=config,
-        experiment_name=experiment_name
-    )
-    
-    # print results
-    print(f"\nFinal Results:")
-    test_metrics = results['test_metrics']
-    for metric, value in test_metrics.items():
-        print(f"  {metric}: {value:.4f}")
-    
-    return results
-
-
-def run_model_comparison(
-    data: Dict[str, Any],
-    models_to_compare: List[str] = None,
-    save_results: bool = True
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Run comparison between different GNN models.
-    
-    Args:
-        data: Data dictionary
-        models_to_compare: List of model types to compare
-        save_results: Whether to save comparison results
+    if device_info['cuda_available']:
+        print(f"Primary device: {device_info['primary_device']}")
         
-    Returns:
-        Dictionary of results for each model
-    """
-    if models_to_compare is None:
-        models_to_compare = ['gcn', 'gat', 'sage', 'transformer', 'hybrid']
-    
-    configs = get_model_configs()
-    all_results = {}
-    
-    print(f"\n{'='*80}")
-    print(f"RUNNING MODEL COMPARISON")
-    print(f"Models: {', '.join(models_to_compare)}")
-    print(f"{'='*80}")
-    
-    for model_type in models_to_compare:
-        if model_type not in configs:
-            print(f"Warning: No configuration found for {model_type}, skipping...")
-            continue
-            
-        try:
-            experiment_name = f"comparison_{model_type}"
-            results = run_single_experiment(
-                model_type=model_type,
-                data=data,
-                config=configs[model_type],
-                experiment_name=experiment_name
-            )
-            all_results[model_type] = results
-            
-        except Exception as e:
-            print(f"Error training {model_type}: {str(e)}")
-            continue
-    
-    # create comparison summary
-    if all_results:
-        print(f"\n{'='*80}")
-        print(f"MODEL COMPARISON SUMMARY")
-        print(f"{'='*80}")
+        print(f"\nGPU Information:")
+        for i in range(device_info['num_gpus']):
+            name = device_info['gpu_names'][i]
+            memory_gb = device_info['total_memory'][i] / (1024**3)
+            print(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
         
-        # create comparison table
-        comparison_data = []
-        for model_type, results in all_results.items():
-            metrics = results['test_metrics']
-            comparison_data.append({
-                'Model': model_type.upper(),
-                'Test Loss': f"{metrics.get('test_loss', float('nan')):.4f}",
-                'RMSE': f"{metrics.get('rmse', float('nan')):.4f}",
-                'MAE': f"{metrics.get('mae', float('nan')):.4f}",
-                'R²': f"{metrics.get('r2', float('nan')):.4f}"
-            })
-        
-        df_comparison = pd.DataFrame(comparison_data)
-        print(df_comparison.to_string(index=False))
-        
-        # find best model
-        best_model = min(all_results.items(), key=lambda x: x[1]['test_metrics'].get('test_loss', float('inf')))
-        print(f"\nBest Model: {best_model[0].upper()} (Test Loss: {best_model[1]['test_metrics']['test_loss']:.4f})")
-        
-        # save results
-        if save_results:
-            results_dir = Path('experiments/gnn/comparison_results')
-            results_dir.mkdir(parents=True, exist_ok=True)
-            
-            # save detailed results
-            with open(results_dir / 'detailed_results.json', 'w') as f:
-                # convert any numpy arrays to lists for JSON serialization
-                serializable_results = {}
-                for model_type, results in all_results.items():
-                    serializable_results[model_type] = {
-                        'test_metrics': results['test_metrics'],
-                        'experiment_name': results['experiment_name'],
-                        'config': results['config']
-                    }
-                json.dump(serializable_results, f, indent=2)
-            
-            # save comparison table
-            df_comparison.to_csv(results_dir / 'model_comparison.csv', index=False)
-            
-            print(f"\nResults saved to {results_dir}")
+        if device_info['use_multi_gpu']:
+            print(f"\n🚀 Multi-GPU training will be enabled!")
+            print(f"   Using {device_info['num_gpus']} GPUs for accelerated training")
+        else:
+            print(f"\n⚡ Single GPU training enabled")
+    else:
+        print(f"🐌 CPU training mode")
     
-    return all_results
+    print(f"{'='*60}\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train GNN models for EcoBici demand prediction')
-    parser.add_argument('--data_dir', type=str, default='data/gnn_ready',
-                        help='Directory containing preprocessed GNN data')
-    parser.add_argument('--model', type=str, choices=['gcn', 'gat', 'sage', 'transformer', 'hybrid', 'all'],
-                        default='all', help='Model type to train')
-    parser.add_argument('--experiment_name', type=str, default=None,
-                        help='Name for the experiment')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed for reproducibility (default: 42)')
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of training epochs')
-    parser.add_argument('--patience', type=int, default=15,
-                        help='Early stopping patience (epochs without improvement)')
-    parser.add_argument('--learning_rate', type=float, default=0.001,
-                        help='Learning rate')
-    parser.add_argument('--hidden_dim', type=int, default=128,
-                        help='Hidden dimension size')
-    parser.add_argument('--num_layers', type=int, default=3,
-                        help='Number of GNN layers')
-    parser.add_argument('--num_heads', type=int, default=8,
-                        help='Number of attention heads (for GAT/Transformer)')
-    parser.add_argument('--dropout', type=float, default=0.2,
-                        help='Dropout rate')
-    parser.add_argument('--attention_dropout', type=float, default=0.1,
-                        help='Attention dropout rate (for GAT)')
-    parser.add_argument('--activation', type=str, default='relu',
-                        choices=['relu', 'elu', 'leaky_relu', 'gelu'],
-                        help='Activation function')
-    parser.add_argument('--batch_norm', action='store_true', default=True,
-                        help='Use batch normalization')
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                        help='Weight decay for regularization')
-    parser.add_argument('--optimizer', type=str, default='adam',
-                        choices=['adam', 'adamw', 'sgd'],
-                        help='Optimizer type')
-    parser.add_argument('--scheduler', type=str, default='plateau',
-                        choices=['plateau', 'cosine', 'none'],
-                        help='Learning rate scheduler')
-    parser.add_argument('--device', type=str, default='auto',
-                        help='Device to use (cuda/cpu/auto)')
-    parser.add_argument('--save_results', action='store_true',
-                        help='Save detailed results')
+    """Main training function with multi-GPU support"""
+    
+    parser = argparse.ArgumentParser(
+        description='Train GNN models for EcoBici demand prediction with multi-GPU support',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # model configuration
+    model_group = parser.add_argument_group('Model Configuration')
+    model_group.add_argument('--model-type', type=str, default='gcn',
+                            choices=['gcn', 'gat', 'sage', 'transformer', 'hybrid'],
+                            help='Type of GNN model to train')
+    model_group.add_argument('--hidden-dim', type=int, default=64,
+                            help='Hidden dimension size')
+    model_group.add_argument('--dropout', type=float, default=0.2,
+                            help='Dropout rate')
+    model_group.add_argument('--num-layers', type=int, default=3,
+                            help='Number of GNN layers (gcn, gat, sage, transformer)')
+    model_group.add_argument('--num-heads', type=int, default=4,
+                            help='Number of attention heads (gat, transformer)')
+    model_group.add_argument('--attention-dropout', type=float, default=0.1,
+                            help='Attention dropout rate (gat)')
+    model_group.add_argument('--aggregation', type=str, default='mean',
+                            choices=['mean', 'max', 'sum'],
+                            help='Aggregation type for GraphSAGE')
+    model_group.add_argument('--use-batch-norm', action='store_true', default=True,
+                            help='Use batch normalization')
+    model_group.add_argument('--use-temporal', action='store_true', default=True,
+                            help='Use temporal components (hybrid model)')
+    model_group.add_argument('--temporal-dim', type=int, default=64,
+                            help='Temporal dimension (hybrid model)')
+    
+    # data configuration
+    data_group = parser.add_argument_group('Data Configuration')
+    data_group.add_argument('--data-path', type=str, default='data/processed/gnn_features.parquet',
+                           help='Path to processed GNN data')
+    data_group.add_argument('--spatial-threshold', type=float, default=1000.0,
+                           help='Spatial threshold for graph edges (meters)')
+    data_group.add_argument('--temporal-window', type=int, default=24,
+                           help='Temporal window size (hours)')
+    data_group.add_argument('--target-column', type=str, default='demand',
+                           help='Target column for prediction')
+    data_group.add_argument('--val-split', type=float, default=0.2,
+                           help='Validation split ratio')
+    data_group.add_argument('--test-split', type=float, default=0.1,
+                           help='Test split ratio')
+    
+    # training configuration
+    train_group = parser.add_argument_group('Training Configuration')
+    train_group.add_argument('--epochs', type=int, default=100,
+                            help='Number of training epochs')
+    train_group.add_argument('--learning-rate', type=float, default=0.001,
+                            help='Learning rate')
+    train_group.add_argument('--weight-decay', type=float, default=1e-5,
+                            help='Weight decay for regularization')
+    train_group.add_argument('--optimizer', type=str, default='adam',
+                            choices=['adam', 'adamw', 'sgd'],
+                            help='Optimizer type')
+    train_group.add_argument('--scheduler', type=str, default='plateau',
+                            choices=['plateau', 'cosine', 'none'],
+                            help='Learning rate scheduler')
+    train_group.add_argument('--loss-function', type=str, default='mse',
+                            choices=['mse', 'mae', 'huber'],
+                            help='Loss function')
+    train_group.add_argument('--early-stopping-patience', type=int, default=15,
+                            help='Early stopping patience')
+    
+    # system configuration
+    system_group = parser.add_argument_group('System Configuration')
+    system_group.add_argument('--device', type=str, default='auto',
+                             choices=['auto', 'cpu', 'cuda', 'cuda:0', 'cuda:1', 'multi-gpu'],
+                             help='Device to use (auto/cpu/cuda/multi-gpu)')
+    system_group.add_argument('--seed', type=int, default=42,
+                             help='Random seed for reproducibility')
+    
+    # experiment configuration
+    exp_group = parser.add_argument_group('Experiment Configuration')
+    exp_group.add_argument('--experiment-name', type=str, default=None,
+                          help='Name for this experiment')
+    exp_group.add_argument('--output-dir', type=str, default='experiments',
+                          help='Directory to save results')
+    exp_group.add_argument('--save-best-model', action='store_true', default=True,
+                          help='Save best model during training')
+    exp_group.add_argument('--save-checkpoints', action='store_true', default=True,
+                          help='Save periodic checkpoints')
+    exp_group.add_argument('--checkpoint-frequency', type=int, default=10,
+                          help='Checkpoint saving frequency (epochs)')
+    exp_group.add_argument('--verbose', action='store_true', default=True,
+                          help='Verbose training output')
+    exp_group.add_argument('--config-file', type=str, default=None,
+                          help='JSON config file to load parameters from')
     
     args = parser.parse_args()
     
-    # set comprehensive random seed for reproducibility
-    # this will override the early initialization with user-specified seed
+    # load configuration from file if provided
+    if args.config_file and Path(args.config_file).exists():
+        with open(args.config_file, 'r') as f:
+            config_data = json.load(f)
+        
+        # update args with config file values
+        for key, value in config_data.items():
+            if hasattr(args, key.replace('-', '_')):
+                setattr(args, key.replace('-', '_'), value)
+        print(f"Loaded configuration from: {args.config_file}")
+    
+    # set reproducibility seed
     set_seed(args.seed)
     
-    print("Loading GNN data...")
-    try:
-        data = load_gnn_data(args.data_dir)
-        print(f"Data loaded successfully from {args.data_dir}")
-    except Exception as e:
-        print(f"Error loading data: {str(e)}")
-        print("Make sure you have run the data preparation script first:")
-        print("  python scripts/prepare_gnn_dataset.py")
-        return
+    # display device information
+    display_device_info(args.device)
     
-    # get configurations
-    configs = get_model_configs()
+    # create experiment name if not provided
+    if args.experiment_name is None:
+        args.experiment_name = f"{args.model_type}_experiment_{args.seed}"
     
-    # override config with command line arguments
-    for model_type in configs:
-        # fit params
-        configs[model_type]['fit_params']['epochs'] = args.epochs
-        configs[model_type]['fit_params']['early_stopping_patience'] = args.patience
-        
-        # training params
-        configs[model_type]['training_params']['learning_rate'] = args.learning_rate
-        configs[model_type]['training_params']['weight_decay'] = args.weight_decay
-        configs[model_type]['training_params']['optimizer_name'] = args.optimizer
-        configs[model_type]['training_params']['scheduler_name'] = args.scheduler
-        
-        # model params
-        configs[model_type]['model_params']['hidden_dim'] = args.hidden_dim
-        configs[model_type]['model_params']['num_layers'] = args.num_layers
-        configs[model_type]['model_params']['dropout'] = args.dropout
-        configs[model_type]['model_params']['use_batch_norm'] = args.batch_norm
-        
-        # model-specific params
-        if model_type in ['gat', 'transformer']:
-            configs[model_type]['model_params']['num_heads'] = args.num_heads
-        if model_type == 'gat':
-            configs[model_type]['model_params']['attention_dropout'] = args.attention_dropout
-        if model_type in ['gcn', 'sage']:
-            configs[model_type]['model_params']['activation'] = args.activation
-        
-        # trainer params
-        configs[model_type]['trainer_params']['device'] = args.device
+    print(f"Starting GNN training experiment: {args.experiment_name}")
+    print(f"Model type: {args.model_type}")
+    print(f"Device configuration: {args.device}")
     
-    if args.model == 'all':
-        # run comparison
-        results = run_model_comparison(
-            data=data,
-            save_results=args.save_results
-        )
-    else:
-        # run single model
-        if args.model not in configs:
-            print(f"Error: Unknown model type '{args.model}'")
-            print(f"Available models: {list(configs.keys())}")
-            return
-        
-        results = run_single_experiment(
-            model_type=args.model,
-            data=data,
-            config=configs[args.model],
-            experiment_name=args.experiment_name
-        )
-        
-        if args.save_results:
-            results_dir = Path('experiments/gnn/single_results')
-            results_dir.mkdir(parents=True, exist_ok=True)
-            
-            with open(results_dir / f'{args.model}_results.json', 'w') as f:
-                serializable_results = {
-                    'test_metrics': results['test_metrics'],
-                    'experiment_name': results['experiment_name'],
-                    'config': results['config']
-                }
-                json.dump(serializable_results, f, indent=2)
-            
-            print(f"Results saved to {results_dir}")
+    # load and prepare data
+    train_data, val_data, test_data = load_and_prepare_data(args)
+    
+    # create model configuration
+    num_features = train_data.x.shape[1]
+    num_targets = train_data.y.shape[1] if len(train_data.y.shape) > 1 else 1
+    
+    # create model
+    print(f"\nCreating {args.model_type.upper()} model...")
+    model_config = get_default_model_config(args.model_type, num_features, num_targets)
+    
+    # update with custom parameters
+    training_config = create_training_config(args)
+    model_config.update(training_config['model_params'])
+    
+    model = create_gnn_model(
+        model_type=args.model_type,
+        **model_config
+    )
+    
+    print(f"Model created: {model.__class__.__name__}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    
+    # create trainer with multi-GPU support
+    print(f"\nInitializing trainer with multi-GPU support...")
+    trainer = GNNTrainer(
+        model=model,
+        device=args.device,
+        experiment_name=args.experiment_name,
+        save_dir=args.output_dir
+    )
+    
+    # setup training components
+    trainer.setup_training(**training_config['training_params'])
+    
+    # save configuration
+    config_path = trainer.save_dir / 'config.json'
+    config_to_save = {
+        'model_type': args.model_type,
+        'model_config': model_config,
+        'training_config': training_config,
+        'data_config': {
+            'data_path': args.data_path,
+            'spatial_threshold': args.spatial_threshold,
+            'temporal_window': args.temporal_window,
+            'target_column': args.target_column,
+            'val_split': args.val_split,
+            'test_split': args.test_split,
+        },
+        'experiment_config': {
+            'seed': args.seed,
+            'experiment_name': args.experiment_name,
+        },
+        'device_info': trainer.device_info,
+        'multi_gpu_enabled': trainer.use_multi_gpu
+    }
+    
+    with open(config_path, 'w') as f:
+        json.dump(config_to_save, f, indent=2)
+    
+    print(f"Configuration saved to: {config_path}")
+    
+    # train model
+    print(f"\n{'='*60}")
+    print(f"STARTING TRAINING")
+    print(f"{'='*60}")
+    
+    history = trainer.fit(
+        train_data=train_data,
+        val_data=val_data,
+        **training_config['fit_params']
+    )
+    
+    # evaluate on test set
+    print(f"\n{'='*60}")
+    print(f"FINAL EVALUATION")
+    print(f"{'='*60}")
+    
+    test_metrics = trainer.evaluate(test_data)
+    
+    # save final results
+    results = {
+        'model_type': args.model_type,
+        'experiment_name': args.experiment_name,
+        'config': config_to_save,
+        'training_history': history,
+        'test_metrics': test_metrics,
+        'device_info': trainer.device_info,
+        'multi_gpu_used': trainer.use_multi_gpu
+    }
+    
+    results_path = trainer.save_dir / 'results.json'
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+    
+    print(f"\nExperiment completed successfully!")
+    print(f"Results saved to: {trainer.save_dir}")
+    print(f"Best validation R²: {max([m.get('r2', 0) for m in history['val_metrics']]):.4f}")
+    print(f"Final test R²: {test_metrics.get('r2', 0):.4f}")
+    
+    if trainer.use_multi_gpu:
+        print(f"Multi-GPU training was used with {trainer.device_info['num_gpus']} GPUs")
+    
+    return trainer, results
 
 
 if __name__ == '__main__':
-    main() 
+    trainer, results = main() 

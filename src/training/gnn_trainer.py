@@ -3,6 +3,7 @@ Training module for Graph Neural Network models in EcoBici demand prediction.
 
 This module provides comprehensive training functionality for GNN models including
 training loops, validation, early stopping, model checkpointing, and experiment tracking.
+Multi-GPU support is included for accelerated training.
 """
 
 import torch
@@ -27,6 +28,80 @@ from src.models.gnn_models import (
 )
 
 
+def get_device_info() -> Dict[str, Any]:
+    """
+    Get comprehensive device information for multi-GPU setup.
+    
+    Returns:
+        Dictionary with device information and configuration
+    """
+    device_info = {
+        'cuda_available': torch.cuda.is_available(),
+        'num_gpus': torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        'current_device': torch.cuda.current_device() if torch.cuda.is_available() else None,
+        'gpu_names': [],
+        'total_memory': [],
+        'use_multi_gpu': False,
+        'primary_device': 'cpu'
+    }
+    
+    if device_info['cuda_available']:
+        device_info['primary_device'] = 'cuda:0'
+        
+        # collect GPU information
+        for i in range(device_info['num_gpus']):
+            device_info['gpu_names'].append(torch.cuda.get_device_name(i))
+            device_info['total_memory'].append(torch.cuda.get_device_properties(i).total_memory)
+        
+        # enable multi-GPU if more than one GPU available
+        if device_info['num_gpus'] > 1:
+            device_info['use_multi_gpu'] = True
+    
+    return device_info
+
+
+def setup_device(device_spec: str = 'auto') -> Tuple[torch.device, bool, Dict[str, Any]]:
+    """
+    Setup device configuration with multi-GPU support.
+    
+    Args:
+        device_spec: Device specification ('auto', 'cpu', 'cuda', 'cuda:0', 'multi-gpu')
+        
+    Returns:
+        Tuple of (primary_device, use_multi_gpu, device_info)
+    """
+    device_info = get_device_info()
+    use_multi_gpu = False
+    
+    if device_spec == 'auto':
+        if device_info['use_multi_gpu']:
+            primary_device = torch.device('cuda:0')
+            use_multi_gpu = True
+        elif device_info['cuda_available']:
+            primary_device = torch.device('cuda:0')
+        else:
+            primary_device = torch.device('cpu')
+    elif device_spec == 'multi-gpu':
+        if device_info['num_gpus'] > 1:
+            primary_device = torch.device('cuda:0')
+            use_multi_gpu = True
+        elif device_info['cuda_available']:
+            primary_device = torch.device('cuda:0')
+        else:
+            primary_device = torch.device('cpu')
+    elif device_spec == 'cpu':
+        primary_device = torch.device('cpu')
+    elif device_spec.startswith('cuda'):
+        if device_info['cuda_available']:
+            primary_device = torch.device(device_spec)
+        else:
+            primary_device = torch.device('cpu')
+    else:
+        primary_device = torch.device(device_spec)
+    
+    return primary_device, use_multi_gpu, device_info
+
+
 class EarlyStopping:
     """Early stopping utility to prevent overfitting"""
     
@@ -49,20 +124,27 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
             if self.restore_best_weights:
-                self.best_weights = model.state_dict().copy()
+                # handle DataParallel models
+                if isinstance(model, nn.DataParallel):
+                    self.best_weights = model.module.state_dict().copy()
+                else:
+                    self.best_weights = model.state_dict().copy()
         else:
             self.counter += 1
             
         if self.counter >= self.patience:
             if self.restore_best_weights and self.best_weights is not None:
-                model.load_state_dict(self.best_weights)
+                if isinstance(model, nn.DataParallel):
+                    model.module.load_state_dict(self.best_weights)
+                else:
+                    model.load_state_dict(self.best_weights)
             return True
         return False
 
 
 class GNNTrainer:
     """
-    Comprehensive trainer for Graph Neural Network models.
+    Comprehensive trainer for Graph Neural Network models with multi-GPU support.
     
     Handles training, validation, model checkpointing, and experiment tracking
     for various GNN architectures on bike demand prediction.
@@ -76,22 +158,32 @@ class GNNTrainer:
         save_dir: str = 'experiments'
     ):
         """
-        Initialize GNN trainer.
+        Initialize GNN trainer with multi-GPU support.
         
         Args:
             model: GNN model to train
-            device: Device to use ('cuda', 'cpu', or 'auto')
+            device: Device specification ('auto', 'cpu', 'cuda', 'multi-gpu')
             experiment_name: Name for this experiment
             save_dir: Directory to save experiment results
         """
-        # set device
-        if device == 'auto':
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+        # setup device configuration
+        self.device, self.use_multi_gpu, self.device_info = setup_device(device)
         
-        # move model to device
-        self.model = model.to(self.device)
+        # store original model reference
+        self.original_model = model
+        
+        # setup multi-GPU if available and requested
+        if self.use_multi_gpu:
+            print(f"Setting up multi-GPU training on {self.device_info['num_gpus']} GPUs:")
+            for i, name in enumerate(self.device_info['gpu_names']):
+                memory_gb = self.device_info['total_memory'][i] / (1024**3)
+                print(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
+            
+            # wrap model with DataParallel
+            self.model = nn.DataParallel(model)
+            self.model = self.model.to(self.device)
+        else:
+            self.model = model.to(self.device)
         
         # experiment setup
         self.experiment_name = experiment_name or f"gnn_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -113,8 +205,14 @@ class GNNTrainer:
             'learning_rates': []
         }
         
-        self.logger.info(f"Initialized GNN trainer for {model.__class__.__name__}")
-        self.logger.info(f"Device: {self.device}")
+        # log device configuration
+        self.logger.info(f"Initialized GNN trainer for {self.original_model.__class__.__name__}")
+        self.logger.info(f"Primary device: {self.device}")
+        if self.use_multi_gpu:
+            self.logger.info(f"Multi-GPU training enabled on {self.device_info['num_gpus']} GPUs")
+            for i, name in enumerate(self.device_info['gpu_names']):
+                memory_gb = self.device_info['total_memory'][i] / (1024**3)
+                self.logger.info(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
         self.logger.info(f"Experiment: {self.experiment_name}")
         
     def setup_logging(self):
@@ -228,7 +326,7 @@ class GNNTrainer:
         
     def train_epoch(self, train_data: Data) -> Tuple[float, Dict[str, float]]:
         """
-        Train for one epoch.
+        Train for one epoch with multi-GPU support.
         
         Args:
             train_data: Training data
@@ -274,7 +372,7 @@ class GNNTrainer:
         
     def validate_epoch(self, val_data: Data) -> Tuple[float, Dict[str, float]]:
         """
-        Validate for one epoch.
+        Validate for one epoch with multi-GPU support.
         
         Args:
             val_data: Validation data
@@ -321,7 +419,7 @@ class GNNTrainer:
         verbose: bool = True
     ) -> Dict[str, Any]:
         """
-        Train the GNN model.
+        Train the GNN model with multi-GPU support.
         
         Args:
             train_data: Training data
@@ -390,6 +488,13 @@ class GNNTrainer:
                 if val_data is not None:
                     log_msg += f"Val R²: {val_metrics.get('r2', 0):.4f} | "
                 log_msg += f"Time: {epoch_time:.2f}s"
+                if self.use_multi_gpu:
+                    # add GPU utilization info if available
+                    try:
+                        gpu_memory = [torch.cuda.memory_allocated(i) / (1024**3) for i in range(self.device_info['num_gpus'])]
+                        log_msg += f" | GPU Mem: {[f'{mem:.1f}GB' for mem in gpu_memory]}"
+                    except:
+                        pass
                 self.logger.info(log_msg)
             
             # save best model
@@ -420,55 +525,62 @@ class GNNTrainer:
         """Save model state dict and architecture information"""
         model_path = self.save_dir / filename
         
+        # get the actual model (unwrap DataParallel if needed)
+        model_to_save = self.original_model if self.use_multi_gpu else self.model
+        
         # collect model initialization parameters
         model_init_params = {}
         
         # get basic parameters available in all models
-        model_init_params['num_features'] = getattr(self.model, 'num_features', None)
-        model_init_params['hidden_dim'] = getattr(self.model, 'hidden_dim', None)
-        model_init_params['num_targets'] = getattr(self.model, 'num_targets', None)
-        model_init_params['dropout'] = getattr(self.model, 'dropout', None)
+        model_init_params['num_features'] = getattr(model_to_save, 'num_features', None)
+        model_init_params['hidden_dim'] = getattr(model_to_save, 'hidden_dim', None)
+        model_init_params['num_targets'] = getattr(model_to_save, 'num_targets', None)
+        model_init_params['dropout'] = getattr(model_to_save, 'dropout', None)
         
         # get model-specific parameters
-        model_class_name = self.model.__class__.__name__
+        model_class_name = model_to_save.__class__.__name__
         
         if model_class_name == 'TemporalGCN':
             model_init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None),
                 'activation': 'relu'  # default from model
             })
         elif model_class_name == 'SpatialGAT':
             model_init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'num_heads': getattr(self.model, 'num_heads', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
-                'attention_dropout': getattr(self.model, 'attention_dropout', 0.1)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'num_heads': getattr(model_to_save, 'num_heads', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None),
+                'attention_dropout': getattr(model_to_save, 'attention_dropout', 0.1)
             })
         elif model_class_name == 'GraphSAGE':
             model_init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'aggregation': getattr(self.model, 'aggregation', 'mean'),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'aggregation': getattr(model_to_save, 'aggregation', 'mean'),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None)
             })
         elif model_class_name == 'GraphTransformer':
             model_init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'num_heads': getattr(self.model, 'num_heads', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'num_heads': getattr(model_to_save, 'num_heads', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None)
             })
         elif model_class_name == 'HybridSpatioTemporalGNN':
             model_init_params.update({
-                'use_temporal': getattr(self.model, 'use_temporal', True),
-                'temporal_dim': getattr(self.model, 'temporal_dim', 64)
+                'use_temporal': getattr(model_to_save, 'use_temporal', True),
+                'temporal_dim': getattr(model_to_save, 'temporal_dim', 64)
             })
         
-        # save complete model information
+        # save complete model information (unwrap DataParallel state dict)
+        state_dict = self.model.module.state_dict() if self.use_multi_gpu else self.model.state_dict()
+        
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': state_dict,
             'model_class': model_class_name,
             'model_init_params': model_init_params,
-            'model_config': getattr(self.model, 'config', {}),
+            'model_config': getattr(model_to_save, 'config', {}),
+            'multi_gpu_trained': self.use_multi_gpu,
+            'device_info': self.device_info
         }, model_path)
         self.logger.info(f"Model saved to {model_path}")
     
@@ -476,61 +588,66 @@ class GNNTrainer:
         """Save detailed model architecture as JSON"""
         arch_path = self.save_dir / filename
         
+        # get the actual model (unwrap DataParallel if needed)
+        model_to_save = self.original_model if self.use_multi_gpu else self.model
+        
         # collect comprehensive architecture information
         architecture_info = {
-            'model_class': self.model.__class__.__name__,
-            'model_module': self.model.__class__.__module__,
-            'total_parameters': sum(p.numel() for p in self.model.parameters()),
-            'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
-            'model_structure': str(self.model),
+            'model_class': model_to_save.__class__.__name__,
+            'model_module': model_to_save.__class__.__module__,
+            'total_parameters': sum(p.numel() for p in model_to_save.parameters()),
+            'trainable_parameters': sum(p.numel() for p in model_to_save.parameters() if p.requires_grad),
+            'model_structure': str(model_to_save),
+            'multi_gpu_trained': self.use_multi_gpu,
+            'device_info': self.device_info,
             'initialization_parameters': {}
         }
         
         # get model-specific initialization parameters
-        model_class_name = self.model.__class__.__name__
+        model_class_name = model_to_save.__class__.__name__
         init_params = architecture_info['initialization_parameters']
         
         # common parameters for all models
-        init_params['num_features'] = getattr(self.model, 'num_features', None)
-        init_params['hidden_dim'] = getattr(self.model, 'hidden_dim', None)
-        init_params['num_targets'] = getattr(self.model, 'num_targets', None)
-        init_params['dropout'] = getattr(self.model, 'dropout', None)
+        init_params['num_features'] = getattr(model_to_save, 'num_features', None)
+        init_params['hidden_dim'] = getattr(model_to_save, 'hidden_dim', None)
+        init_params['num_targets'] = getattr(model_to_save, 'num_targets', None)
+        init_params['dropout'] = getattr(model_to_save, 'dropout', None)
         
         # model-specific parameters
         if model_class_name == 'TemporalGCN':
             init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None),
                 'activation': 'relu'
             })
         elif model_class_name == 'SpatialGAT':
             init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'num_heads': getattr(self.model, 'num_heads', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
-                'attention_dropout': getattr(self.model, 'attention_dropout', 0.1)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'num_heads': getattr(model_to_save, 'num_heads', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None),
+                'attention_dropout': getattr(model_to_save, 'attention_dropout', 0.1)
             })
         elif model_class_name == 'GraphSAGE':
             init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'aggregation': getattr(self.model, 'aggregation', 'mean'),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'aggregation': getattr(model_to_save, 'aggregation', 'mean'),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None)
             })
         elif model_class_name == 'GraphTransformer':
             init_params.update({
-                'num_layers': getattr(self.model, 'num_layers', None),
-                'num_heads': getattr(self.model, 'num_heads', None),
-                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+                'num_layers': getattr(model_to_save, 'num_layers', None),
+                'num_heads': getattr(model_to_save, 'num_heads', None),
+                'use_batch_norm': getattr(model_to_save, 'use_batch_norm', None)
             })
         elif model_class_name == 'HybridSpatioTemporalGNN':
             init_params.update({
-                'use_temporal': getattr(self.model, 'use_temporal', True),
-                'temporal_dim': getattr(self.model, 'temporal_dim', 64)
+                'use_temporal': getattr(model_to_save, 'use_temporal', True),
+                'temporal_dim': getattr(model_to_save, 'temporal_dim', 64)
             })
         
         # add layer information for more complex architectures
         layer_info = []
-        for name, module in self.model.named_modules():
+        for name, module in model_to_save.named_modules():
             if len(list(module.children())) == 0:  # leaf modules only
                 layer_info.append({
                     'name': name,
@@ -550,18 +667,30 @@ class GNNTrainer:
     def save_checkpoint(self, epoch: int, filename: str):
         """Save training checkpoint"""
         checkpoint_path = self.save_dir / filename
+        
+        # save state dict properly (unwrap DataParallel if needed)
+        model_state_dict = self.model.module.state_dict() if self.use_multi_gpu else self.model.state_dict()
+        
         torch.save({
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_state_dict,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'history': self.history,
+            'multi_gpu_trained': self.use_multi_gpu,
+            'device_info': self.device_info
         }, checkpoint_path)
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load training checkpoint"""
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # load state dict properly (handle DataParallel)
+        if self.use_multi_gpu:
+            self.model.module.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
         if self.optimizer and 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if self.scheduler and checkpoint.get('scheduler_state_dict'):
@@ -586,6 +715,10 @@ class GNNTrainer:
             else:
                 history_json[key] = value
         
+        # add device information
+        history_json['device_info'] = self.device_info
+        history_json['multi_gpu_used'] = self.use_multi_gpu
+        
         with open(history_path, 'w') as f:
             json.dump(history_json, f, indent=2)
         
@@ -593,7 +726,7 @@ class GNNTrainer:
     
     def evaluate(self, test_data: Data) -> Dict[str, float]:
         """
-        Evaluate model on test data.
+        Evaluate model on test data with multi-GPU support.
         
         Args:
             test_data: Test data
@@ -622,7 +755,7 @@ class GNNTrainer:
     
     def predict(self, data: Data) -> np.ndarray:
         """
-        Make predictions on new data.
+        Make predictions on new data with multi-GPU support.
         
         Args:
             data: Input data
@@ -647,7 +780,7 @@ def train_gnn_experiment(
     experiment_name: str = None
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """
-    Run a complete GNN training experiment.
+    Run a complete GNN training experiment with multi-GPU support.
     
     Args:
         model_type: Type of GNN model to train
@@ -671,7 +804,7 @@ def train_gnn_experiment(
         **config.get('model_params', {})
     )
     
-    # create trainer
+    # create trainer with multi-GPU support
     trainer = GNNTrainer(
         model=model,
         experiment_name=experiment_name,
@@ -696,7 +829,9 @@ def train_gnn_experiment(
         'history': history,
         'test_metrics': test_metrics,
         'config': config,
-        'experiment_name': trainer.experiment_name
+        'experiment_name': trainer.experiment_name,
+        'device_info': trainer.device_info,
+        'multi_gpu_used': trainer.use_multi_gpu
     }
     
     return model, results 
