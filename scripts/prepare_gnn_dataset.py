@@ -226,11 +226,18 @@ def prepare_temporal_sequences_optimized(
     
     print(f"  Processing {len(feature_cols)} features across clusters...")
     
-    # Group by cluster efficiently with lazy evaluation
-    cluster_groups = df_lazy.collect().group_by('cluster_id', maintain_order=True)
-    
-    unique_clusters = sorted(df['cluster_id'].unique().to_list())
+    # Get unique clusters and partition data efficiently
+    df_sorted = df_lazy.collect()
+    unique_clusters = sorted(df_sorted['cluster_id'].unique().to_list())
     print(f"  Found {len(unique_clusters)} clusters to process")
+    
+    # Partition data by cluster for efficient access
+    print("  Partitioning data by cluster...")
+    cluster_partitions = df_sorted.partition_by('cluster_id', as_dict=True)
+    
+    # Clean up the sorted dataframe to free memory
+    del df_sorted
+    gc.collect()
     
     all_sequences = []
     all_targets = []
@@ -242,8 +249,9 @@ def prepare_temporal_sequences_optimized(
         # Prepare arguments for multiprocessing
         process_args = []
         for cluster_id in unique_clusters:
-            cluster_data = cluster_groups.get_group(cluster_id)
-            process_args.append((cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon))
+            if cluster_id in cluster_partitions:
+                cluster_data = cluster_partitions[cluster_id]
+                process_args.append((cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon))
         
         # Process in chunks to manage memory
         n_processes = min(mp.cpu_count() - 1, 4)  # Leave one core free
@@ -271,13 +279,14 @@ def prepare_temporal_sequences_optimized(
         # Single-threaded processing with progress bar
         for cluster_id in tqdm(unique_clusters, desc="Processing clusters"):
             try:
-                cluster_data = cluster_groups.get_group(cluster_id)
-                sequences, targets, timestamps = process_cluster_sequences(
-                    (cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon)
-                )
-                all_sequences.extend(sequences)
-                all_targets.extend(targets)
-                all_timestamps.extend(timestamps)
+                if cluster_id in cluster_partitions:
+                    cluster_data = cluster_partitions[cluster_id]
+                    sequences, targets, timestamps = process_cluster_sequences(
+                        (cluster_data, feature_cols, target_cols, sequence_length, prediction_horizon)
+                    )
+                    all_sequences.extend(sequences)
+                    all_targets.extend(targets)
+                    all_timestamps.extend(timestamps)
             except Exception as e:
                 print(f"Warning: Error processing cluster {cluster_id}: {e}")
                 continue
@@ -287,6 +296,10 @@ def prepare_temporal_sequences_optimized(
         return np.array([]), np.array([]), np.array([]), feature_cols
     
     print(f"  Created {len(all_sequences)} sequences successfully")
+    
+    # Clean up partitions to free memory
+    del cluster_partitions
+    gc.collect()
     
     # Convert to numpy arrays efficiently
     return (
