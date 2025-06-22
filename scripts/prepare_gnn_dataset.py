@@ -637,7 +637,7 @@ def main():
         else:
             # Load edge index for val/test
             print("  Loading graph structure...")
-            edge_index = torch.load(output_dir / 'edge_index.pt')
+            edge_index = torch.load(output_dir / 'edge_index.pt', weights_only=False)
         
 
         

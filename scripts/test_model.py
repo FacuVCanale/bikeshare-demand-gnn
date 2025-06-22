@@ -37,9 +37,9 @@ def load_gnn_data(data_dir: str):
     data_path = Path(data_dir)
     
     # load data
-    train_data = torch.load(data_path / 'train_data.pt')
-    val_data = torch.load(data_path / 'val_data.pt')
-    test_data = torch.load(data_path / 'test_data.pt')
+    train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
+    val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
+    test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
     
     # load metadata
     with open(data_path / 'train_feature_names.json', 'r') as f:
@@ -89,7 +89,7 @@ def load_model_from_checkpoint(
     print(f"Loading model from: {model_path}")
     
     # load checkpoint
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     
     # get model info from checkpoint if available
     if 'model_class' in checkpoint:

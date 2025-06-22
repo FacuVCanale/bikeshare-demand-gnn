@@ -17,3 +17,4 @@ seaborn
 plotly
 joblib
 optuna
+torch-geometric
