@@ -14,11 +14,12 @@ import argparse
 import sys
 from typing import Dict, Any, List
 
-# add src to path
-sys.path.append(str(Path(__file__).parent.parent / 'src'))
+# add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from models.gnn_models import create_gnn_model, print_model_summary
-from training.gnn_trainer import GNNTrainer, train_gnn_experiment
+from src.models.gnn_models import create_gnn_model, print_model_summary
+from src.training.gnn_trainer import GNNTrainer, train_gnn_experiment
 
 
 def load_gnn_data(data_dir: str) -> Dict[str, Any]:
@@ -324,8 +325,27 @@ def main():
                         help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=128,
                         help='Hidden dimension size')
+    parser.add_argument('--num_layers', type=int, default=3,
+                        help='Number of GNN layers')
+    parser.add_argument('--num_heads', type=int, default=8,
+                        help='Number of attention heads (for GAT/Transformer)')
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout rate')
+    parser.add_argument('--attention_dropout', type=float, default=0.1,
+                        help='Attention dropout rate (for GAT)')
+    parser.add_argument('--activation', type=str, default='relu',
+                        choices=['relu', 'elu', 'leaky_relu', 'gelu'],
+                        help='Activation function')
+    parser.add_argument('--batch_norm', action='store_true', default=True,
+                        help='Use batch normalization')
+    parser.add_argument('--weight_decay', type=float, default=1e-5,
+                        help='Weight decay for regularization')
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        choices=['adam', 'adamw', 'sgd'],
+                        help='Optimizer type')
+    parser.add_argument('--scheduler', type=str, default='plateau',
+                        choices=['plateau', 'cosine', 'none'],
+                        help='Learning rate scheduler')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (cuda/cpu/auto)')
     parser.add_argument('--save_results', action='store_true',
@@ -348,10 +368,30 @@ def main():
     
     # override config with command line arguments
     for model_type in configs:
+        # fit params
         configs[model_type]['fit_params']['epochs'] = args.epochs
+        
+        # training params
         configs[model_type]['training_params']['learning_rate'] = args.learning_rate
+        configs[model_type]['training_params']['weight_decay'] = args.weight_decay
+        configs[model_type]['training_params']['optimizer_name'] = args.optimizer
+        configs[model_type]['training_params']['scheduler_name'] = args.scheduler
+        
+        # model params
         configs[model_type]['model_params']['hidden_dim'] = args.hidden_dim
+        configs[model_type]['model_params']['num_layers'] = args.num_layers
         configs[model_type]['model_params']['dropout'] = args.dropout
+        configs[model_type]['model_params']['use_batch_norm'] = args.batch_norm
+        
+        # model-specific params
+        if model_type in ['gat', 'transformer']:
+            configs[model_type]['model_params']['num_heads'] = args.num_heads
+        if model_type == 'gat':
+            configs[model_type]['model_params']['attention_dropout'] = args.attention_dropout
+        if model_type in ['gcn', 'sage']:
+            configs[model_type]['model_params']['activation'] = args.activation
+        
+        # trainer params
         configs[model_type]['trainer_params']['device'] = args.device
     
     if args.model == 'all':

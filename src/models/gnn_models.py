@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import (
     GCNConv, GraphConv, SAGEConv, GATConv, TransformerConv,
     global_mean_pool, global_max_pool, global_add_pool,
-    BatchNorm, LayerNorm, dropout_adj
+    BatchNorm
 )
 from torch_geometric.data import Data, Batch
 from typing import Optional, Dict, Any, List, Tuple

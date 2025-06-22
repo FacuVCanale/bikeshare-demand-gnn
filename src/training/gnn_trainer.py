@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
 from datetime import datetime
 
-from ..models.gnn_models import (
+from src.models.gnn_models import (
     TemporalGCN, SpatialGAT, GraphSAGE, GraphTransformer, 
     HybridSpatioTemporalGNN, calculate_gnn_metrics, create_gnn_model
 )
