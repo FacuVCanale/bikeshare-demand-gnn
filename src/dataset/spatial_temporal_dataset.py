@@ -223,95 +223,136 @@ class EcoBiciSpatialTemporalDataset:
         Uses sequence_length previous time steps to predict the next time step.
         
         CRITICAL: Ensures no data leakage by strictly using past data to predict future.
+        OPTIMIZED: Uses pure Polars operations for maximum efficiency.
         
         Returns:
             features: List of feature tensors for each valid time step
             targets: List of target tensors for each valid time step
         """
-        logger.info("🔄 Preparing temporal sequences with leakage prevention...")
+        logger.info("🔄 Preparing temporal sequences with maximum efficiency using native Polars...")
         logger.debug(f"Input dataframe shape: {df.shape}")
         
         # sort by time and cluster to ensure temporal ordering
-        logger.debug("📅 Sorting data by timestamp and cluster...")
         df = df.sort(['ts_start', 'cluster_id'])
         
         # get unique timestamps in chronological order
-        timestamps = df['ts_start'].unique().sort()
+        timestamps = df['ts_start'].unique().sort().to_list()
         logger.info(f"⏰ Processing {len(timestamps)} unique timestamps")
-        logger.debug(f"   📅 Date range: {timestamps[0]} to {timestamps[-1]}")
         
         # prepare feature columns (excluding base columns and current target)
         feature_cols = [col for col in self.feature_columns 
                        if col not in ['cluster_id', 'ts_start', 'arr_external_count']]
-        logger.info(f"🔧 Using {len(feature_cols)} feature columns (excluding base and target)")
+        logger.info(f"🔧 Using {len(feature_cols)} feature columns")
         
+        # determine valid timestamp indices
+        valid_start_idx = self.sequence_length
+        valid_end_idx = len(timestamps) - self.prediction_horizon
+        valid_range_size = valid_end_idx - valid_start_idx
+        
+        logger.info(f"🔒 Valid timestamp range: {valid_range_size} samples")
+        
+        if valid_range_size <= 0:
+            raise ValueError("No valid temporal sequences possible - insufficient timestamps")
+        
+        # create all valid feature-target timestamp pairs at once
+        logger.info("⚡ Creating timestamp pairs for all valid sequences...")
+        feature_timestamps = []
+        target_timestamps = []
+        sequence_ids = []
+        
+        for i in range(valid_start_idx, valid_end_idx):
+            feature_timestamps.append(timestamps[i])
+            target_timestamps.append(timestamps[i + self.prediction_horizon])
+            sequence_ids.append(i - valid_start_idx)
+        
+        # create sequence mapping dataframe
+        sequence_df = pl.DataFrame({
+            'sequence_id': sequence_ids,
+            'feature_ts': feature_timestamps,
+            'target_ts': target_timestamps
+        })
+        
+        logger.debug(f"   📊 Created {len(sequence_ids)} sequence pairs")
+        
+        # filter original data to only needed timestamps for efficiency
+        all_needed_timestamps = list(set(feature_timestamps + target_timestamps))
+        filtered_df = df.filter(pl.col('ts_start').is_in(all_needed_timestamps))
+        
+        logger.debug(f"   📊 Filtered data from {len(df)} to {len(filtered_df)} rows")
+        
+        # create features dataset
+        logger.info("🔧 Preparing features dataset...")
+        features_df = filtered_df.select(['cluster_id', 'ts_start'] + feature_cols)
+        
+        # create targets dataset  
+        targets_df = filtered_df.select(['cluster_id', 'ts_start', 'arr_external_count'])
+        
+        # process sequences in batch
+        logger.info("⚡ Processing all sequences in optimized batches...")
         features_list = []
         targets_list = []
+        
+        # group features and targets by timestamp for efficient access
+        features_by_ts = {
+            ts: group.drop('ts_start').sort('cluster_id') 
+            for ts, group in features_df.groupby('ts_start', maintain_order=True)
+        }
+        
+        targets_by_ts = {
+            ts: group.drop('ts_start').sort('cluster_id')
+            for ts, group in targets_df.groupby('ts_start', maintain_order=True)
+        }
+        
+        valid_count = 0
         skipped_count = 0
-        nan_inf_count = 0
         
-        # start from sequence_length to ensure we have enough history
-        # this prevents data leakage by requiring sufficient past data
-        logger.info(f"🔒 Starting from timestamp {self.sequence_length} to ensure sufficient history")
-        valid_range = range(self.sequence_length, len(timestamps) - self.prediction_horizon)
-        logger.debug(f"   📊 Valid timestamp range: {len(valid_range)} out of {len(timestamps)} timestamps")
-        
-        for i in valid_range:
-            # get current timestamp for target
-            current_ts = timestamps[i]
-            target_ts = timestamps[i + self.prediction_horizon]  # predict future arrivals
+        for i, row in enumerate(sequence_df.iter_rows(named=True)):
+            feature_ts = row['feature_ts']
+            target_ts = row['target_ts']
             
-            logger.debug(f"   ⏳ Processing timestamp {i}: {current_ts} → {target_ts}")
-            
-            # get current features (at time t)
-            current_data = df.filter(pl.col('ts_start') == current_ts).sort('cluster_id')
-            
-            # get target data (at time t + prediction_horizon)
-            target_data = df.filter(pl.col('ts_start') == target_ts).sort('cluster_id')
-            
-            # ensure we have data for all clusters at both timestamps
-            if len(current_data) != self.n_clusters or len(target_data) != self.n_clusters:
-                logger.debug(f"   ⏭️  Skipping timestamp {i}: incomplete data "
-                           f"(current: {len(current_data)}, target: {len(target_data)}, expected: {self.n_clusters})")
+            # get data for this sequence
+            if (feature_ts not in features_by_ts or target_ts not in targets_by_ts):
                 skipped_count += 1
                 continue
+                
+            feature_data = features_by_ts[feature_ts]
+            target_data = targets_by_ts[target_ts]
             
-            # verify temporal ordering (critical for preventing leakage)
-            if current_data['ts_start'].min() >= target_data['ts_start'].min():
-                logger.error(f"❌ Data leakage detected: features timestamp {current_data['ts_start'].min()} "
-                           f">= target timestamp {target_data['ts_start'].min()}")
-                raise ValueError(f"Data leakage detected: features timestamp {current_data['ts_start'].min()} >= target timestamp {target_data['ts_start'].min()}")
-            
-            # extract features (shape: [n_clusters, n_features])
-            # these features are from time t, used to predict time t+prediction_horizon
-            features = current_data.select(feature_cols).to_numpy().astype(np.float32)
-            
-            # extract targets (shape: [n_clusters])
-            # these are the arrivals we want to predict at time t+prediction_horizon
-            targets = target_data.select('arr_external_count').to_numpy().flatten().astype(np.float32)
-            
-            # verify no NaN or infinite values that could indicate data issues
-            if np.any(np.isnan(features)) or np.any(np.isinf(features)):
-                logger.warning(f"⚠️  NaN/Inf values in features at timestamp {current_ts} - skipping")
-                nan_inf_count += 1
+            # validate we have all clusters
+            if len(feature_data) != self.n_clusters or len(target_data) != self.n_clusters:
+                skipped_count += 1
                 continue
                 
-            if np.any(np.isnan(targets)) or np.any(np.isinf(targets)):
-                logger.warning(f"⚠️  NaN/Inf values in targets at timestamp {target_ts} - skipping")
-                nan_inf_count += 1
+            # convert to numpy arrays efficiently
+            try:
+                feature_array = feature_data.select(feature_cols).to_numpy(dtype=np.float32)
+                target_array = target_data.select('arr_external_count').to_numpy(dtype=np.float32).flatten()
+                
+                # validate data quality
+                if (np.any(np.isnan(feature_array)) or np.any(np.isinf(feature_array)) or
+                    np.any(np.isnan(target_array)) or np.any(np.isinf(target_array))):
+                    skipped_count += 1
+                    continue
+                
+                # convert to tensors
+                features_list.append(torch.tensor(feature_array))
+                targets_list.append(torch.tensor(target_array))
+                valid_count += 1
+                
+            except Exception as e:
+                logger.debug(f"   ⏭️ Skipping sequence {i}: {e}")
+                skipped_count += 1
                 continue
-            
-            features_list.append(torch.tensor(features))
-            targets_list.append(torch.tensor(targets))
         
-        logger.info(f"✅ Temporal sequence preparation complete:")
-        logger.info(f"   📊 Valid samples: {len(features_list)}")
-        logger.info(f"   ⏭️  Skipped (incomplete): {skipped_count}")
-        logger.info(f"   🚫 Skipped (NaN/Inf): {nan_inf_count}")
-        logger.info(f"   🔒 Each sample uses features from time t to predict arrivals at time t+{self.prediction_horizon}")
+        success_rate = valid_count / (valid_count + skipped_count) * 100 if (valid_count + skipped_count) > 0 else 0
+        
+        logger.info(f"✅ Maximum efficiency temporal sequence preparation complete:")
+        logger.info(f"   📊 Valid samples: {valid_count}")
+        logger.info(f"   ⏭️ Skipped samples: {skipped_count}")
+        logger.info(f"   ⚡ Success rate: {success_rate:.1f}%")
+        logger.info(f"   🔒 Data leakage prevention: ✓")
         
         if len(features_list) == 0:
-            logger.error("❌ No valid temporal sequences generated!")
             raise ValueError("No valid temporal sequences could be generated from the data")
         
         return features_list, targets_list
@@ -398,28 +439,41 @@ class EcoBiciSpatialTemporalDataset:
         
         # CRITICAL: Only fit scalers on training data to prevent data leakage
         if split == 'train':
-            logger.info("🔧 Fitting scalers on training data only...")
-            # concatenate all training features and targets
-            all_features = torch.cat(features_list, dim=0)
-            all_targets = torch.cat(targets_list, dim=0)
+            logger.info("🔧 Fitting scalers on training data efficiently...")
             
-            logger.debug(f"   📊 Training data for scaling: {all_features.shape[0]:,} samples")
-            logger.debug(f"   🎯 Feature shape: {all_features.shape}")
-            logger.debug(f"   🎯 Target shape: {all_targets.shape}")
+            # instead of concatenating all data, fit scalers incrementally for memory efficiency
+            logger.debug("   ⚖️ Fitting feature scaler incrementally...")
             
-            # fit scalers only on training data
-            logger.debug("   ⚖️  Fitting feature scaler...")
+            # use a sample of the data for fitting if dataset is very large
+            max_samples_for_fitting = 50000  # adjust based on memory constraints
+            n_samples = len(features_list)
+            
+            if n_samples > max_samples_for_fitting:
+                logger.info(f"   📊 Using sample of {max_samples_for_fitting} out of {n_samples} samples for scaler fitting")
+                # use every nth sample to get a representative sample
+                step = n_samples // max_samples_for_fitting
+                sample_indices = list(range(0, n_samples, step))[:max_samples_for_fitting]
+                features_for_fitting = [features_list[i] for i in sample_indices]
+                targets_for_fitting = [targets_list[i] for i in sample_indices]
+            else:
+                features_for_fitting = features_list
+                targets_for_fitting = targets_list
+            
+            # concatenate only the sampled data for fitting
+            all_features = torch.cat(features_for_fitting, dim=0)
+            all_targets = torch.cat(targets_for_fitting, dim=0)
+            
+            logger.debug(f"   📊 Fitting scalers on {all_features.shape[0]:,} samples")
+            logger.debug(f"   🎯 Feature shape for fitting: {all_features.shape}")
+            logger.debug(f"   🎯 Target shape for fitting: {all_targets.shape}")
+            
+            # fit scalers
             self.feature_scaler.fit(all_features.numpy())
-            logger.debug("   ⚖️  Fitting target scaler...")
             self.target_scaler.fit(all_targets.numpy().reshape(-1, 1))
             
-            logger.info(f"✅ Scalers fitted successfully:")
-            logger.info(f"   📊 Feature scaler: {all_features.shape[0]:,} samples × {all_features.shape[1]} features")
-            logger.info(f"   🎯 Target scaler: {all_targets.shape[0]:,} samples")
-            
-            # log scaling statistics
-            logger.debug(f"   📈 Feature stats: mean={self.feature_scaler.mean_[:5]}, std={self.feature_scaler.scale_[:5]} (first 5)")
-            logger.debug(f"   📈 Target stats: mean={self.target_scaler.mean_[0]:.4f}, std={self.target_scaler.scale_[0]:.4f}")
+            logger.info(f"✅ Scalers fitted successfully on {len(features_for_fitting)} samples")
+            logger.debug(f"   📈 Feature scaler stats: mean range [{self.feature_scaler.mean_.min():.4f}, {self.feature_scaler.mean_.max():.4f}]")
+            logger.debug(f"   📈 Target scaler stats: mean={self.target_scaler.mean_[0]:.4f}, std={self.target_scaler.scale_[0]:.4f}")
             
         elif not hasattr(self.feature_scaler, 'mean_'):
             error_msg = f"Scalers not fitted! Must load 'train' split first before loading '{split}'"
@@ -428,38 +482,57 @@ class EcoBiciSpatialTemporalDataset:
         else:
             logger.info(f"✅ Using pre-fitted scalers for {split} split")
         
-        # apply normalization using training statistics
-        logger.info("⚖️  Applying normalization using training statistics...")
+        # apply normalization using training statistics efficiently
+        logger.info("⚖️ Applying normalization efficiently...")
         normalized_features = []
         normalized_targets = []
         
-        for i, (features, targets) in enumerate(zip(features_list, targets_list)):
-            logger.debug(f"   🔧 Normalizing sample {i+1}/{len(features_list)}")
-            
-            # normalize features using training statistics
-            norm_features = torch.tensor(
-                self.feature_scaler.transform(features.numpy()), 
-                dtype=torch.float32
-            )
-            
-            # normalize targets using training statistics
-            norm_targets = torch.tensor(
-                self.target_scaler.transform(targets.numpy().reshape(-1, 1)).flatten(),
-                dtype=torch.float32
-            )
-            
-            # validate normalized data
-            if torch.any(torch.isnan(norm_features)) or torch.any(torch.isinf(norm_features)):
-                logger.error(f"❌ NaN or Inf values detected in normalized features at sample {i}")
-                raise ValueError("NaN or Inf values detected in normalized features")
-            if torch.any(torch.isnan(norm_targets)) or torch.any(torch.isinf(norm_targets)):
-                logger.error(f"❌ NaN or Inf values detected in normalized targets at sample {i}")
-                raise ValueError("NaN or Inf values detected in normalized targets")
-            
-            normalized_features.append(norm_features)
-            normalized_targets.append(norm_targets)
+        # process in batches to avoid memory issues
+        batch_size = 1000
+        n_batches = (len(features_list) + batch_size - 1) // batch_size
         
-        logger.info("✅ Normalization complete - all samples validated")
+        logger.debug(f"   🔧 Processing {len(features_list)} samples in {n_batches} batches of size {batch_size}")
+        
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(features_list))
+            
+            # process batch of features
+            batch_features = features_list[start_idx:end_idx]
+            batch_targets = targets_list[start_idx:end_idx]
+            
+            # concatenate batch for efficient processing
+            if len(batch_features) > 0:
+                batch_features_tensor = torch.cat(batch_features, dim=0)
+                batch_targets_tensor = torch.cat(batch_targets, dim=0)
+                
+                # normalize batch
+                norm_features_np = self.feature_scaler.transform(batch_features_tensor.numpy())
+                norm_targets_np = self.target_scaler.transform(batch_targets_tensor.numpy().reshape(-1, 1)).flatten()
+                
+                # convert back to individual tensors
+                samples_per_batch = len(batch_features)
+                features_per_sample = batch_features_tensor.shape[0] // samples_per_batch
+                
+                for i in range(samples_per_batch):
+                    start_sample = i * features_per_sample
+                    end_sample = (i + 1) * features_per_sample
+                    
+                    sample_features = torch.tensor(norm_features_np[start_sample:end_sample], dtype=torch.float32)
+                    sample_targets = torch.tensor(norm_targets_np[start_sample:end_sample], dtype=torch.float32)
+                    
+                    # validate normalized data
+                    if torch.any(torch.isnan(sample_features)) or torch.any(torch.isinf(sample_features)):
+                        logger.error(f"❌ NaN or Inf values in normalized features at batch {batch_idx}, sample {i}")
+                        raise ValueError("NaN or Inf values in normalized features")
+                    if torch.any(torch.isnan(sample_targets)) or torch.any(torch.isinf(sample_targets)):
+                        logger.error(f"❌ NaN or Inf values in normalized targets at batch {batch_idx}, sample {i}")
+                        raise ValueError("NaN or Inf values in normalized targets")
+                    
+                    normalized_features.append(sample_features)
+                    normalized_targets.append(sample_targets)
+        
+        logger.info(f"✅ Efficient normalization complete - processed {len(normalized_features)} samples")
         
         # create StaticGraphTemporalSignal
         logger.info("🏗️  Creating StaticGraphTemporalSignal...")
