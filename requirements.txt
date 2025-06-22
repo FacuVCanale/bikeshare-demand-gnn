@@ -4,6 +4,8 @@ scikit-learn
 pyarrow
 xgboost
 lightgbm
+catboost
+torch  # for GPU detection
 numpy
 openmeteo-requests
 requests-cache
@@ -11,3 +13,8 @@ retry-requests
 polars
 holidays
 psutil
+matplotlib
+seaborn
+plotly
+joblib
+optuna

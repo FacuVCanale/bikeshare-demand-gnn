@@ -1,118 +1,120 @@
 """
-Station data processing utilities for EcoBici-AI.
-
-This module contains functions for:
-- Station ID processing and normalization
-- Coordinate cleaning and validation
-- Station metadata extraction
-- Data consistency analysis
+Data processing utilities for EcoBici-AI project.
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any
+from typing import Optional, Union, Dict, Any
+from datetime import datetime, timedelta
+import warnings
 
 
-def extract_first_3_digits_station_id(station_id):
+def process_station_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Extract first 3 digits from station ID for consistency.
-    
-    This function normalizes station IDs by extracting the first 3 digits,
-    which helps in handling different ID formats across years.
+    Process raw station data to standardize column names and types.
     
     Args:
-        station_id: Original station ID (can be int, float, or string)
+        df: Raw station DataFrame
         
     Returns:
-        int: Normalized station ID (first 3 digits)
+        Processed DataFrame
     """
-    if pd.isna(station_id):
-        return station_id
-        
-    # Remove BAEcobici suffix if present
-    station_str = str(station_id).replace('BAEcobici', '')
+    df = df.copy()
     
-    try:
-        # Convert to int first to handle float strings
-        station_str = str(int(float(station_str)))
-        
-        if len(station_str) >= 3:
-            return int(station_str[:3])
-        else:
-            return int(station_str)
-    except (ValueError, TypeError):
-        return station_id
+    # standardize column names (common variations)
+    column_mapping = {
+        'station_id': 'station_id',
+        'id_estacion': 'station_id',
+        'estacion_id': 'station_id',
+        'station_name': 'station_name',
+        'nombre_estacion': 'station_name',
+        'estacion_nombre': 'station_name',
+        'latitude': 'latitude',
+        'lat': 'latitude',
+        'latitud': 'latitude',
+        'longitude': 'longitude',
+        'lon': 'longitude',
+        'lng': 'longitude',
+        'longitud': 'longitude'
+    }
+    
+    # rename columns if they exist
+    for old_name, new_name in column_mapping.items():
+        if old_name in df.columns:
+            df = df.rename(columns={old_name: new_name})
+    
+    # ensure required columns exist
+    required_columns = ['station_id', 'latitude', 'longitude']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+    
+    # clean and convert data types
+    df['station_id'] = df['station_id'].astype(str)
+    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+    
+    # remove rows with invalid coordinates
+    initial_rows = len(df)
+    df = df.dropna(subset=['latitude', 'longitude'])
+    
+    if len(df) < initial_rows:
+        warnings.warn(f"Removed {initial_rows - len(df)} rows with invalid coordinates")
+    
+    return df
 
 
-def process_station_ids_to_3_digits(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+def clean_trip_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Process station IDs in a DataFrame to use 3-digit format.
+    Clean raw trip data by handling missing values and outliers.
     
     Args:
-        df: DataFrame with station ID columns
-        verbose: Whether to print processing information
+        df: Raw trip DataFrame
         
     Returns:
-        DataFrame with processed station IDs
+        Cleaned DataFrame
     """
-    df_processed = df.copy()
+    df = df.copy()
     
-    station_columns = [
-        'id_estacion_origen', 'id_estacion_destino'
-    ]
+    # standardize datetime columns
+    datetime_columns = []
+    for col in df.columns:
+        if any(keyword in col.lower() for keyword in ['fecha', 'date', 'inicio', 'fin', 'start', 'end']):
+            datetime_columns.append(col)
     
-    for col in station_columns:
-        if col in df_processed.columns:
-            if verbose:
-                original_unique = df_processed[col].nunique()
-                
-            # Apply the 3-digit extraction
-            df_processed[col] = df_processed[col].apply(extract_first_3_digits_station_id)
-            
-            if verbose:
-                new_unique = df_processed[col].nunique()
-                print(f"  {col}: {original_unique} → {new_unique} unique values")
+    # convert to datetime
+    for col in datetime_columns:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
     
-    if verbose:
-        print(f"processed {len(df_processed)} rows")
+    # remove rows with missing datetime values
+    initial_rows = len(df)
+    df = df.dropna(subset=datetime_columns)
+    
+    if len(df) < initial_rows:
+        warnings.warn(f"Removed {initial_rows - len(df)} rows with invalid datetime values")
+    
+    # calculate trip duration if not present
+    if 'duracion' not in df.columns and len(datetime_columns) >= 2:
+        start_col = datetime_columns[0]
+        end_col = datetime_columns[1]
+        df['duracion'] = (df[end_col] - df[start_col]).dt.total_seconds()
+    
+    # remove unrealistic trip durations (< 1 minute or > 24 hours)
+    if 'duracion' in df.columns:
+        initial_rows = len(df)
+        df = df[(df['duracion'] >= 60) & (df['duracion'] <= 86400)]
         
-    return df_processed
+        if len(df) < initial_rows:
+            warnings.warn(f"Removed {initial_rows - len(df)} rows with unrealistic trip durations")
+    
+    return df
 
 
-def clean_coordinate_pair(latitude, longitude):
+def normalize_coordinates(df: pd.DataFrame, lat_col: str = 'latitude', 
+                         lon_col: str = 'longitude') -> pd.DataFrame:
     """
-    Clean and validate coordinate pairs.
-    
-    Args:
-        latitude: Latitude value (can be string or numeric)
-        longitude: Longitude value (can be string or numeric)
-        
-    Returns:
-        tuple: (cleaned_coord_string, issue_type)
-    """
-    lat_str = str(latitude).strip()
-    lon_str = str(longitude).strip()
-    
-    # Detect malformed coordinates (format: "lat,lon")
-    if ',' in lat_str and ',' not in lon_str:
-        # Case: latitude contains "lat,lon" and longitude is only one value
-        parts = lat_str.split(',')
-        if len(parts) == 2:
-            clean_lat = parts[0].strip()
-            clean_lon = parts[1].strip()
-            return f"({clean_lat}, {clean_lon})", "FIXED_FROM_MALFORMED"
-    
-    # Detect duplicate coordinates
-    if lat_str == lon_str:
-        return f"({lat_str}, {lon_str})", "DUPLICATE_COORDS"
-    
-    # Normal format
-    return f"({lat_str}, {lon_str})", "NORMAL"
-
-
-def validate_coordinates(df: pd.DataFrame, lat_col: str, lon_col: str) -> Dict[str, Any]:
-    """
-    Validate coordinate columns in a DataFrame.
+    Normalize coordinate columns to a standard range.
     
     Args:
         df: DataFrame with coordinate columns
@@ -120,76 +122,152 @@ def validate_coordinates(df: pd.DataFrame, lat_col: str, lon_col: str) -> Dict[s
         lon_col: Name of longitude column
         
     Returns:
-        Dict with validation results
+        DataFrame with normalized coordinates
     """
-    results = {
-        'total_rows': len(df),
-        'valid_coords': 0,
-        'invalid_coords': 0,
-        'null_coords': 0,
-        'coordinate_issues': {}
-    }
+    df = df.copy()
     
-    # Check for null coordinates
-    null_mask = df[lat_col].isna() | df[lon_col].isna()
-    results['null_coords'] = null_mask.sum()
+    if lat_col not in df.columns or lon_col not in df.columns:
+        raise ValueError(f"Columns {lat_col} and {lon_col} must exist in DataFrame")
     
-    # Validate non-null coordinates
-    valid_df = df[~null_mask].copy()
+    # normalize to [0, 1] range
+    df[f'{lat_col}_norm'] = (df[lat_col] - df[lat_col].min()) / (df[lat_col].max() - df[lat_col].min())
+    df[f'{lon_col}_norm'] = (df[lon_col] - df[lon_col].min()) / (df[lon_col].max() - df[lon_col].min())
     
-    for idx, row in valid_df.iterrows():
-        lat, lon = row[lat_col], row[lon_col]
-        coord_str, issue_type = clean_coordinate_pair(lat, lon)
-        
-        if issue_type == "NORMAL":
-            results['valid_coords'] += 1
-        else:
-            results['invalid_coords'] += 1
-            if issue_type not in results['coordinate_issues']:
-                results['coordinate_issues'][issue_type] = 0
-            results['coordinate_issues'][issue_type] += 1
-    
-    return results
+    return df
 
 
-def normalize_station_metadata(df: pd.DataFrame) -> pd.DataFrame:
+def create_station_metadata_enhanced(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Normalize station metadata by consolidating duplicate stations.
+    Create enhanced station metadata with additional calculated features.
     
     Args:
-        df: DataFrame with station data
+        df: Station DataFrame
         
     Returns:
-        DataFrame with normalized station metadata
+        Enhanced station metadata
     """
-    # Extract unique station information
-    station_cols = [
-        'id_estacion_origen', 'nombre_estacion_origen', 
-        'lat_estacion_origen', 'long_estacion_origen'
-    ]
+    df = df.copy()
     
-    if all(col in df.columns for col in station_cols):
-        # Create station metadata from origin data
-        origin_meta = df[station_cols].drop_duplicates('id_estacion_origen')
-        origin_meta.columns = ['station_id', 'station_name', 'lat', 'lon']
-        
-        # Extract destination metadata
-        dest_cols = [
-            'id_estacion_destino', 'nombre_estacion_destino',
-            'lat_estacion_destino', 'long_estacion_destino'
-        ]
-        
-        if all(col in df.columns for col in dest_cols):
-            dest_meta = df[dest_cols].drop_duplicates('id_estacion_destino')
-            dest_meta.columns = ['station_id', 'station_name', 'lat', 'lon']
-            
-            # Combine and deduplicate
-            combined_meta = pd.concat([origin_meta, dest_meta])
-            final_meta = combined_meta.drop_duplicates('station_id', keep='first')
-            
-            return final_meta.sort_values('station_id').reset_index(drop=True)
+    # calculate basic statistics if trip data is available
+    if 'trip_count' not in df.columns:
+        df['trip_count'] = 0
     
-    return pd.DataFrame()
+    # add coordinate-based features
+    df = normalize_coordinates(df)
+    
+    # calculate distance to city center (Buenos Aires)
+    # approximate city center coordinates
+    center_lat, center_lon = -34.6118, -58.3960
+    
+    df['distance_to_center'] = np.sqrt(
+        (df['latitude'] - center_lat) ** 2 + 
+        (df['longitude'] - center_lon) ** 2
+    )
+    
+    # categorize stations by location
+    df['location_category'] = pd.cut(
+        df['distance_to_center'],
+        bins=[0, 0.02, 0.05, np.inf],
+        labels=['center', 'inner', 'outer']
+    )
+    
+    return df
 
 
-# Note: analyze_raw_data function has been moved to src/analysis/data_analysis.py 
+def aggregate_trips_by_station(df: pd.DataFrame, 
+                              station_col: str = 'station_id',
+                              datetime_col: str = 'fecha_inicio') -> pd.DataFrame:
+    """
+    Aggregate trip data by station and time period.
+    
+    Args:
+        df: Trip DataFrame
+        station_col: Station identifier column
+        datetime_col: Datetime column for aggregation
+        
+    Returns:
+        Aggregated DataFrame
+    """
+    df = df.copy()
+    
+    # ensure datetime column is datetime type
+    df[datetime_col] = pd.to_datetime(df[datetime_col])
+    
+    # create time-based features
+    df['hour'] = df[datetime_col].dt.hour
+    df['day_of_week'] = df[datetime_col].dt.dayofweek
+    df['month'] = df[datetime_col].dt.month
+    df['date'] = df[datetime_col].dt.date
+    
+    # aggregate by station and time
+    agg_dict = {
+        'trip_id': 'count',  # assuming there's a trip_id column
+        'duracion': ['mean', 'std', 'min', 'max'] if 'duracion' in df.columns else 'count'
+    }
+    
+    # group by station and hour
+    hourly_agg = df.groupby([station_col, 'date', 'hour']).agg(agg_dict).reset_index()
+    
+    # flatten column names
+    hourly_agg.columns = [f"{col[0]}_{col[1]}" if col[1] else col[0] for col in hourly_agg.columns]
+    
+    return hourly_agg
+
+
+def validate_data_quality(df: pd.DataFrame, 
+                         required_columns: Optional[list] = None) -> Dict[str, Any]:
+    """
+    Validate data quality and return quality metrics.
+    
+    Args:
+        df: DataFrame to validate
+        required_columns: List of required columns
+        
+    Returns:
+        Dictionary with quality metrics
+    """
+    quality_metrics = {
+        'total_rows': len(df),
+        'total_columns': len(df.columns),
+        'missing_values': df.isnull().sum().to_dict(),
+        'duplicate_rows': df.duplicated().sum(),
+        'memory_usage': df.memory_usage(deep=True).sum()
+    }
+    
+    # check for required columns
+    if required_columns:
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        quality_metrics['missing_required_columns'] = missing_cols
+    
+    # check data types
+    quality_metrics['data_types'] = df.dtypes.to_dict()
+    
+    # check for outliers in numeric columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    outliers = {}
+    
+    for col in numeric_cols:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        
+        outliers[col] = {
+            'count': ((df[col] < lower_bound) | (df[col] > upper_bound)).sum(),
+            'percentage': ((df[col] < lower_bound) | (df[col] > upper_bound)).sum() / len(df) * 100
+        }
+    
+    quality_metrics['outliers'] = outliers
+    
+    return quality_metrics
+
+
+__all__ = [
+    'process_station_data',
+    'clean_trip_data',
+    'normalize_coordinates',
+    'create_station_metadata_enhanced',
+    'aggregate_trips_by_station',
+    'validate_data_quality'
+] 
