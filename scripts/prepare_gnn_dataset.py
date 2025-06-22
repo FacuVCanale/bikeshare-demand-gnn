@@ -191,7 +191,9 @@ def prepare_temporal_sequences(
         # Check if target columns exist in data
         available_targets = [t for t in target_cols if t in cluster_data.columns]
         if not available_targets:
-            print(f"Warning: No target columns found for cluster {cluster_id}. Available columns: {cluster_data.columns[:10]}")
+            print(f"Warning: No target columns found for cluster {cluster_id}")
+            print(f"  Looking for: {target_cols}")
+            print(f"  Available columns: {[c for c in cluster_data.columns if 'arr_' in c]}")
             continue
             
         cluster_targets = cluster_data.select(available_targets).to_numpy()
