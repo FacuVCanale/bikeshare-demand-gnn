@@ -545,7 +545,7 @@ class EcoBiciSpatialTemporalDataset:
         
         # final validation and summary
         logger.info(f"✅ Successfully created {split} dataset:")
-        logger.info(f"   🔢 Temporal sequences: {len(dataset)}")
+        logger.info(f"   🔢 Temporal sequences: {dataset.snapshot_count}")
         logger.info(f"   🏠 Nodes per graph: {edge_index.max().item() + 1}")
         logger.info(f"   🔗 Edges per graph: {edge_index.shape[1]}")
         logger.info(f"   📊 Features per node: {normalized_features[0].shape[1] if normalized_features else 0}")
