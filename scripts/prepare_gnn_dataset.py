@@ -388,10 +388,11 @@ def main():
         # the temporal sequences across all clusters simultaneously
         
         # For demonstration, let's create node features as cluster-level aggregations
-        cluster_stats = df_clean.group_by('cluster_id').agg([
-            pl.col(feature_names).mean().suffix('_mean'),
-            pl.col(feature_names).std().suffix('_std')
-        ]).sort('cluster_id')
+        # Create mean and std aggregations with explicit column names (for older Polars compatibility)
+        mean_exprs = [pl.col(fn).mean().alias(f"{fn}_mean") for fn in feature_names]
+        std_exprs = [pl.col(fn).std().alias(f"{fn}_std") for fn in feature_names]
+        
+        cluster_stats = df_clean.group_by('cluster_id').agg(mean_exprs + std_exprs).sort('cluster_id')
         
         # Get cluster node features
         node_features = cluster_stats.select([c for c in cluster_stats.columns if c != 'cluster_id']).to_numpy()
