@@ -45,6 +45,13 @@ from clustering.station_clustering import StationClusterer
 from clustering.cluster_features import ClusterFeatureGenerator
 
 
+def parse_n_clusters(value):
+    """Parse n_clusters argument, allowing 'none' to disable clustering."""
+    if value.lower() == 'none':
+        return None
+    return int(value)
+
+
 def setup_logging(log_level: str = "INFO"):
     """Setup logging configuration."""
     logging.basicConfig(
@@ -97,7 +104,7 @@ def main():
     
     parser.add_argument(
         "--n_clusters", 
-        type=lambda x: None if x.lower() == 'none' else int(x),
+        type=parse_n_clusters,
         default=93,
         help="Number of clusters for K-means (default: 93). Use 'none' to disable clustering and use individual stations"
     )

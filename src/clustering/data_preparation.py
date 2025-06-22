@@ -38,24 +38,47 @@ class DataPreparator:
         self.logger = logging.getLogger(__name__)
         
     def load_datasets(self) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        """Load all required datasets.
+        """Load all required datasets with temporal filtering to exclude August 2024 onward.
         
         Returns:
             Tuple of (trips_with_weather, trips, users) DataFrames
         """
         self.logger.info("Loading datasets...")
         
+        # cutoff date to exclude august 2024 onward
+        cutoff_date = pl.lit("2024-08-01").str.strptime(pl.Date, "%Y-%m-%d")
+        
         # load main dataset
         trips_weather_path = self.data_dir / "processed" / "trips_with_weather.parquet"
         self.logger.info(f"Loading trips_with_weather from {trips_weather_path}")
         trips_with_weather = pl.read_parquet(trips_weather_path)
-        self.logger.info(f"  -> trips_with_weather shape: {trips_with_weather.shape}")
+        
+        # filter out august 2024 onward
+        trips_with_weather_filtered = trips_with_weather.filter(
+            pl.col("fecha_origen_recorrido").dt.date() < cutoff_date
+        )
+        
+        filtered_count = trips_with_weather.height - trips_with_weather_filtered.height
+        if filtered_count > 0:
+            self.logger.info(f"  -> Filtered out {filtered_count:,} trips from August 2024 onward")
+        
+        self.logger.info(f"  -> trips_with_weather shape after filtering: {trips_with_weather_filtered.shape}")
         
         # load complete trips dataset
         trips_path = self.data_dir / "raw" / "combined" / "trips.parquet"
         self.logger.info(f"Loading trips from {trips_path}")
         trips = pl.read_parquet(trips_path)
-        self.logger.info(f"  -> trips shape: {trips.shape}")
+        
+        # filter out august 2024 onward from trips as well
+        trips_filtered = trips.filter(
+            pl.col("fecha_origen_recorrido").dt.date() < cutoff_date
+        )
+        
+        filtered_count_trips = trips.height - trips_filtered.height
+        if filtered_count_trips > 0:
+            self.logger.info(f"  -> Filtered out {filtered_count_trips:,} trips from August 2024 onward")
+        
+        self.logger.info(f"  -> trips shape after filtering: {trips_filtered.shape}")
         
         # load users dataset
         users_path = self.data_dir / "raw" / "combined" / "users.parquet"
@@ -63,7 +86,7 @@ class DataPreparator:
         users = pl.read_parquet(users_path)
         self.logger.info(f"  -> users shape: {users.shape}")
         
-        return trips_with_weather, trips, users
+        return trips_with_weather_filtered, trips_filtered, users
         
     def merge_datasets(self, trips_with_weather: pl.DataFrame, 
                       trips: pl.DataFrame, users: pl.DataFrame) -> pl.DataFrame:
