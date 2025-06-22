@@ -409,21 +409,143 @@ class GNNTrainer:
         total_time = time.time() - start_time
         self.logger.info(f"Training completed in {total_time:.2f} seconds")
         
-        # save final model and history
+        # save final model, architecture, and history
         self.save_model('final_model.pt')
+        self.save_model_architecture('model_architecture.json')
         self.save_history()
         
         return self.history
     
     def save_model(self, filename: str):
-        """Save model state dict"""
+        """Save model state dict and architecture information"""
         model_path = self.save_dir / filename
+        
+        # collect model initialization parameters
+        model_init_params = {}
+        
+        # get basic parameters available in all models
+        model_init_params['num_features'] = getattr(self.model, 'num_features', None)
+        model_init_params['hidden_dim'] = getattr(self.model, 'hidden_dim', None)
+        model_init_params['num_targets'] = getattr(self.model, 'num_targets', None)
+        model_init_params['dropout'] = getattr(self.model, 'dropout', None)
+        
+        # get model-specific parameters
+        model_class_name = self.model.__class__.__name__
+        
+        if model_class_name == 'TemporalGCN':
+            model_init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'activation': 'relu'  # default from model
+            })
+        elif model_class_name == 'SpatialGAT':
+            model_init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'num_heads': getattr(self.model, 'num_heads', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'attention_dropout': getattr(self.model, 'attention_dropout', 0.1)
+            })
+        elif model_class_name == 'GraphSAGE':
+            model_init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'aggregation': getattr(self.model, 'aggregation', 'mean'),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+            })
+        elif model_class_name == 'GraphTransformer':
+            model_init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'num_heads': getattr(self.model, 'num_heads', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+            })
+        elif model_class_name == 'HybridSpatioTemporalGNN':
+            model_init_params.update({
+                'use_temporal': getattr(self.model, 'use_temporal', True),
+                'temporal_dim': getattr(self.model, 'temporal_dim', 64)
+            })
+        
+        # save complete model information
         torch.save({
             'model_state_dict': self.model.state_dict(),
-            'model_class': self.model.__class__.__name__,
+            'model_class': model_class_name,
+            'model_init_params': model_init_params,
             'model_config': getattr(self.model, 'config', {}),
         }, model_path)
         self.logger.info(f"Model saved to {model_path}")
+    
+    def save_model_architecture(self, filename: str = 'model_architecture.json'):
+        """Save detailed model architecture as JSON"""
+        arch_path = self.save_dir / filename
+        
+        # collect comprehensive architecture information
+        architecture_info = {
+            'model_class': self.model.__class__.__name__,
+            'model_module': self.model.__class__.__module__,
+            'total_parameters': sum(p.numel() for p in self.model.parameters()),
+            'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+            'model_structure': str(self.model),
+            'initialization_parameters': {}
+        }
+        
+        # get model-specific initialization parameters
+        model_class_name = self.model.__class__.__name__
+        init_params = architecture_info['initialization_parameters']
+        
+        # common parameters for all models
+        init_params['num_features'] = getattr(self.model, 'num_features', None)
+        init_params['hidden_dim'] = getattr(self.model, 'hidden_dim', None)
+        init_params['num_targets'] = getattr(self.model, 'num_targets', None)
+        init_params['dropout'] = getattr(self.model, 'dropout', None)
+        
+        # model-specific parameters
+        if model_class_name == 'TemporalGCN':
+            init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'activation': 'relu'
+            })
+        elif model_class_name == 'SpatialGAT':
+            init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'num_heads': getattr(self.model, 'num_heads', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None),
+                'attention_dropout': getattr(self.model, 'attention_dropout', 0.1)
+            })
+        elif model_class_name == 'GraphSAGE':
+            init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'aggregation': getattr(self.model, 'aggregation', 'mean'),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+            })
+        elif model_class_name == 'GraphTransformer':
+            init_params.update({
+                'num_layers': getattr(self.model, 'num_layers', None),
+                'num_heads': getattr(self.model, 'num_heads', None),
+                'use_batch_norm': getattr(self.model, 'use_batch_norm', None)
+            })
+        elif model_class_name == 'HybridSpatioTemporalGNN':
+            init_params.update({
+                'use_temporal': getattr(self.model, 'use_temporal', True),
+                'temporal_dim': getattr(self.model, 'temporal_dim', 64)
+            })
+        
+        # add layer information for more complex architectures
+        layer_info = []
+        for name, module in self.model.named_modules():
+            if len(list(module.children())) == 0:  # leaf modules only
+                layer_info.append({
+                    'name': name,
+                    'type': module.__class__.__name__,
+                    'parameters': sum(p.numel() for p in module.parameters())
+                })
+        architecture_info['layers'] = layer_info
+        
+        # save to JSON
+        with open(arch_path, 'w') as f:
+            json.dump(architecture_info, f, indent=2, default=str)
+        
+        self.logger.info(f"Model architecture saved to {arch_path}")
+        
+        return architecture_info
     
     def save_checkpoint(self, epoch: int, filename: str):
         """Save training checkpoint"""
