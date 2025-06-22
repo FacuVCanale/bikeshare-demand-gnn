@@ -34,6 +34,19 @@ def create_tensors(df: pd.DataFrame, node_cols, global_cols, p, target_col, N):
     """
     df = df.sort_index()
 
+    # Asegúrate de que TODAS las columnas sean numéricas PRIMERO
+    for col in node_cols + global_cols + [target_col]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Opcional: convierte booleanos a 0/1 (evita quedar como object)
+    bool_mask = df.dtypes == bool
+    df.loc[:, bool_mask.index[bool_mask]] = df.loc[:, bool_mask.index[bool_mask]].astype(int)
+
+    # Elimina o completa los NaN creados al forzar numérico
+    print(f"   ✓ Shape antes de dropna: {df.shape}")
+    df = df.dropna()
+    print(f"   ✓ Shape después de dropna: {df.shape}")
+
     # -------------------- features --------------------
     T = df.index.get_level_values(0).nunique()  # Number of unique timestamps
 
@@ -58,9 +71,19 @@ def create_tensors(df: pd.DataFrame, node_cols, global_cols, p, target_col, N):
     X_global = np.array(global_data)  # Shape: (T, G)
     X_global = np.repeat(X_global[:, None, :], N, axis=1)  # (T, N, G)
     
-    X = np.concatenate([X_node, X_global], axis=-1)  # (T, N, F)
-
     y = df[target_col].values.reshape(T, N)
+
+    # Castea todo a un tipo flotante homogéneo
+    X_node   = X_node.astype(np.float32)
+    X_global = X_global.astype(np.float32)
+    y        = y.astype(np.float32)
+
+
+    X : np.ndarray = np.concatenate([X_node, X_global], axis=-1)  # (T, N, F)
+    y : np.ndarray = df[target_col].values.reshape(T, N)
+
+    assert not np.isnan(X).any(), "Hay NaN en X"
+    assert not np.isnan(y).any(), "Hay NaN en y"
 
     # -------------------- escaladores -----------------
     node_scaler = StandardScaler().fit(X_node.reshape(-1, len(node_cols)))
@@ -132,10 +155,15 @@ if __name__ == "__main__":
     pdf_clustered = pl.read_parquet("data/processed/df_feat_final_clustered.parquet")
     print(f"   ✓ Datos cargados con Polars: {pdf_clustered.shape}")
     
+    
     # Apply merge_intra_clusters to aggregate station-level data to cluster-level
     print("🔧 Agregando datos por cluster...")
     df_merged = merge_intra_clusters(pdf_clustered)
-    
+    print(f"   ✓ Datos cargados con Polars Post Merge: {df_merged.shape}")
+
+    df_merged = df_merged.drop_nulls()
+    print(f"   ✓ Datos cargados con Polars Post Nulls: {df_merged.shape}")
+
     del pdf_clustered
 
     # Convert to pandas for the rest of the pipeline
@@ -206,25 +234,25 @@ if __name__ == "__main__":
     feature_cols_demand = [
         'dep_last_DT',
         'trip_dur_mean_last_DT',
-        'dep_lag_1', 'dep_lag_2', 'dep_lag_3', 'dep_lag_4', 'dep_lag_5', 'dep_lag_6',
+        #'dep_lag_1', 'dep_lag_2', 'dep_lag_3', 'dep_lag_4', 'dep_lag_5', 'dep_lag_6',
         'arr_last_DT',
-        'arr_lag_1', 'arr_lag_2', 'arr_lag_3', 'arr_lag_4', 'arr_lag_5', 'arr_lag_6',
+        #'arr_lag_1', 'arr_lag_2', 'arr_lag_3', 'arr_lag_4', 'arr_lag_5', 'arr_lag_6',
         # Add demand lags (now created by merge_intra_clusters)
-        'dem_lag_1', 'dem_lag_2', 'dem_lag_3', 'dem_lag_4', 'dem_lag_5', 'dem_lag_6',
+        #'dem_lag_1', 'dem_lag_2', 'dem_lag_3', 'dem_lag_4', 'dem_lag_5', 'dem_lag_6',
         # Adding weather and temporal features
         'weather_temperature_2m',
-        'weather_relative_humidity_2m',
+        #'weather_relative_humidity_2m',
         'weather_apparent_temperature',
         'weather_precipitation',
-        'weather_wind_speed_10m',
+        #'weather_wind_speed_10m',
         'weather_is_day',
-        'is_holiday_ar',
+        #'is_holiday_ar',
         'sin_hour', 'cos_hour',
         'sin_dow', 'cos_dow',
         'sin_month', 'cos_month',
         'is_weekend',
-        'payday_flag',
-        'vacation_season',
+        #'payday_flag',
+        #'vacation_season',
         'peak_commute'
     ]
     
@@ -268,6 +296,8 @@ if __name__ == "__main__":
     print(f"   ✓ Features por nodo: {len(node_cols)}")
     print(f"   ✓ Features globales: {len(global_cols)}")
     print(f"   ✓ Ventana temporal: {p}")
+
+    assert not df[feature_cols_demand + [target]].isna().any().any(), "Hay NaNs en el dataframe original"
 
     X_tensor, y_tensor, scalers = create_tensors(df, node_cols, global_cols, p, target, N)
     print(f"   ✓ Tensores creados: X={X_tensor.shape}, y={y_tensor.shape}")
