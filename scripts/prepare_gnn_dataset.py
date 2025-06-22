@@ -242,54 +242,84 @@ def prepare_temporal_sequences_optimized(
         
         # Prepare arguments for multiprocessing - convert to numpy first
         process_args = []
+        failed_clusters = 0
+        
+        print(f"  Preparing data for {len(unique_clusters)} clusters...")
         for cluster_id in unique_clusters:
-            if cluster_id in cluster_partitions:
-                cluster_data = cluster_partitions[cluster_id]
+            if cluster_id not in cluster_partitions:
+                print(f"    Debug: Cluster {cluster_id} not in partitions")
+                failed_clusters += 1
+                continue
                 
-                # Check if target columns exist in data
-                available_targets = [t for t in target_cols if t in cluster_data.columns]
-                if not available_targets:
-                    continue
+            cluster_data = cluster_partitions[cluster_id]
+            
+            # Debug: Check cluster data structure
+            if len(cluster_data) == 0:
+                print(f"    Debug: Cluster {cluster_id} has no data")
+                failed_clusters += 1
+                continue
+            
+            # Check if target columns exist in data
+            available_targets = [t for t in target_cols if t in cluster_data.columns]
+            if not available_targets:
+                print(f"    Debug: Cluster {cluster_id} has no target columns. Available: {cluster_data.columns[:5]}...")
+                failed_clusters += 1
+                continue
+            
+            # Check if we have enough data for sequences
+            if len(cluster_data) < sequence_length + prediction_horizon:
+                print(f"    Debug: Cluster {cluster_id} has insufficient data ({len(cluster_data)} < {sequence_length + prediction_horizon})")
+                failed_clusters += 1
+                continue
+            
+            # Convert to numpy arrays before multiprocessing (avoids serialization issues)
+            try:
+                cluster_features = cluster_data.select(feature_cols).to_numpy()
+                cluster_targets = cluster_data.select(available_targets).to_numpy()
+                cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
                 
-                # Convert to numpy arrays before multiprocessing (avoids serialization issues)
-                try:
-                    cluster_features = cluster_data.select(feature_cols).to_numpy()
-                    cluster_targets = cluster_data.select(available_targets).to_numpy()
-                    cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
+                process_args.append((
+                    cluster_features, cluster_targets, cluster_timestamps,
+                    feature_cols, available_targets, sequence_length, prediction_horizon
+                ))
+            except Exception as e:
+                print(f"    Warning: Could not process cluster {cluster_id}: {e}")
+                failed_clusters += 1
+                continue
+        
+        print(f"  Prepared {len(process_args)} clusters for processing, {failed_clusters} failed")
+        
+        if len(process_args) == 0:
+            print("  ERROR: No clusters prepared for multiprocessing - falling back to single-threaded")
+            use_multiprocessing = False  # Fall back to single-threaded
+        else:
+            # Process in chunks to manage memory
+            n_processes = min(mp.cpu_count() - 1, 4)  # Leave one core free
+            
+            with ProcessPoolExecutor(max_workers=n_processes) as executor:
+                # Submit jobs in chunks
+                chunk_iterator = range(0, len(process_args), chunk_size)
+                for i in tqdm(chunk_iterator, desc="Processing cluster chunks"):
+                    chunk_args = process_args[i:i + chunk_size]
                     
-                    process_args.append((
-                        cluster_features, cluster_targets, cluster_timestamps,
-                        feature_cols, available_targets, sequence_length, prediction_horizon
-                    ))
-                except Exception as e:
-                    print(f"    Warning: Could not process cluster {cluster_id}: {e}")
-                    continue
-        
-        # Process in chunks to manage memory
-        n_processes = min(mp.cpu_count() - 1, 4)  # Leave one core free
-        
-        with ProcessPoolExecutor(max_workers=n_processes) as executor:
-            # Submit jobs in chunks
-            for i in tqdm(range(0, len(process_args), chunk_size), desc="Processing cluster chunks"):
-                chunk_args = process_args[i:i + chunk_size]
-                
-                # Submit chunk jobs
-                futures = [executor.submit(process_cluster_sequences, args) for args in chunk_args]
-                
-                # Collect results as they complete
-                for future in as_completed(futures):
-                    try:
-                        sequences, targets, timestamps = future.result()
-                        all_sequences.extend(sequences)
-                        all_targets.extend(targets)
-                        all_timestamps.extend(timestamps)
-                    except Exception as e:
-                        print(f"    Warning: Failed to process a cluster chunk: {e}")
-                
-                # Force garbage collection between chunks
-                gc.collect()
+                    # Submit chunk jobs
+                    futures = [executor.submit(process_cluster_sequences, args) for args in chunk_args]
+                    
+                    # Collect results as they complete
+                    for future in as_completed(futures):
+                        try:
+                            sequences, targets, timestamps = future.result()
+                            all_sequences.extend(sequences)
+                            all_targets.extend(targets)
+                            all_timestamps.extend(timestamps)
+                        except Exception as e:
+                            print(f"    Warning: Failed to process a cluster chunk: {e}")
+                    
+                    # Force garbage collection between chunks
+                    gc.collect()
     
-    else:
+    # Single-threaded fallback or when multiprocessing is disabled
+    if not use_multiprocessing or len(unique_clusters) <= 4:
         print("  Using single-threaded processing...")
         # Single-threaded processing with progress bar
         for cluster_id in tqdm(unique_clusters, desc="Processing clusters"):
