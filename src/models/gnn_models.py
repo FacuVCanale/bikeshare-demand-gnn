@@ -17,10 +17,57 @@ from torch_geometric.data import Data, Batch
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 
-from .base_model import BaseModel
+from abc import ABC, abstractmethod
 
 
-class TemporalGCN(BaseModel):
+class BaseGNNModel(nn.Module, ABC):
+    """
+    Abstract base class for Graph Neural Network models.
+    
+    Provides a common interface for GNN models with PyTorch Geometric compatibility.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        
+    @abstractmethod
+    def forward(self, data: Data) -> torch.Tensor:
+        """
+        Forward pass through the GNN.
+        
+        Args:
+            data: PyTorch Geometric Data object
+            
+        Returns:
+            Model predictions
+        """
+        pass
+    
+    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Training implementation - handled by external trainer.
+        
+        This method is implemented by external training modules like GNNTrainer.
+        """
+        raise NotImplementedError("Training logic should be implemented in training module")
+    
+    def predict(self, data: Data) -> np.ndarray:
+        """
+        Make predictions on new data.
+        
+        Args:
+            data: Input data
+            
+        Returns:
+            Predictions as numpy array
+        """
+        self.eval()
+        with torch.no_grad():
+            predictions = self.forward(data)
+            return predictions.cpu().numpy()
+
+
+class TemporalGCN(BaseGNNModel):
     """
     Graph Convolutional Network with temporal features for bike demand prediction.
     
@@ -116,20 +163,9 @@ class TemporalGCN(BaseModel):
         x = self.predictor(x)
         
         return x
-    
-    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
-        """Training implementation - to be implemented based on training framework"""
-        raise NotImplementedError("Training logic should be implemented in training module")
-    
-    def predict(self, data: Data) -> np.ndarray:
-        """Prediction implementation"""
-        self.eval()
-        with torch.no_grad():
-            predictions = self.forward(data)
-            return predictions.cpu().numpy()
 
 
-class SpatialGAT(BaseModel):
+class SpatialGAT(BaseGNNModel):
     """
     Graph Attention Network for capturing spatial relationships with attention mechanism.
     
@@ -227,20 +263,9 @@ class SpatialGAT(BaseModel):
         x = self.predictor(x)
         
         return x
-    
-    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
-        """Training implementation"""
-        raise NotImplementedError("Training logic should be implemented in training module")
-    
-    def predict(self, data: Data) -> np.ndarray:
-        """Prediction implementation"""
-        self.eval()
-        with torch.no_grad():
-            predictions = self.forward(data)
-            return predictions.cpu().numpy()
 
 
-class GraphSAGE(BaseModel):
+class GraphSAGE(BaseGNNModel):
     """
     GraphSAGE model for inductive learning on bike demand prediction.
     
@@ -313,20 +338,9 @@ class GraphSAGE(BaseModel):
         x = self.predictor(x)
         
         return x
-    
-    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
-        """Training implementation"""
-        raise NotImplementedError("Training logic should be implemented in training module")
-    
-    def predict(self, data: Data) -> np.ndarray:
-        """Prediction implementation"""
-        self.eval()
-        with torch.no_grad():
-            predictions = self.forward(data)
-            return predictions.cpu().numpy()
 
 
-class GraphTransformer(BaseModel):
+class GraphTransformer(BaseGNNModel):
     """
     Graph Transformer using TransformerConv layers for bike demand prediction.
     
@@ -427,20 +441,9 @@ class GraphTransformer(BaseModel):
         x = self.predictor(x)
         
         return x
-    
-    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
-        """Training implementation"""
-        raise NotImplementedError("Training logic should be implemented in training module")
-    
-    def predict(self, data: Data) -> np.ndarray:
-        """Prediction implementation"""
-        self.eval()
-        with torch.no_grad():
-            predictions = self.forward(data)
-            return predictions.cpu().numpy()
 
 
-class HybridSpatioTemporalGNN(BaseModel):
+class HybridSpatioTemporalGNN(BaseGNNModel):
     """
     Hybrid model combining multiple GNN architectures for comprehensive
     spatio-temporal modeling of bike demand.
@@ -553,17 +556,6 @@ class HybridSpatioTemporalGNN(BaseModel):
         predictions = self.predictor(x_final)
         
         return predictions
-    
-    def fit(self, train_data: Data, val_data: Optional[Data] = None, **kwargs) -> Dict[str, Any]:
-        """Training implementation"""
-        raise NotImplementedError("Training logic should be implemented in training module")
-    
-    def predict(self, data: Data) -> np.ndarray:
-        """Prediction implementation"""
-        self.eval()
-        with torch.no_grad():
-            predictions = self.forward(data)
-            return predictions.cpu().numpy()
 
 
 # model factory function
@@ -572,7 +564,7 @@ def create_gnn_model(
     num_features: int,
     num_targets: int = 1,
     **kwargs
-) -> BaseModel:
+) -> BaseGNNModel:
     """
     Factory function to create GNN models.
     
