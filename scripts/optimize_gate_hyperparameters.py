@@ -185,9 +185,9 @@ class OptimizedGateHyperparameterOptimizer:
         if self.model_type == 'catboost':
             # catboost with intelligent defaults
             params = {
-                'iterations': trial.suggest_int('iterations', 300, 2000, step=50),
+                'iterations': trial.suggest_int('iterations', 100, 2000, step=50),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.25, log=True),
-                'depth': trial.suggest_int('depth', 4, 10),
+                'depth': trial.suggest_int('depth', 4, 20),
                 'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 0.5, 20, log=True),
                 'border_count': trial.suggest_categorical('border_count', [64, 128, 255]),
                 'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1),
@@ -210,7 +210,7 @@ class OptimizedGateHyperparameterOptimizer:
         elif self.model_type == 'lightgbm':
             # lightgbm with intelligent defaults
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 300, 2000, step=50),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 2000, step=50),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.25, log=True),
                 'max_depth': trial.suggest_int('max_depth', 4, 12),
                 'num_leaves': trial.suggest_int('num_leaves', 20, 200),
