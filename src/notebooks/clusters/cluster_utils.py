@@ -1,5 +1,7 @@
 import polars as pl
 import numpy as np
+import pandas as pd
+from typing import List, Tuple, Dict
 
 from sklearn.linear_model import PoissonRegressor
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -80,6 +82,8 @@ def merge_intra_clusters(df: pl.DataFrame) -> pl.DataFrame:
         'dep_last_DT', 'trip_dur_mean_last_DT',
         'dep_lag_1', 'dep_lag_2', 'dep_lag_3', 'dep_lag_4', 'dep_lag_5', 'dep_lag_6',
         'arr_last_DT', 'arr_lag_1', 'arr_lag_2', 'arr_lag_3', 'arr_lag_4', 'arr_lag_5', 'arr_lag_6',
+        # Add demand lags
+        'dem_lag_1', 'dem_lag_2', 'dem_lag_3', 'dem_lag_4', 'dem_lag_5', 'dem_lag_6',
         'y_arrivals_next_DT', 'y_departures_next_DT'
     ]
     
@@ -89,15 +93,21 @@ def merge_intra_clusters(df: pl.DataFrame) -> pl.DataFrame:
     # Group by cluster and timestamp, then sum the relevant columns
     groupby_cols = ['ts_start', 'cluster']
     
-    # Create aggregation expressions
+    # Create aggregation expressions for summing
     sum_exprs = [pl.col(col).sum() for col in agg_columns if col != 'trip_dur_mean_last_DT']
     
     # Add trip_dur_mean_last_DT as mean if it exists
     if 'trip_dur_mean_last_DT' in agg_columns:
         sum_exprs.append(pl.col('trip_dur_mean_last_DT').mean())
     
+    # Add mean of lat and lon as new features
+    if 'lat' in df.columns:
+        sum_exprs.append(pl.col('lat').mean().alias('lat'))
+    if 'lon' in df.columns:
+        sum_exprs.append(pl.col('lon').mean().alias('lon'))
+    
     # Add other columns as first value (they should be the same for all stations in the same cluster and timestamp)
-    other_columns = [col for col in df.columns if col not in agg_columns and col not in groupby_cols]
+    other_columns = [col for col in df.columns if col not in agg_columns and col not in groupby_cols and col not in ['lat', 'lon']]
     for col in other_columns:
         sum_exprs.append(pl.col(col).first().alias(col))
     
@@ -109,6 +119,17 @@ def merge_intra_clusters(df: pl.DataFrame) -> pl.DataFrame:
         df_merged = df_merged.with_columns(
             (pl.col('y_arrivals_next_DT') - pl.col('y_departures_next_DT')).alias('delta_t')
         )
+    
+    # Create demand lag columns if arrivals and departures exist
+    if 'arr_lag_1' in df_merged.columns and 'dep_lag_1' in df_merged.columns:
+        for i in range(1, 7):  # lags 1-6
+            arr_col = f'arr_lag_{i}'
+            dep_col = f'dep_lag_{i}'
+            dem_col = f'dem_lag_{i}'
+            if arr_col in df_merged.columns and dep_col in df_merged.columns:
+                df_merged = df_merged.with_columns(
+                    (pl.col(arr_col) - pl.col(dep_col)).alias(dem_col)
+                )
     
     print(f"Merged {df.height:,} station-level rows into {df_merged.height:,} cluster-level rows")
     print(f"Reduction factor: {df.height / df_merged.height:.1f}x")
@@ -230,6 +251,80 @@ def dataset_to_cluster_train(dataset_path: str, output_path: str, sample=5_000_0
     print(f"Saved clustering model to: {model_file}")
 
     return pdf_clustered
+
+# Apply targeted outlier removal per cluster for trip_dur_mean_last_DT
+def remove_top_outliers_per_cluster(df, column, top_n=5):
+    """
+    Remove only the top N extreme outliers from a specific column within each cluster.
+    
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input DataFrame
+    column : str
+        Column to check for outliers
+    top_n : int, default 5
+        Number of top extreme values to remove per cluster
+    
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with top outliers removed per cluster
+    """
+    print(f"🔍 Removing top {top_n} outliers per cluster from column: {column}")
+    print(f"Original data shape: {df.shape}")
+    
+    if column not in df.columns:
+        print(f"Column {column} not found in DataFrame")
+        return df
+    
+    if 'cluster' not in df.columns:
+        print(f"Column 'cluster' not found in DataFrame")
+        return df
+    
+    # Get unique clusters
+    clusters = df['cluster'].unique().to_list()
+    print(f"Processing {len(clusters)} clusters")
+    
+    # Process each cluster separately
+    clean_dfs = []
+    total_removed = 0
+    
+    for cluster_id in clusters:
+        cluster_df = df.filter(pl.col('cluster') == cluster_id)
+        
+        if cluster_df.height <= top_n:
+            # If cluster has fewer rows than top_n, keep all rows
+            print(f"  Cluster {cluster_id}: {cluster_df.height} rows, keeping all")
+            clean_dfs.append(cluster_df)
+            continue
+        
+        # Get the top N highest values to remove for this cluster
+        top_values = cluster_df[column].top_k(top_n)
+        
+        # Create mask to exclude rows with these top values
+        mask = pl.lit(True)
+        for val in top_values.to_list():
+            if val is not None:
+                mask = mask & (pl.col(column) != val)
+        
+        cluster_clean = cluster_df.filter(mask)
+        
+        n_removed_cluster = cluster_df.height - cluster_clean.height
+        total_removed += n_removed_cluster
+        
+        print(f"  Cluster {cluster_id}: removed {n_removed_cluster} rows (top values: {top_values.to_list()})")
+        clean_dfs.append(cluster_clean)
+    
+    # Concatenate all clean cluster dataframes
+    df_clean = pl.concat(clean_dfs)
+    
+    print(f"📊 Total removed {total_removed} rows ({total_removed/df.shape[0]*100:.2f}%) with top outliers across all clusters")
+    print(f"Clean data shape: {df_clean.shape}")
+    
+    return df_clean
+
+
 def train_cluster_baseline(cluster_data, cluster_id, feature_cols=None, target_A=None, target_D=None, n_splits=3):
     """
     Train dual Poisson regression baseline for a single cluster
@@ -406,24 +501,71 @@ def train_cluster_baseline(cluster_data, cluster_id, feature_cols=None, target_A
             'error': str(e)
         }
 
-def train_cluster_baseline_v2(cluster_data, cluster_id,
-                              feature_cols, target_A, target_D,
-                              n_splits=3, LAMBDA_MAX=40.0):
+def train_cluster_baseline_v2(
+    cluster_data,
+    cluster_id,
+    feature_cols,
+    target_A,
+    target_D,
+    *,
+    n_splits=3,
+    LAMBDA_MAX=40.0,
+    poisson_alpha=1e-4,
+    poisson_max_iter=1000,
+    poisson_tol=1e-4,
+    scaler_cls=StandardScaler,
+    fillna_strategy="median"
+):
     """
     Baseline de Poisson doble por cluster, sin fugas de datos y con trazas de outliers.
     Imprime filas con λA o λD > LAMBDA_MAX.
     Devuelve dict con métricas agregadas.
+
+    Parameters
+    ----------
+    cluster_data : pd.DataFrame
+        Data for a single cluster.
+    cluster_id : int or str
+        Cluster identifier.
+    feature_cols : list of str
+        Feature columns to use.
+    target_A : str
+        Name of arrivals target column.
+    target_D : str
+        Name of departures target column.
+    n_splits : int, default 3
+        Number of splits for TimeSeriesSplit.
+    LAMBDA_MAX : float, default 40.0
+        Maximum allowed lambda for outlier detection.
+    poisson_alpha : float, default 1e-4
+        Regularization strength for PoissonRegressor.
+    poisson_max_iter : int, default 1000
+        Maximum iterations for PoissonRegressor.
+    poisson_tol : float, default 1e-4
+        Tolerance for PoissonRegressor.
+    scaler_cls : class, default StandardScaler
+        Scaler class to use for feature normalization.
+    fillna_strategy : str, default "median"
+        Strategy for filling NaNs in features ("median" or "mean").
     """
     try:
         # -------- 0. Orden temporal (evita fugas en CV) ----------
         cluster_data = cluster_data.sort_values("ts_start").reset_index(drop=True)
 
-        X_full = (cluster_data[feature_cols]
+        if fillna_strategy == "median":
+            fill_value = cluster_data[feature_cols].median()
+        elif fillna_strategy == "mean":
+            fill_value = cluster_data[feature_cols].mean()
+        else:
+            raise ValueError(f"Unknown fillna_strategy: {fillna_strategy}")
+
+        X_full = (
+            cluster_data[feature_cols]
             .replace([np.inf, -np.inf], np.nan)
-            .fillna(cluster_data[feature_cols].median())  # Use median instead of mean for robustness
+            .fillna(fill_value)
             .astype(np.float64)
         )
-        
+
         # Additional safety check for any remaining NaNs
         if X_full.isna().any().any():
             print(f"⚠️  Warning: Still have NaNs after fillna, filling with 0")
@@ -439,7 +581,7 @@ def train_cluster_baseline_v2(cluster_data, cluster_id,
 
         for fold, (train_idx, test_idx) in enumerate(tscv.split(X_full)):
             # -- 1. Escalador SOLO con datos de entrenamiento
-            scaler = StandardScaler()
+            scaler = scaler_cls()
             X_train = scaler.fit_transform(X_full.iloc[train_idx])
             X_test  = scaler.transform(X_full.iloc[test_idx])
 
@@ -447,8 +589,8 @@ def train_cluster_baseline_v2(cluster_data, cluster_id,
             yD_tr, yD_ts = y_D_full[train_idx], y_D_full[test_idx]
 
             # -- 2. Entrenamiento
-            model_A = PoissonRegressor(alpha=1e-4, max_iter=1000, tol=1e-4)
-            model_D = PoissonRegressor(alpha=1e-4, max_iter=1000, tol=1e-4)
+            model_A = PoissonRegressor(alpha=poisson_alpha, max_iter=poisson_max_iter, tol=poisson_tol)
+            model_D = PoissonRegressor(alpha=poisson_alpha, max_iter=poisson_max_iter, tol=poisson_tol)
             model_A.fit(X_train, yA_tr)
             model_D.fit(X_train, yD_tr)
 
@@ -527,3 +669,121 @@ def train_cluster_baseline_v2(cluster_data, cluster_id,
                     convergence_success=False, error=str(e))
 
 print("✅ Per-cluster baseline function defined")
+
+# ====================================================================
+# NEW: Utilities for wide format modelling (all-cluster features)
+# ====================================================================
+
+def create_wide_feature_matrix(
+    df: pl.DataFrame,
+    feature_cols: List[str],
+    *,
+    ts_col: str = "ts_start",
+    cluster_col: str = "cluster",
+    fill_value: float | int = 0.0,
+) -> pd.DataFrame:
+    """Return a *wide* feature matrix with one row per timestamp.
+
+    Each original feature is duplicated for every cluster so that, for
+    example, the feature ``dep_last_DT`` for cluster ``3`` becomes the
+    column ``dep_last_DT_3``.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input long-format dataframe containing ``ts_col``, ``cluster_col``
+        and the columns in ``feature_cols``.
+    feature_cols : list[str]
+        Names of the feature columns to be pivoted.
+    ts_col : str, default "ts_start"
+        Timestamp column to be used as the index of the resulting matrix.
+    cluster_col : str, default "cluster"
+        Column identifying the cluster/station group.
+    fill_value : float | int, default 0.0
+        Value to fill NaNs created by the pivot (i.e. timestamps where a
+        given cluster does not have data).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Wide dataframe indexed by ``ts_col`` and **sorted chronologically**.
+        The number of columns equals ``len(feature_cols) * n_clusters``.
+    """
+
+    # Convert to pandas for the powerful pivot functionality
+    pdf_long = df.to_pandas()
+
+    # Keep only relevant columns to avoid holding unnecessary data in memory
+    keep_cols = [ts_col, cluster_col] + feature_cols
+    pdf_long = pdf_long[keep_cols].copy()
+
+    # Ensure no duplicate index after pivot (aggregate via first() if needed)
+    pdf_long = (
+        pdf_long.dropna(subset=[ts_col, cluster_col])
+        .sort_values(ts_col)
+    )
+
+    # Perform the pivot – resulting columns are a MultiIndex (feature, cluster)
+    pdf_wide = (
+        pdf_long
+        .set_index([ts_col, cluster_col])[feature_cols]
+        .unstack(level=cluster_col)
+    )
+
+    # Flatten the MultiIndex columns:  (feature, cluster) -> f"{feature}_{cluster}"
+    pdf_wide.columns = [f"{feat}_{clust}" for feat, clust in pdf_wide.columns.to_flat_index()]
+
+    # Order rows chronologically and fill missing values
+    pdf_wide = pdf_wide.sort_index()
+    pdf_wide = pdf_wide.fillna(fill_value)
+
+    print(
+        f"✅ Created wide feature matrix with shape {pdf_wide.shape} – "
+        f"{pdf_wide.shape[1]} features across {len(set(df[cluster_col].to_list()))} clusters"
+    )
+
+    return pdf_wide
+
+
+def build_wide_cluster_dataset(
+    wide_X: pd.DataFrame,
+    df_long: pl.DataFrame,
+    cluster_id: int,
+    target_A: str,
+    target_D: str,
+    ts_col: str = "ts_start",
+    cluster_col: str = "cluster",
+) -> pd.DataFrame:
+    """Return a *pandas* dataframe ready for modelling a specific cluster.
+
+    The returned dataframe contains all columns from *wide_X* plus the two
+    target columns (arrivals & departures) for the requested *cluster_id*.
+    Any timestamps without target information for that cluster are dropped
+    to keep X/y aligned.
+    """
+
+    # Extract target series for the chosen cluster
+    pdf_targets = (
+        df_long
+        .filter((pl.col(cluster_col) == cluster_id))
+        .select([ts_col, target_A, target_D])
+        .to_pandas()
+        .set_index(ts_col)
+        .sort_index()
+    )
+
+    # Align with the wide feature matrix
+    common_index = wide_X.index.intersection(pdf_targets.index)
+    if common_index.empty:
+        raise ValueError(f"No overlapping timestamps between wide matrix and cluster {cluster_id} targets.")
+
+    df_cluster = pd.concat([
+        wide_X.loc[common_index],
+        pdf_targets.loc[common_index]
+    ], axis=1)
+
+    return df_cluster
+
+# ====================================================================
+# END new utilities
+# ====================================================================
