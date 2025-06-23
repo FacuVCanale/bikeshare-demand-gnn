@@ -220,10 +220,16 @@ def prepare_temporal_gnn_dataset_vectorized(
     feature_col_indices = [df_sorted.columns.index(col) for col in feature_cols]
     target_col_indices = [df_sorted.columns.index(col) for col in target_cols]
     
-    # Create timestamp lookup using original datetime objects for exact matching
+    # Create timestamp lookup using consistent datetime objects
     timestamp_to_rows = {}
     for i, row in enumerate(df_np):
-        ts = row[ts_col_idx]  # keep original datetime object
+        # Convert numpy timestamp back to datetime for consistent keys
+        if isinstance(row[ts_col_idx], (np.float64, float)):
+            # Convert from microseconds to datetime
+            ts = pd.Timestamp(row[ts_col_idx] / 1_000_000, unit='s').to_pydatetime()
+        else:
+            ts = row[ts_col_idx]  # already datetime
+            
         if ts not in timestamp_to_rows:
             timestamp_to_rows[ts] = []
         timestamp_to_rows[ts].append(i)
