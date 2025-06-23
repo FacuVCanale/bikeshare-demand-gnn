@@ -600,8 +600,8 @@ class GNNTrainer:
             epochs: Number of training epochs
             early_stopping_patience: Patience for early stopping
             save_best_model: Whether to save the best model
-            save_checkpoints: Whether to save periodic checkpoints
-            checkpoint_frequency: How often to save checkpoints
+            save_checkpoints: Whether to save checkpoints (only when better model found)
+            checkpoint_frequency: DEPRECATED - Checkpoints now saved only when better model found
             verbose: Whether to print progress
             train_mask: Mask for training nodes (for node-level tasks)
             val_mask: Mask for validation nodes (for node-level tasks)
@@ -673,6 +673,9 @@ class GNNTrainer:
         
         if val_loader is not None:
             config_data["Early stopping"] = f"{early_stopping_patience} epochs patience, {min_improvement:.4f} min improvement"
+        
+        if save_checkpoints:
+            config_data["Checkpoints"] = "Saved only when better model found (max 3 kept)"
         
         if self.scheduler is not None:
             config_data["Scheduler"] = self.scheduler.__class__.__name__
@@ -768,9 +771,14 @@ class GNNTrainer:
                     status_info, epoch_time, ['loss', 'r2', 'mae']
                 )
             
-            # save checkpoints
-            if save_checkpoints and (epoch + 1) % checkpoint_frequency == 0:
-                self.save_checkpoint(epoch, f'checkpoint_epoch_{epoch+1}.pt')
+            # save checkpoints only when finding better models
+            if save_checkpoints and is_best and improvement > 0:
+                checkpoint_filename = f'checkpoint_best_epoch_{epoch+1}_loss_{val_loss:.6f}.pt'
+                self.save_checkpoint(epoch, checkpoint_filename)
+                self.logger.info(f"Saved checkpoint for new best model: {checkpoint_filename}")
+                
+                # optionally clean up old checkpoints (keep only last 3 best)
+                self._cleanup_old_checkpoints(keep_last=3)
             
             # early stopping
             if early_stopping is not None and early_stopping(val_loss, self.model):
@@ -1023,6 +1031,37 @@ class GNNTrainer:
                 'use_neighbor_sampling': self.use_neighbor_sampling
             }
         }, checkpoint_path)
+    
+    def _cleanup_old_checkpoints(self, keep_last: int = 3):
+        """
+        Clean up old checkpoint files, keeping only the most recent ones.
+        
+        Args:
+            keep_last: Number of recent checkpoints to keep
+        """
+        import glob
+        import os
+        
+        # find all checkpoint files in the experiment directory
+        checkpoint_pattern = str(self.save_dir / 'checkpoint_best_*.pt')
+        checkpoint_files = glob.glob(checkpoint_pattern)
+        
+        if len(checkpoint_files) <= keep_last:
+            return  # not enough files to clean up
+        
+        # sort by modification time (newest first)
+        checkpoint_files.sort(key=os.path.getmtime, reverse=True)
+        
+        # remove old checkpoints (keep only the newest ones)
+        files_to_remove = checkpoint_files[keep_last:]
+        
+        for file_path in files_to_remove:
+            try:
+                os.remove(file_path)
+                filename = Path(file_path).name
+                self.logger.info(f"Removed old checkpoint: {filename}")
+            except Exception as e:
+                self.logger.warning(f"Failed to remove checkpoint {file_path}: {e}")
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load training checkpoint"""
