@@ -233,12 +233,23 @@ def prepare_temporal_gnn_dataset_vectorized(
     # Process snapshots in batches for better memory usage
     batch_size = min(100, len(valid_snapshot_indices))
     
+    # DEBUG: Add debugging info
+    print(f"DEBUG: Total available timestamps: {len(timestamps)}")
+    print(f"DEBUG: First few timestamps: {timestamps[:5]}")
+    print(f"DEBUG: Last few timestamps: {timestamps[-5:]}")
+    print(f"DEBUG: Available in timestamp_to_rows: {len(timestamp_to_rows)}")
+    print(f"DEBUG: Sample snapshot indices: {valid_snapshot_indices[:5]}")
+    
     for batch_start in tqdm(range(0, len(valid_snapshot_indices), batch_size), 
                            desc="Processing snapshot batches"):
         batch_end = min(batch_start + batch_size, len(valid_snapshot_indices))
         batch_indices = valid_snapshot_indices[batch_start:batch_end]
         
         batch_snapshots = []
+        
+        skipped_no_next_ts = 0
+        skipped_bounds = 0
+        skipped_no_valid_mask = 0
         
         for snapshot_idx in batch_indices:
             # Use timestamp index directly instead of converting to pandas
@@ -247,12 +258,18 @@ def prepare_temporal_gnn_dataset_vectorized(
             # Find next timestamp by index (more reliable than time arithmetic)
             next_timestamp_idx = snapshot_idx + 1
             if next_timestamp_idx >= len(timestamps):
+                skipped_bounds += 1
                 continue
                 
             next_timestamp = timestamps[next_timestamp_idx]
             
             # Skip if no target data for next timestamp
             if next_timestamp not in timestamp_to_rows:
+                skipped_no_next_ts += 1
+                if len(batch_snapshots) == 0 and skipped_no_next_ts <= 3:  # Debug first few failures
+                    print(f"DEBUG: Missing next timestamp {next_timestamp} (type: {type(next_timestamp)})")
+                    print(f"  Available keys sample: {list(timestamp_to_rows.keys())[:3]}")
+                    print(f"  Key types sample: {[type(k) for k in list(timestamp_to_rows.keys())[:3]]}")
                 continue
             
             # Get target rows
@@ -346,8 +363,14 @@ def prepare_temporal_gnn_dataset_vectorized(
                     num_nodes=n_clusters
                 )
                 batch_snapshots.append(snapshot)
+            else:
+                skipped_no_valid_mask += 1
         
         data_list.extend(batch_snapshots)
+        
+        # DEBUG: Report batch results
+        if batch_start == 0:  # Only for first batch
+            print(f"DEBUG: Batch results - Created: {len(batch_snapshots)}, Skipped bounds: {skipped_bounds}, Skipped no timestamp: {skipped_no_next_ts}, Skipped no valid mask: {skipped_no_valid_mask}")
         
         # Force garbage collection between batches
         gc.collect()
