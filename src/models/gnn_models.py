@@ -443,187 +443,6 @@ class GraphTransformer(BaseGNNModel):
         return x
 
 
-class MemoryEfficientGraphTransformer(BaseGNNModel):
-    """
-    Memory-efficient Graph Transformer using optimization techniques.
-    
-    Features:
-    - Gradient checkpointing for reduced memory usage
-    - Optimized attention computation
-    - Reduced intermediate tensor storage
-    - Memory monitoring and cleanup
-    """
-    
-    def __init__(
-        self,
-        num_features: int,
-        hidden_dim: int = 64,  # reduced default from 128
-        num_layers: int = 2,   # reduced default from 3
-        num_targets: int = 1,
-        num_heads: int = 4,    # reduced default from 8
-        dropout: float = 0.2,
-        use_batch_norm: bool = True,
-        use_gradient_checkpointing: bool = True,
-        max_attention_size: int = 1000  # limit attention computation
-    ):
-        super().__init__()
-        
-        self.num_features = num_features
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.num_targets = num_targets
-        self.num_heads = num_heads
-        self.dropout = dropout
-        self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.max_attention_size = max_attention_size
-        
-        # ensure hidden_dim is divisible by num_heads
-        assert hidden_dim % num_heads == 0, f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
-        
-        # build network layers with reduced size
-        self.convs = nn.ModuleList()
-        self.batch_norms = nn.ModuleList() if use_batch_norm else None
-        
-        # input layer
-        self.convs.append(
-            TransformerConv(
-                num_features,
-                hidden_dim,
-                heads=num_heads,
-                dropout=dropout,
-                concat=False,
-                edge_dim=None,  # no edge features to save memory
-                bias=False      # no bias to save parameters
-            )
-        )
-        if use_batch_norm:
-            self.batch_norms.append(BatchNorm(hidden_dim))
-        
-        # hidden layers
-        for _ in range(num_layers - 2):
-            self.convs.append(
-                TransformerConv(
-                    hidden_dim,
-                    hidden_dim,
-                    heads=num_heads,
-                    dropout=dropout,
-                    concat=False,
-                    edge_dim=None,
-                    bias=False
-                )
-            )
-            if use_batch_norm:
-                self.batch_norms.append(BatchNorm(hidden_dim))
-        
-        # output layer (single head for efficiency)
-        if num_layers > 1:
-            self.convs.append(
-                TransformerConv(
-                    hidden_dim,
-                    hidden_dim,
-                    heads=1,
-                    dropout=dropout,
-                    concat=False,
-                    edge_dim=None,
-                    bias=False
-                )
-            )
-            if use_batch_norm:
-                self.batch_norms.append(BatchNorm(hidden_dim))
-        
-        # simplified prediction layer
-        self.predictor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 4),  # reduce intermediate size
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 4, num_targets)
-        )
-        
-    def _checkpoint_conv_layer(self, conv_layer, batch_norm, x, edge_index, layer_idx):
-        """Apply convolution with optional checkpointing"""
-        if batch_norm is not None:
-            def conv_bn(x_in, edge_idx):
-                out = conv_layer(x_in, edge_idx)
-                out = batch_norm(out)
-                return out
-            
-            if self.use_gradient_checkpointing:
-                x = torch.utils.checkpoint.checkpoint(
-                    conv_bn, x, edge_index, use_reentrant=False
-                )
-            else:
-                x = conv_bn(x, edge_index)
-        else:
-            if self.use_gradient_checkpointing:
-                x = torch.utils.checkpoint.checkpoint(
-                    conv_layer, x, edge_index, use_reentrant=False
-                )
-            else:
-                x = conv_layer(x, edge_index)
-        
-        return x
-        
-    def forward(self, data: Data) -> torch.Tensor:
-        """Memory-efficient forward pass"""
-        x, edge_index = data.x, data.edge_index
-        
-        # limit graph size if too large for memory
-        num_nodes = x.size(0)
-        if num_nodes > self.max_attention_size:
-            # sample nodes to fit memory constraints
-            import warnings
-            warnings.warn(f"Graph has {num_nodes} nodes, sampling {self.max_attention_size} for memory efficiency")
-            
-            # simple random sampling - can be improved with more sophisticated methods
-            indices = torch.randperm(num_nodes)[:self.max_attention_size]
-            x = x[indices]
-            
-            # update edge_index to match sampled nodes
-            mask = torch.isin(edge_index, indices)
-            mask = mask[0] & mask[1]  # both source and target must be in sampled nodes
-            edge_index = edge_index[:, mask]
-            
-            # remap edge indices to new node numbering
-            for i, idx in enumerate(indices):
-                edge_index[edge_index == idx] = i
-        
-        # apply transformer convolutions with checkpointing
-        for i, conv in enumerate(self.convs):
-            batch_norm = self.batch_norms[i] if self.batch_norms else None
-            
-            x = self._checkpoint_conv_layer(conv, batch_norm, x, edge_index, i)
-            
-            # apply activation and dropout (except for last layer)
-            if i < len(self.convs) - 1:
-                x = F.gelu(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
-                
-            # periodic memory cleanup
-            if i % 2 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        
-        # final prediction
-        output = self.predictor(x)
-        
-        # if we sampled nodes, need to expand output back to original size
-        if num_nodes > self.max_attention_size:
-            # pad output to match original graph size
-            full_output = torch.zeros(num_nodes, output.size(1), 
-                                    device=output.device, dtype=output.dtype)
-            full_output[indices] = output
-            output = full_output
-        
-        return output
-        
-    def enable_gradient_checkpointing(self):
-        """Enable gradient checkpointing for memory efficiency"""
-        self.use_gradient_checkpointing = True
-        
-    def disable_gradient_checkpointing(self):
-        """Disable gradient checkpointing for speed"""
-        self.use_gradient_checkpointing = False
-
-
 class HybridSpatioTemporalGNN(BaseGNNModel):
     """
     Hybrid model combining multiple GNN architectures for comprehensive
@@ -744,7 +563,6 @@ def create_gnn_model(
     model_type: str,
     num_features: int,
     num_targets: int = 1,
-    memory_efficient: bool = True,
     **kwargs
 ) -> BaseGNNModel:
     """
@@ -754,7 +572,6 @@ def create_gnn_model(
         model_type: Type of GNN model ('gcn', 'gat', 'sage', 'transformer', 'hybrid')
         num_features: Number of input features
         num_targets: Number of target variables
-        memory_efficient: Use memory-efficient versions when available
         **kwargs: Additional model-specific parameters
     
     Returns:
@@ -769,17 +586,11 @@ def create_gnn_model(
     elif model_type == 'sage':
         return GraphSAGE(num_features=num_features, num_targets=num_targets, **kwargs)
     elif model_type == 'transformer':
-        if memory_efficient:
-            return MemoryEfficientGraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
-        else:
-            return GraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
-    elif model_type == 'memory-efficient-transformer':
-        return MemoryEfficientGraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
+        return GraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
     elif model_type == 'hybrid':
         return HybridSpatioTemporalGNN(num_features=num_features, num_targets=num_targets, **kwargs)
     else:
-        available_types = "'gcn', 'gat', 'sage', 'transformer', 'memory-efficient-transformer', 'hybrid'"
-        raise ValueError(f"Unknown model type: {model_type}. Choose from: {available_types}")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from: 'gcn', 'gat', 'sage', 'transformer', 'hybrid'")
 
 
 # utility functions for model evaluation
