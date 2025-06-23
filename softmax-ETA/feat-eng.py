@@ -1,4 +1,12 @@
 # trips_feature_engineering.py
+# OPTIMIZED VERSION - Uses more RAM and less CPU for rolling window calculations
+# Key optimizations:
+# - Uses Polars' built-in rolling functions instead of self-joins
+# - Leverages lazy evaluation for better memory management  
+# - Vectorized operations instead of loops
+# - Efficient rolling_count, rolling_mean, rolling_std functions
+# - Reduced CPU overhead by eliminating multiple filter operations
+
 import polars as pl
 import numpy as np
 from pathlib import Path
@@ -173,85 +181,53 @@ print("Processing user rolling windows...")
 # Sort by user and date for rolling operations
 df_sorted = df.sort(["id_usuario", "fecha_origen_recorrido"])
 
-# Simplified approach: calculate rolling windows using basic aggregations
-for window_days, label in [(7, "7d"), (30, "30d"), (90, "90d")]:
-    print(f"Processing user trips for {window_days} day window...")
-    
-    # Calculate window start for each trip
-    df_sorted = df_sorted.with_columns([
-        (pl.col("fecha_origen_recorrido") - pl.duration(days=window_days)).alias(f"window_start_{label}")
-    ])
-    
-    # Self-join to count trips within the window
-    trip_counts = (
-        df_sorted
-        .select(["id_usuario", "fecha_origen_recorrido", f"window_start_{label}"])
-        .join(
-            df_sorted.select(["id_usuario", "fecha_origen_recorrido"]).rename({"fecha_origen_recorrido": "trip_date"}),
-            on="id_usuario",
-            how="left"
-        )
-        # Count trips where trip_date is within the window (after window_start, before current time)
-        .filter(
-            (pl.col("trip_date") >= pl.col(f"window_start_{label}")) &
-            (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-        )
-        .group_by(["id_usuario", "fecha_origen_recorrido"])
-        .agg([
-            pl.len().alias(f"user_trips_{label}")
-        ])
-    )
-    
-    # Join back to main dataframe
-    df_sorted = df_sorted.join(
-        trip_counts,
-        on=["id_usuario", "fecha_origen_recorrido"],
-        how="left"
-    ).drop(f"window_start_{label}")
-    
-    # Fill null values with 0 (no previous trips)
-    df_sorted = df_sorted.with_columns([
-        pl.col(f"user_trips_{label}").fill_null(0)
-    ])
-    
-    non_null_count = df_sorted.filter(pl.col(f"user_trips_{label}").is_not_null()).height
-    print(f"Added feature 'user_trips_{label}', non-null values: {non_null_count}")
+# Use Polars' built-in rolling functions for much better performance
+# Pre-compute all user rolling statistics in one go using lazy evaluation
+df_lazy = df_sorted.lazy()
 
-print("Processing user duration statistics for 90 day window...")
-# Calculate 90-day window duration statistics
-df_sorted = df_sorted.with_columns([
-    (pl.col("fecha_origen_recorrido") - pl.duration(days=90)).alias("window_start_90d")
-])
-
-# Self-join to get durations within the 90-day window
-user_dur_stats = (
-    df_sorted
-    .select(["id_usuario", "fecha_origen_recorrido", "window_start_90d"])
-    .join(
-        df_sorted.select(["id_usuario", "fecha_origen_recorrido", "duracion_recorrido"]).rename({
-            "fecha_origen_recorrido": "trip_date", 
-            "duracion_recorrido": "trip_duration"
-        }),
-        on="id_usuario",
-        how="left"
-    )
-    # Filter trips within the 90-day window
-    .filter(
-        (pl.col("trip_date") >= pl.col("window_start_90d")) &
-        (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-    )
-    .group_by(["id_usuario", "fecha_origen_recorrido"])
-    .agg([
-        pl.col("trip_duration").mean().alias("user_avg_dur_90d"),
-        pl.col("trip_duration").std().alias("user_std_dur_90d")
+# User trip counts for multiple windows - vectorized approach
+user_rolling_features = (
+    df_lazy
+    .sort(["id_usuario", "fecha_origen_recorrido"])
+    .with_columns([
+        # Use rolling_count for trip counts - much more efficient than self-joins
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="7d", by="fecha_origen_recorrido")
+        .over("id_usuario")
+        .alias("user_trips_7d_temp"),
+        
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="30d", by="fecha_origen_recorrido") 
+        .over("id_usuario")
+        .alias("user_trips_30d_temp"),
+        
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="90d", by="fecha_origen_recorrido")
+        .over("id_usuario") 
+        .alias("user_trips_90d_temp"),
+        
+        # Duration statistics for 90-day window
+        pl.col("duracion_recorrido")
+        .rolling_mean(window_size="90d", by="fecha_origen_recorrido")
+        .over("id_usuario")
+        .alias("user_avg_dur_90d"),
+        
+        pl.col("duracion_recorrido")
+        .rolling_std(window_size="90d", by="fecha_origen_recorrido")
+        .over("id_usuario")
+        .alias("user_std_dur_90d")
     ])
+    # Subtract 1 from counts to exclude current trip (we want previous trips only)
+    .with_columns([
+        (pl.col("user_trips_7d_temp") - 1).clip(lower_bound=0).alias("user_trips_7d"),
+        (pl.col("user_trips_30d_temp") - 1).clip(lower_bound=0).alias("user_trips_30d"), 
+        (pl.col("user_trips_90d_temp") - 1).clip(lower_bound=0).alias("user_trips_90d")
+    ])
+    .drop(["user_trips_7d_temp", "user_trips_30d_temp", "user_trips_90d_temp"])
 )
 
-df_sorted = df_sorted.join(
-    user_dur_stats, 
-    on=["id_usuario", "fecha_origen_recorrido"], 
-    how="left"
-).drop("window_start_90d")
+# Collect the lazy frame
+df_sorted = user_rolling_features.collect()
 
 # Fill null values with 0
 df_sorted = df_sorted.with_columns([
@@ -259,197 +235,172 @@ df_sorted = df_sorted.with_columns([
     pl.col("user_std_dur_90d").fill_null(0)
 ])
 
-# Calculate preferred stations (mode)
+print(f"Added user rolling features for 7d, 30d, 90d windows")
+
+# Calculate preferred stations (mode) - more efficient approach
 print("Calculating user preferred stations...")
-user_prefs = df_sorted.group_by("id_usuario").agg([
-    pl.col("id_estacion_origen").mode().first().alias("user_pref_start"),
-    pl.col("id_estacion_destino").mode().first().alias("user_pref_dest")
-])
+user_prefs = (
+    df_sorted
+    .group_by("id_usuario")
+    .agg([
+        pl.col("id_estacion_origen").mode().first().alias("user_pref_start"),
+        pl.col("id_estacion_destino").mode().first().alias("user_pref_dest")
+    ])
+)
 
 df_sorted = df_sorted.join(user_prefs, on="id_usuario", how="left")
 
 # ──────────────────── 5. Features de estación ────────────────────
 print("Processing station features...")
 
-# Station rolling operations using simplified approach
-for col_station, prefix in [("id_estacion_origen", "orig"), ("id_estacion_destino", "dest")]:
-    print(f"Processing {prefix} station rolling counts...")
-    
-    df_sorted = df_sorted.sort([col_station, "fecha_origen_recorrido"])
-    
-    # Calculate 1-hour window
-    df_sorted = df_sorted.with_columns([
-        (pl.col("fecha_origen_recorrido") - pl.duration(hours=1)).alias(f"window_start_1h_{prefix}"),
-        (pl.col("fecha_origen_recorrido") - pl.duration(hours=24)).alias(f"window_start_24h_{prefix}")
-    ])
-    
-    # Self-join for 1-hour and 24-hour windows
-    for window_hours, window_label in [(1, "1h"), (24, "24h")]:
-        station_counts = (
-            df_sorted
-            .select([col_station, "fecha_origen_recorrido", f"window_start_{window_label}_{prefix}"])
-            .join(
-                df_sorted.select([col_station, "fecha_origen_recorrido"]).rename({"fecha_origen_recorrido": "trip_date"}),
-                on=col_station,
-                how="left"
-            )
-            .filter(
-                (pl.col("trip_date") >= pl.col(f"window_start_{window_label}_{prefix}")) &
-                (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-            )
-            .group_by([col_station, "fecha_origen_recorrido"])
-            .agg([
-                pl.len().alias(f"station_{prefix}_trips_{window_label}")
-            ])
-        )
+# Station rolling operations using efficient built-in functions
+print("Processing station rolling counts with optimized approach...")
+
+# Use lazy evaluation for better memory management
+df_lazy = df_sorted.lazy()
+
+# Process origin station features
+df_lazy = (
+    df_lazy
+    .sort(["id_estacion_origen", "fecha_origen_recorrido"])
+    .with_columns([
+        # 1-hour and 24-hour rolling counts for origin stations
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="1h", by="fecha_origen_recorrido")
+        .over("id_estacion_origen")
+        .alias("station_orig_trips_1h_temp"),
         
-        df_sorted = df_sorted.join(
-            station_counts,
-            on=[col_station, "fecha_origen_recorrido"],
-            how="left"
-        ).with_columns([
-            pl.col(f"station_{prefix}_trips_{window_label}").fill_null(0)
-        ])
-    
-    # Clean up temporary columns
-    df_sorted = df_sorted.drop([f"window_start_1h_{prefix}", f"window_start_24h_{prefix}"])
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="24h", by="fecha_origen_recorrido")
+        .over("id_estacion_origen")
+        .alias("station_orig_trips_24h_temp")
+    ])
+    # Subtract 1 to exclude current trip
+    .with_columns([
+        (pl.col("station_orig_trips_1h_temp") - 1).clip(lower_bound=0).alias("station_orig_trips_1h"),
+        (pl.col("station_orig_trips_24h_temp") - 1).clip(lower_bound=0).alias("station_orig_trips_24h")
+    ])
+    .drop(["station_orig_trips_1h_temp", "station_orig_trips_24h_temp"])
+)
+
+# Process destination station features
+df_lazy = (
+    df_lazy
+    .sort(["id_estacion_destino", "fecha_origen_recorrido"])
+    .with_columns([
+        # 1-hour and 24-hour rolling counts for destination stations
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="1h", by="fecha_origen_recorrido")
+        .over("id_estacion_destino")
+        .alias("station_dest_trips_1h_temp"),
+        
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="24h", by="fecha_origen_recorrido")
+        .over("id_estacion_destino")
+        .alias("station_dest_trips_24h_temp")
+    ])
+    # Subtract 1 to exclude current trip
+    .with_columns([
+        (pl.col("station_dest_trips_1h_temp") - 1).clip(lower_bound=0).alias("station_dest_trips_1h"),
+        (pl.col("station_dest_trips_24h_temp") - 1).clip(lower_bound=0).alias("station_dest_trips_24h")
+    ])
+    .drop(["station_dest_trips_1h_temp", "station_dest_trips_24h_temp"])
+)
+
+# Collect the lazy frame
+df_sorted = df_lazy.collect()
+
+print("Added efficient station rolling features (1h, 24h windows)")
 
 # Net flow calculation
 df_sorted = df_sorted.with_columns([
     (pl.col("station_dest_trips_1h") - pl.col("station_orig_trips_1h")).alias("station_net_flow_1h")
 ])
 
-# Station duration statistics
-print("Calculating station origin average duration...")
-df_sorted = df_sorted.sort(["id_estacion_origen", "fecha_origen_recorrido"])
+# Station duration statistics using efficient rolling functions
+print("Calculating station origin average duration with optimized approach...")
 
-# Calculate 30-day window for station duration
-df_sorted = df_sorted.with_columns([
-    (pl.col("fecha_origen_recorrido") - pl.duration(days=30)).alias("window_start_30d_dur")
-])
-
-station_dur_stats = (
+df_sorted = (
     df_sorted
-    .select(["id_estacion_origen", "fecha_origen_recorrido", "window_start_30d_dur"])
-    .join(
-        df_sorted.select(["id_estacion_origen", "fecha_origen_recorrido", "duracion_recorrido"]).rename({
-            "fecha_origen_recorrido": "trip_date",
-            "duracion_recorrido": "trip_duration"
-        }),
-        on="id_estacion_origen",
-        how="left"
-    )
-    .filter(
-        (pl.col("trip_date") >= pl.col("window_start_30d_dur")) &
-        (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-    )
-    .group_by(["id_estacion_origen", "fecha_origen_recorrido"])
-    .agg([
-        pl.col("trip_duration").mean().alias("station_orig_avg_dur_30d")
+    .sort(["id_estacion_origen", "fecha_origen_recorrido"])
+    .with_columns([
+        # 30-day rolling average duration for origin stations
+        pl.col("duracion_recorrido")
+        .rolling_mean(window_size="30d", by="fecha_origen_recorrido")
+        .over("id_estacion_origen")
+        .alias("station_orig_avg_dur_30d")
+    ])
+    .with_columns([
+        pl.col("station_orig_avg_dur_30d").fill_null(0)
     ])
 )
 
-df_sorted = df_sorted.join(
-    station_dur_stats, 
-    on=["id_estacion_origen", "fecha_origen_recorrido"], 
-    how="left"
-).drop("window_start_30d_dur").with_columns([
-    pl.col("station_orig_avg_dur_30d").fill_null(0)
-])
+print("Added efficient station duration features")
 
-# Entropy calculation using a more efficient approach
-print("Calculating destination entropy...")
+# Station destination diversity using efficient rolling functions
+print("Calculating destination diversity with optimized approach...")
 
-# Custom entropy function that works with Polars
-def calculate_entropy(dest_ids):
-    """Calculate entropy of destination IDs"""
-    if len(dest_ids) == 0:
-        return None
-    
-    # Count frequencies
-    unique, counts = np.unique(dest_ids, return_counts=True)
-    if len(unique) <= 1:
-        return 0.0
-    
-    # Calculate probabilities and entropy
-    probs = counts / counts.sum()
-    return -(probs * np.log2(probs)).sum()
-
-# Calculate rolling entropy - this is complex in Polars, so we'll do a simpler version
-df_sorted = df_sorted.sort(["id_estacion_origen", "fecha_origen_recorrido"])
-
-# For now, calculate a simpler diversity measure (unique destinations in window)
-df_sorted = df_sorted.with_columns([
-    (pl.col("fecha_origen_recorrido") - pl.duration(days=90)).alias("window_start_90d_dest")
-])
-
-station_dest_count = (
+# Calculate destination diversity using rolling unique counts (simpler than entropy but more efficient)
+df_sorted = (
     df_sorted
-    .select(["id_estacion_origen", "fecha_origen_recorrido", "window_start_90d_dest"])
-    .join(
-        df_sorted.select(["id_estacion_origen", "fecha_origen_recorrido"]).rename({"fecha_origen_recorrido": "trip_date"}),
-        on="id_estacion_origen",
-        how="left"
-    )
-    .filter(
-        (pl.col("trip_date") >= pl.col("window_start_90d_dest")) &
-        (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-    )
-    .group_by(["id_estacion_origen", "fecha_origen_recorrido"])
-    .agg([
-        pl.len().alias("station_dest_count_90d")
+    .sort(["id_estacion_origen", "fecha_origen_recorrido"])
+    .with_columns([
+        # 90-day rolling count of trips from this origin station
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="90d", by="fecha_origen_recorrido")
+        .over("id_estacion_origen")
+        .alias("station_orig_trip_count_90d_temp")
     ])
+    .with_columns([
+        # Subtract 1 to exclude current trip
+        (pl.col("station_orig_trip_count_90d_temp") - 1).clip(lower_bound=0).alias("station_dest_count_90d")
+    ])
+    .drop("station_orig_trip_count_90d_temp")
 )
 
-df_sorted = df_sorted.join(
-    station_dest_count, 
-    on=["id_estacion_origen", "fecha_origen_recorrido"], 
-    how="left"
-).drop("window_start_90d_dest").with_columns([
-    pl.col("station_dest_count_90d").fill_null(0)
-])
+print("Added efficient station destination diversity features")
 
 # ──────────────────── 6. Features de ruta (origen-destino) ────────────────────
-print("Processing route features...")
-df_sorted = df_sorted.sort(["id_estacion_origen", "id_estacion_destino", "fecha_origen_recorrido"])
+print("Processing route features with optimized approach...")
 
-# Calculate 90-day window for route statistics
+# Create route key for efficient grouping operations
 df_sorted = df_sorted.with_columns([
-    (pl.col("fecha_origen_recorrido") - pl.duration(days=90)).alias("window_start_90d_route")
+    (pl.col("id_estacion_origen").cast(pl.Utf8) + "_" + pl.col("id_estacion_destino").cast(pl.Utf8)).alias("route_key")
 ])
 
-route_stats = (
+# Calculate 90-day rolling route statistics using efficient built-in functions
+df_sorted = (
     df_sorted
-    .select(["id_estacion_origen", "id_estacion_destino", "fecha_origen_recorrido", "window_start_90d_route"])
-    .join(
-        df_sorted.select(["id_estacion_origen", "id_estacion_destino", "fecha_origen_recorrido", "duracion_recorrido"]).rename({
-            "fecha_origen_recorrido": "trip_date",
-            "duracion_recorrido": "trip_duration"
-        }),
-        on=["id_estacion_origen", "id_estacion_destino"],
-        how="left"
-    )
-    .filter(
-        (pl.col("trip_date") >= pl.col("window_start_90d_route")) &
-        (pl.col("trip_date") < pl.col("fecha_origen_recorrido"))
-    )
-    .group_by(["id_estacion_origen", "id_estacion_destino", "fecha_origen_recorrido"])
-    .agg([
-        pl.len().alias("route_trip_count_90d"),
-        pl.col("trip_duration").mean().alias("route_avg_dur_90d"),
-        pl.col("trip_duration").std().alias("route_std_dur_90d")
+    .sort(["route_key", "fecha_origen_recorrido"])
+    .with_columns([
+        # 90-day rolling statistics for each route
+        pl.col("fecha_origen_recorrido")
+        .rolling_count(window_size="90d", by="fecha_origen_recorrido")
+        .over("route_key")
+        .alias("route_trip_count_90d_temp"),
+        
+        pl.col("duracion_recorrido")
+        .rolling_mean(window_size="90d", by="fecha_origen_recorrido")
+        .over("route_key")
+        .alias("route_avg_dur_90d"),
+        
+        pl.col("duracion_recorrido")
+        .rolling_std(window_size="90d", by="fecha_origen_recorrido")
+        .over("route_key")
+        .alias("route_std_dur_90d")
+    ])
+    .with_columns([
+        # Subtract 1 from count to exclude current trip
+        (pl.col("route_trip_count_90d_temp") - 1).clip(lower_bound=0).alias("route_trip_count_90d")
+    ])
+    .drop(["route_trip_count_90d_temp", "route_key"])
+    .with_columns([
+        pl.col("route_avg_dur_90d").fill_null(0),
+        pl.col("route_std_dur_90d").fill_null(0)
     ])
 )
 
-df_sorted = df_sorted.join(
-    route_stats, 
-    on=["id_estacion_origen", "id_estacion_destino", "fecha_origen_recorrido"], 
-    how="left"
-).drop("window_start_90d_route").with_columns([
-    pl.col("route_trip_count_90d").fill_null(0),
-    pl.col("route_avg_dur_90d").fill_null(0),
-    pl.col("route_std_dur_90d").fill_null(0)
-])
+print("Added efficient route features (90d rolling statistics)")
 
 # ──────────────────── 7. Clima derivado e interacciones ────────────────────
 df_sorted = df_sorted.with_columns([
@@ -458,16 +409,24 @@ df_sorted = df_sorted.with_columns([
     (pl.col("weather_precipitation") > 0).cast(pl.Int8).alias("precip_flag")
 ])
 
-# Weather lag features - simplified approach
-for col in ["weather_precipitation", "weather_rain"]:
-    if col in df_sorted.columns:
+# Weather lag features - efficient vectorized approach
+print("Adding weather lag features...")
+weather_lag_cols = ["weather_precipitation", "weather_rain"]
+existing_weather_cols = [col for col in weather_lag_cols if col in df_sorted.columns]
+
+if existing_weather_cols:
+    # Sort by time once and create all lag features in one operation
+    df_sorted = df_sorted.sort("fecha_origen_recorrido")
+    
+    lag_exprs = []
+    for col in existing_weather_cols:
         col_name = col.replace('weather_', '')
-        df_sorted = df_sorted.sort("fecha_origen_recorrido")
-        
-        # Simple lag by shifting the entire column (this assumes data is sorted by time)
-        df_sorted = df_sorted.with_columns([
-            pl.col(col).shift(1).alias(f"{col_name}_lag_1h")
-        ])
+        lag_exprs.append(pl.col(col).shift(1).alias(f"{col_name}_lag_1h"))
+    
+    df_sorted = df_sorted.with_columns(lag_exprs)
+    print(f"Added lag features for: {existing_weather_cols}")
+else:
+    print("No weather columns found for lag features")
 
 # Weather code categories
 if "weather_weather_code" in df_sorted.columns:
@@ -520,29 +479,30 @@ df_sorted = df_sorted.with_columns([
 if len(df_sorted) == 0:
     raise ValueError("No data remaining after feature engineering transformations")
 
-# Fill NaN values in rolling columns with 0
-rolling_cols = [c for c in df_sorted.columns if any(tag in c for tag in
-                ["trips_", "avg_dur_", "std_dur_", "entropy", "flow", "route", "_lag_"])]
+# Fill NaN values in rolling columns with 0 - vectorized approach
+rolling_tags = ["trips_", "avg_dur_", "std_dur_", "entropy", "flow", "route", "_lag_"]
+rolling_cols = [c for c in df_sorted.columns if any(tag in c for tag in rolling_tags)]
 
-fill_exprs = [pl.col(col).fill_null(0).alias(col) for col in rolling_cols if col in df_sorted.columns]
-if fill_exprs:
+if rolling_cols:
+    fill_exprs = [pl.col(col).fill_null(0).alias(col) for col in rolling_cols]
     df_sorted = df_sorted.with_columns(fill_exprs)
+    print(f"Filled null values for {len(rolling_cols)} rolling/lag features")
 
-# Replace infinite values with null
+# Replace infinite values with null - efficient vectorized approach
+numeric_dtypes = [pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64]
 numeric_cols = [col for col, dtype in zip(df_sorted.columns, df_sorted.dtypes) 
-                if dtype in [pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64]]
+                if dtype in numeric_dtypes]
 
-inf_replace_exprs = []
-for col in numeric_cols:
-    inf_replace_exprs.append(
+if numeric_cols:
+    inf_replace_exprs = [
         pl.when(pl.col(col).is_infinite())
         .then(None)
         .otherwise(pl.col(col))
         .alias(col)
-    )
-
-if inf_replace_exprs:
+        for col in numeric_cols
+    ]
     df_sorted = df_sorted.with_columns(inf_replace_exprs)
+    print(f"Replaced infinite values for {len(numeric_cols)} numeric columns")
 
 # Report feature counts
 total_features = len(df_sorted.columns)
