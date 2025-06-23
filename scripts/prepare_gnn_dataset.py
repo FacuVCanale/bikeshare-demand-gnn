@@ -185,7 +185,7 @@ def create_temporal_snapshot_data(
         edge_index: Graph connectivity
         n_clusters: Total number of clusters
         sequence_length: Number of historical timesteps to use as features
-    
+        
     Returns:
         PyTorch Geometric Data object or None if insufficient data
     """
@@ -269,7 +269,7 @@ def prepare_temporal_gnn_dataset(
         n_clusters: Number of clusters
         sequence_length: Historical window size
         stride: Number of timesteps to skip between snapshots
-    
+        
     Returns:
         List of PyTorch Geometric Data objects
     """
