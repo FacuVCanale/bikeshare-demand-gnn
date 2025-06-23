@@ -89,14 +89,78 @@ print(f"Removed {users_original_count - len(users)} duplicate or invalid user en
 df = df.with_columns([
     pl.col("fecha_origen_recorrido").str.to_datetime(strict=False),
     pl.col("fecha_destino_recorrido").str.to_datetime(strict=False),
-    pl.col("id_usuario").cast(pl.Int64, strict=False)
+    pl.col("id_usuario").cast(pl.Int64, strict=False),
+    pl.col("duracion_recorrido").cast(pl.Float64, strict=False),
+    pl.col("id_estacion_origen").cast(pl.Int64, strict=False),
+    pl.col("id_estacion_destino").cast(pl.Int64, strict=False)
 ]).filter(
     pl.col("fecha_origen_recorrido").is_not_null() &
     pl.col("fecha_destino_recorrido").is_not_null() &
-    pl.col("id_usuario").is_not_null()
+    pl.col("id_usuario").is_not_null() &
+    pl.col("duracion_recorrido").is_not_null() &
+    pl.col("id_estacion_origen").is_not_null() &
+    pl.col("id_estacion_destino").is_not_null()
 )
 
-print(f"Trip count after datetime conversion and filtering: {len(df)}")
+print(f"Trip count after datetime conversion and null filtering: {len(df)}")
+
+# ──────────────────── Data Quality Filters ────────────────────
+print("\nApplying data quality filters...")
+
+# 1. Remove trips with unrealistic durations (< 1 minute or > 6 hours)
+trips_before_duration = len(df)
+df = df.filter(
+    (pl.col("duracion_recorrido") >= 60) &      # At least 1 minute
+    (pl.col("duracion_recorrido") <= 21600)     # At most 6 hours
+)
+removed_duration = trips_before_duration - len(df)
+print(f"Removed {removed_duration:,} trips with unrealistic durations (< 1 min or > 6 hours)")
+
+# 2. Remove stations with less than 5000 total trips
+print("Calculating station trip counts...")
+
+# Count trips per origin station
+origin_counts = df.group_by("id_estacion_origen").agg(
+    pl.count().alias("origin_trip_count")
+)
+
+# Count trips per destination station  
+dest_counts = df.group_by("id_estacion_destino").agg(
+    pl.count().alias("dest_trip_count")
+)
+
+# Combine counts - a station needs 5000+ trips as either origin OR destination
+station_counts = (
+    origin_counts
+    .join(dest_counts, left_on="id_estacion_origen", right_on="id_estacion_destino", how="full")
+    .with_columns([
+        # Use the station ID from either origin or destination
+        pl.coalesce([pl.col("id_estacion_origen"), pl.col("id_estacion_destino")]).alias("station_id"),
+        # Sum origin and destination counts (filling nulls with 0)
+        (pl.col("origin_trip_count").fill_null(0) + pl.col("dest_trip_count").fill_null(0)).alias("total_trips")
+    ])
+)
+
+# Get stations with at least 5000 trips
+valid_stations = (
+    station_counts
+    .filter(pl.col("total_trips") >= 5000)
+    .select("station_id")
+    .to_series()
+    .to_list()
+)
+
+print(f"Found {len(valid_stations)} stations with 5000+ trips out of {station_counts.height} total stations")
+
+# Filter trips to only include valid stations
+trips_before_station_filter = len(df)
+df = df.filter(
+    pl.col("id_estacion_origen").is_in(valid_stations) &
+    pl.col("id_estacion_destino").is_in(valid_stations)
+)
+print(f"Removed {trips_before_station_filter - len(df):,} trips with low-activity stations")
+
+print(f"Final trip count after quality filters: {len(df):,}")
 df = df.sort("fecha_origen_recorrido")
 
 # ──────────────────── 2. Join con tabla de usuarios ────────────────────
@@ -493,6 +557,22 @@ df_sorted = df_sorted.with_columns([
 # Validate that we still have data after all transformations
 if len(df_sorted) == 0:
     raise ValueError("No data remaining after feature engineering transformations")
+
+# Final filter: Remove any rows with NaN targets (crucial for model training)
+print("\nFinal target validation...")
+pre_target_filter = len(df_sorted)
+
+df_sorted = df_sorted.filter(
+    pl.col("duracion_recorrido").is_not_null() &
+    pl.col("id_estacion_destino").is_not_null() &
+    pl.col("duracion_recorrido").is_finite()  # Remove infinite values too
+)
+
+removed_nan_targets = pre_target_filter - len(df_sorted)
+if removed_nan_targets > 0:
+    print(f"Removed {removed_nan_targets:,} trips with NaN/infinite target values")
+
+print(f"Final dataset: {len(df_sorted):,} trips ready for modeling")
 
 # Fill NaN values in rolling columns with 0 - vectorized approach
 rolling_tags = ["trips_", "avg_dur_", "std_dur_", "entropy", "flow", "route", "_lag_"]
