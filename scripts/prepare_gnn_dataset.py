@@ -196,7 +196,7 @@ def prepare_temporal_gnn_dataset_vectorized(
     # Sort dataframe by timestamp and cluster for efficient access
     df_sorted = df.sort(['ts_start', 'cluster_id'])
     
-    # Get unique timestamps
+    # Get unique timestamps and convert to datetime objects directly
     timestamps = sorted(df['ts_start'].unique().to_list())
     
     # Need at least sequence_length + 1 timestamps
@@ -204,10 +204,7 @@ def prepare_temporal_gnn_dataset_vectorized(
         print(f"Warning: Not enough timestamps ({len(timestamps)}) for sequence length {sequence_length}")
         return []
     
-    # Convert to pandas timestamp for faster arithmetic operations
-    timestamps_pd = [pd.Timestamp(ts) for ts in timestamps]
-    
-    # Pre-compute all valid snapshot timestamps
+    # Pre-compute all valid snapshot timestamps using index positions
     start_idx = sequence_length
     end_idx = len(timestamps) - 1
     valid_snapshot_indices = list(range(start_idx, end_idx, stride))
@@ -223,10 +220,10 @@ def prepare_temporal_gnn_dataset_vectorized(
     feature_col_indices = [df_sorted.columns.index(col) for col in feature_cols]
     target_col_indices = [df_sorted.columns.index(col) for col in target_cols]
     
-    # Create timestamp lookup for faster indexing
+    # Create timestamp lookup using original datetime objects for exact matching
     timestamp_to_rows = {}
     for i, row in enumerate(df_np):
-        ts = pd.Timestamp(row[ts_col_idx])
+        ts = row[ts_col_idx]  # keep original datetime object
         if ts not in timestamp_to_rows:
             timestamp_to_rows[ts] = []
         timestamp_to_rows[ts].append(i)
@@ -244,10 +241,17 @@ def prepare_temporal_gnn_dataset_vectorized(
         batch_snapshots = []
         
         for snapshot_idx in batch_indices:
-            current_timestamp = timestamps_pd[snapshot_idx]
-            next_timestamp = current_timestamp + pd.Timedelta(minutes=30)
+            # Use timestamp index directly instead of converting to pandas
+            current_timestamp = timestamps[snapshot_idx]
             
-            # Skip if no target data
+            # Find next timestamp by index (more reliable than time arithmetic)
+            next_timestamp_idx = snapshot_idx + 1
+            if next_timestamp_idx >= len(timestamps):
+                continue
+                
+            next_timestamp = timestamps[next_timestamp_idx]
+            
+            # Skip if no target data for next timestamp
             if next_timestamp not in timestamp_to_rows:
                 continue
             
@@ -270,13 +274,13 @@ def prepare_temporal_gnn_dataset_vectorized(
             for cluster_id, target_values in target_data_by_cluster.items():
                 node_targets[cluster_id] = target_values
             
-            # Get historical data efficiently
-            historical_timestamps = timestamps_pd[max(0, snapshot_idx - sequence_length + 1):snapshot_idx + 1]
+            # Get historical data efficiently using timestamp indices
+            historical_start_idx = max(0, snapshot_idx - sequence_length + 1)
+            historical_timestamps = timestamps[historical_start_idx:snapshot_idx + 1]
             
             for cluster_id in range(n_clusters):
                 # Collect features for this cluster across time sequence
                 cluster_features = []
-                sequence_complete = True
                 
                 for hist_ts in historical_timestamps:
                     if hist_ts in timestamp_to_rows:
