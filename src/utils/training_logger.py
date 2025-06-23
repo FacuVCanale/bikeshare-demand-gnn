@@ -182,7 +182,10 @@ class TrainingLogger:
         self.logger.info(f"  Average: {avg_time_per_epoch:.3f} seconds per epoch")
             
         # performance summary
-        self.log_subsection_header("FINAL METRICS")
+        metrics_title = "FINAL METRICS"
+        if best_info and best_info.get('using_best_metrics', False):
+            metrics_title += " (from best epoch)"
+        self.log_subsection_header(metrics_title)
         
         # headers
         self.logger.info(f"{'Dataset':<12} {'Loss':<10} {'R²':<8} {'MAE':<8} {'RMSE':<8} {'MAPE':<8}")

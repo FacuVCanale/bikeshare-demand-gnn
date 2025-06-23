@@ -783,25 +783,53 @@ class GNNTrainer:
         total_time = time.time() - start_time
         total_epochs = len(self.history['train_loss'])
         
-        # prepare final metrics
-        final_train_metrics = self.history['train_metrics'][-1] if self.history['train_metrics'] else {}
-        final_val_metrics = self.history['val_metrics'][-1] if self.history['val_metrics'] else {}
+        # determine which metrics to use for final summary
+        use_best_metrics = (early_stopping and early_stopping.restore_best_weights and 
+                           early_stopping.best_weights is not None and 
+                           early_stopping.counter >= early_stopping.patience and
+                           last_model_save_epoch >= 0)
         
-        # add loss to metrics for consistency
-        final_train_metrics = dict(final_train_metrics)
-        final_train_metrics['loss'] = self.history['train_loss'][-1]
-        
-        if val_loader is not None:
-            final_val_metrics = dict(final_val_metrics)  
-            final_val_metrics['loss'] = self.history['val_loss'][-1]
+        if use_best_metrics:
+            # use metrics from the best epoch (when early stopping restored weights)
+            final_train_metrics = self.history['train_metrics'][last_model_save_epoch] if self.history['train_metrics'] else {}
+            final_val_metrics = self.history['val_metrics'][last_model_save_epoch] if self.history['val_metrics'] else {}
+            
+            # add loss to metrics for consistency
+            final_train_metrics = dict(final_train_metrics)
+            final_train_metrics['loss'] = self.history['train_loss'][last_model_save_epoch]
+            
+            if val_loader is not None:
+                final_val_metrics = dict(final_val_metrics)  
+                final_val_metrics['loss'] = self.history['val_loss'][last_model_save_epoch]
+            
+            self.logger.info(f"Using metrics from best epoch ({last_model_save_epoch + 1}) for final summary")
+        else:
+            # use metrics from last epoch (normal case)
+            final_train_metrics = self.history['train_metrics'][-1] if self.history['train_metrics'] else {}
+            final_val_metrics = self.history['val_metrics'][-1] if self.history['val_metrics'] else {}
+            
+            # add loss to metrics for consistency
+            final_train_metrics = dict(final_train_metrics)
+            final_train_metrics['loss'] = self.history['train_loss'][-1]
+            
+            if val_loader is not None:
+                final_val_metrics = dict(final_val_metrics)  
+                final_val_metrics['loss'] = self.history['val_loss'][-1]
         
         # prepare best model information
         best_info = None
         if val_loader is not None and last_model_save_epoch >= 0:
+            # determine final loss based on which metrics we're using
+            if use_best_metrics:
+                final_loss = self.history['val_loss'][last_model_save_epoch]
+            else:
+                final_loss = self.history['val_loss'][-1]
+                
             best_info = {
                 'best_loss': best_val_loss,
                 'best_epoch': last_model_save_epoch + 1,
-                'final_loss': self.history['val_loss'][-1]
+                'final_loss': final_loss,
+                'using_best_metrics': use_best_metrics
             }
         
         # prepare saved files information
@@ -815,17 +843,19 @@ class GNNTrainer:
             saved_files['Best model'] = f"{self.save_dir}/best_model.pt"
         
         # save model files
-        # note: if early stopping restored best weights, "final" model is actually the best model
+        # if early stopping was triggered and restored best weights, update best_model.pt
+        if (early_stopping and early_stopping.restore_best_weights and 
+            early_stopping.best_weights is not None and early_stopping.counter >= early_stopping.patience):
+            self.logger.info("Early stopping restored best weights - updating best_model.pt")
+            self.save_model('best_model.pt', silent=True)
+            self.logger.info("Note: Final model contains restored best weights from early stopping")
+        elif val_loader is not None and last_model_save_epoch >= 0:
+            self.logger.info(f"Note: Best model is from epoch {last_model_save_epoch + 1} (saved as best_model.pt)")
+        
+        # save final model and other files
         self.save_model('final_model.pt')
         self.save_model_architecture('model_architecture.json')
         self.save_history()
-        
-        # if we have a different best model saved, indicate this
-        if val_loader is not None and last_model_save_epoch >= 0:
-            if early_stopping and early_stopping.restore_best_weights and early_stopping.best_weights is not None:
-                self.logger.info("Note: Final model contains restored best weights from early stopping")
-            else:
-                self.logger.info(f"Note: Best model is from epoch {last_model_save_epoch + 1}, consider using best_model.pt for evaluation")
         
         # log comprehensive training summary
         self.training_logger.log_training_summary(
@@ -1197,15 +1227,25 @@ def train_gnn_experiment(
            if k not in ['train_mask', 'val_mask', 'log_frequency', 'min_improvement']}
     )
     
-    # load best model if it exists (e.g., from early stopping)
+    # ensure we're using the best model for evaluation
     best_model_path = trainer.save_dir / 'best_model.pt'
+    final_model_path = trainer.save_dir / 'final_model.pt'
+    
+    # determine which model to use for evaluation
     if best_model_path.exists():
         trainer.logger.info("Loading best model for evaluation...")
-        checkpoint = torch.load(best_model_path, map_location=trainer.device, weights_only=False)
-        trainer.model.load_state_dict(checkpoint['model_state_dict'])
-        trainer.logger.info("Best model loaded successfully")
+        try:
+            checkpoint = torch.load(best_model_path, map_location=trainer.device, weights_only=False)
+            trainer.model.load_state_dict(checkpoint['model_state_dict'])
+            trainer.logger.info("Best model loaded successfully")
+        except Exception as e:
+            trainer.logger.warning(f"Failed to load best model: {e}")
+            trainer.logger.info("Using current model state for evaluation")
     else:
-        trainer.logger.info("No best model found, using final model for evaluation")
+        # fallback to current model state (which may already contain best weights from early stopping)
+        trainer.logger.info("No best model file found, using current model state for evaluation")
+        if final_model_path.exists():
+            trainer.logger.info("(Current model state may contain best weights if early stopping was triggered)")
     
     # evaluate on test set with best model
     test_metrics = trainer.evaluate(
