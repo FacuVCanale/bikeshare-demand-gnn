@@ -148,18 +148,17 @@ class GNNTrainer:
         # clear existing handlers
         self.logger.handlers.clear()
         
-        # create file handler
+        # create file handler with detailed format
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
         
-        # create console handler
+        # create console handler with minimal format
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        
-        # create formatter
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
+        console_formatter = logging.Formatter('%(message)s')
+        console_handler.setFormatter(console_formatter)
         
         # add handlers
         self.logger.addHandler(file_handler)
