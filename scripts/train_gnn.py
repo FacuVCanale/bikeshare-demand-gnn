@@ -3,8 +3,6 @@ Training script for Graph Neural Networks on EcoBici clustered data.
 
 This script loads the preprocessed GNN data and trains various GNN architectures
 for bike demand prediction, including model comparison and evaluation.
-
-Updated to handle temporal snapshots and data without leakage.
 """
 
 import torch
@@ -15,18 +13,14 @@ from pathlib import Path
 import json
 import argparse
 import sys
-from typing import Dict, Any, List, Tuple
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-import torch.nn.functional as F
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tqdm import tqdm
+from typing import Dict, Any, List
 
 # add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.models.gnn_models import create_gnn_model, print_model_summary
+from src.training.gnn_trainer import GNNTrainer, train_gnn_experiment
 
 
 def set_seed(seed: int):
@@ -48,7 +42,7 @@ def set_seed(seed: int):
 
 def load_gnn_data(data_dir: str) -> Dict[str, Any]:
     """
-    Load preprocessed GNN data with support for temporal snapshots.
+    Load preprocessed GNN data.
     
     Args:
         data_dir: Directory containing GNN data files
@@ -58,36 +52,12 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
     """
     data_path = Path(data_dir)
     
-    # Try to load temporal snapshot data first (new format)
-    train_list_path = data_path / 'train_data_list.pt'
-    if train_list_path.exists():
-        print("Loading temporal snapshot data (new format)...")
-        train_data_list = torch.load(train_list_path, weights_only=False)
-        val_data_list = torch.load(data_path / 'val_data_list.pt', weights_only=False)
-        test_data_list = torch.load(data_path / 'test_data_list.pt', weights_only=False)
-        
-        # Also load single snapshots for compatibility
-        train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
-        val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
-        test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
-        
-        data_format = 'temporal_snapshots'
-        print(f"  Loaded {len(train_data_list)} train snapshots")
-        print(f"  Loaded {len(val_data_list)} val snapshots")
-        print(f"  Loaded {len(test_data_list)} test snapshots")
-    else:
-        print("Loading single snapshot data (legacy format)...")
-        # Fallback to old format
-        train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
-        val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
-        test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
-        
-        train_data_list = [train_data]
-        val_data_list = [val_data]
-        test_data_list = [test_data]
-        data_format = 'single_snapshot'
+    # load data
+    train_data = torch.load(data_path / 'train_data.pt', weights_only=False)
+    val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
+    test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
     
-    # Load metadata
+    # load metadata
     with open(data_path / 'train_feature_names.json', 'r') as f:
         train_metadata = json.load(f)
     
@@ -98,286 +68,12 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
         'train_data': train_data,
         'val_data': val_data,
         'test_data': test_data,
-        'train_data_list': train_data_list,
-        'val_data_list': val_data_list,
-        'test_data_list': test_data_list,
         'feature_names': train_metadata['features'],
         'target_names': train_metadata['targets'],
         'n_features': train_metadata['n_features'],
         'n_targets': train_metadata['n_targets'],
-        'processing_config': processing_config,
-        'data_format': data_format,
-        'sequence_length': train_metadata.get('sequence_length', 1),
-        'n_snapshots': {
-            'train': len(train_data_list),
-            'val': len(val_data_list),
-            'test': len(test_data_list)
-        }
+        'processing_config': processing_config
     }
-
-
-def compute_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, 
-                   valid_mask: torch.Tensor = None) -> Dict[str, float]:
-    """
-    Compute evaluation metrics.
-    
-    Args:
-        y_true: True values [n_samples, n_targets]
-        y_pred: Predicted values [n_samples, n_targets]
-        valid_mask: Mask for valid predictions [n_samples]
-        
-    Returns:
-        Dictionary of metrics
-    """
-    # Apply valid mask if provided
-    if valid_mask is not None:
-        y_true = y_true[valid_mask]
-        y_pred = y_pred[valid_mask]
-    
-    # Convert to numpy for sklearn metrics
-    y_true_np = y_true.cpu().numpy()
-    y_pred_np = y_pred.cpu().numpy()
-    
-    # Handle multi-target case
-    if y_true_np.ndim > 1 and y_true_np.shape[1] > 1:
-        # Average metrics across targets
-        mse_scores = []
-        mae_scores = []
-        r2_scores = []
-        
-        for i in range(y_true_np.shape[1]):
-            mse_scores.append(mean_squared_error(y_true_np[:, i], y_pred_np[:, i]))
-            mae_scores.append(mean_absolute_error(y_true_np[:, i], y_pred_np[:, i]))
-            r2_scores.append(r2_score(y_true_np[:, i], y_pred_np[:, i]))
-        
-        mse = np.mean(mse_scores)
-        mae = np.mean(mae_scores)
-        r2 = np.mean(r2_scores)
-    else:
-        # Single target
-        if y_true_np.ndim > 1:
-            y_true_np = y_true_np.flatten()
-            y_pred_np = y_pred_np.flatten()
-            
-        mse = mean_squared_error(y_true_np, y_pred_np)
-        mae = mean_absolute_error(y_true_np, y_pred_np)
-        r2 = r2_score(y_true_np, y_pred_np)
-    
-    return {
-        'mse': mse,
-        'rmse': np.sqrt(mse),
-        'mae': mae,
-        'r2': r2
-    }
-
-
-def train_temporal_gnn(
-    model: torch.nn.Module,
-    train_data_list: List[Data],
-    val_data_list: List[Data],
-    device: torch.device,
-    config: Dict[str, Any]
-) -> Tuple[torch.nn.Module, Dict[str, List[float]]]:
-    """
-    Train GNN model on temporal snapshots.
-    
-    Args:
-        model: GNN model to train
-        train_data_list: List of training snapshots
-        val_data_list: List of validation snapshots
-        device: Device to train on
-        config: Training configuration
-        
-    Returns:
-        Tuple of (trained_model, training_history)
-    """
-    print("Training GNN on temporal snapshots...")
-    
-    # Extract parameters
-    epochs = config['fit_params']['epochs']
-    learning_rate = config['training_params']['learning_rate']
-    weight_decay = config['training_params']['weight_decay']
-    patience = config['fit_params']['early_stopping_patience']
-    
-    # Setup optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=patience//2, verbose=True
-    )
-    
-    # Loss function
-    criterion = torch.nn.MSELoss()
-    
-    # Training history
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_metrics': [],
-        'val_metrics': []
-    }
-    
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
-    model.to(device)
-    
-    # Main epoch progress bar
-    epoch_pbar = tqdm(range(epochs), desc="Training Progress")
-    
-    for epoch in epoch_pbar:
-        # Training phase
-        model.train()
-        train_losses = []
-        train_predictions = []
-        train_targets = []
-        train_masks = []
-        
-        # Shuffle training snapshots
-        train_indices = torch.randperm(len(train_data_list))
-        
-        # Training snapshots progress bar
-        for idx in tqdm(train_indices, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False):
-            data = train_data_list[idx].to(device)
-            
-            optimizer.zero_grad()
-            out = model(data)
-            
-            # Apply valid mask if available
-            if hasattr(data, 'valid_mask'):
-                valid_mask = data.valid_mask
-                loss = criterion(out[valid_mask], data.y[valid_mask])
-                train_predictions.append(out[valid_mask].detach())
-                train_targets.append(data.y[valid_mask])
-                train_masks.append(valid_mask.cpu())
-            else:
-                loss = criterion(out, data.y)
-                train_predictions.append(out.detach())
-                train_targets.append(data.y)
-                train_masks.append(torch.ones(len(data.y), dtype=torch.bool))
-            
-            loss.backward()
-            optimizer.step()
-            train_losses.append(loss.item())
-        
-        # Validation phase
-        model.eval()
-        val_losses = []
-        val_predictions = []
-        val_targets = []
-        val_masks = []
-        
-        with torch.no_grad():
-            for data in val_data_list:
-                data = data.to(device)
-                out = model(data)
-                
-                if hasattr(data, 'valid_mask'):
-                    valid_mask = data.valid_mask
-                    loss = criterion(out[valid_mask], data.y[valid_mask])
-                    val_predictions.append(out[valid_mask].cpu())
-                    val_targets.append(data.y[valid_mask].cpu())
-                    val_masks.append(valid_mask.cpu())
-                else:
-                    loss = criterion(out, data.y)
-                    val_predictions.append(out.cpu())
-                    val_targets.append(data.y.cpu())
-                    val_masks.append(torch.ones(len(data.y), dtype=torch.bool))
-                
-                val_losses.append(loss.item())
-        
-        # Compute epoch metrics
-        avg_train_loss = np.mean(train_losses)
-        avg_val_loss = np.mean(val_losses)
-        
-        # Concatenate predictions for metrics
-        all_train_pred = torch.cat(train_predictions, dim=0)
-        all_train_true = torch.cat(train_targets, dim=0)
-        all_val_pred = torch.cat(val_predictions, dim=0)
-        all_val_true = torch.cat(val_targets, dim=0)
-        
-        train_metrics = compute_metrics(all_train_true, all_train_pred)
-        val_metrics = compute_metrics(all_val_true, all_val_pred)
-        
-        # Update history
-        history['train_loss'].append(avg_train_loss)
-        history['val_loss'].append(avg_val_loss)
-        history['train_metrics'].append(train_metrics)
-        history['val_metrics'].append(val_metrics)
-        
-        # Update epoch progress bar with metrics
-        epoch_pbar.set_description(
-            f"TL:{avg_train_loss:.4f} VL:{avg_val_loss:.4f} "
-            f"TR²:{train_metrics['r2']:.3f} VR²:{val_metrics['r2']:.3f}"
-        )
-        
-        # Learning rate scheduling
-        scheduler.step(avg_val_loss)
-        
-        # Print progress
-        if (epoch + 1) % config['fit_params'].get('log_frequency', 10) == 0:
-            print(f"\nEpoch {epoch+1:3d}: "
-                  f"Train Loss={avg_train_loss:.4f}, "
-                  f"Val Loss={avg_val_loss:.4f}, "
-                  f"Train R²={train_metrics['r2']:.4f}, "
-                  f"Val R²={val_metrics['r2']:.4f}")
-        
-        # Early stopping
-        if avg_val_loss < best_val_loss - config['fit_params'].get('min_improvement', 0.001):
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # Save best model state
-            best_model_state = model.state_dict().copy()
-        else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"\nEarly stopping triggered after {epoch+1} epochs")
-            # Restore best model
-            model.load_state_dict(best_model_state)
-            break
-    
-    epoch_pbar.close()
-    return model, history
-
-
-def evaluate_temporal_gnn(
-    model: torch.nn.Module,
-    data_list: List[Data],
-    device: torch.device
-) -> Dict[str, float]:
-    """
-    Evaluate GNN model on temporal snapshots.
-    
-    Args:
-        model: Trained GNN model
-        data_list: List of data snapshots
-        device: Device to evaluate on
-        
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    model.eval()
-    all_predictions = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for data in data_list:
-            data = data.to(device)
-            out = model(data)
-            
-            if hasattr(data, 'valid_mask'):
-                valid_mask = data.valid_mask
-                all_predictions.append(out[valid_mask].cpu())
-                all_targets.append(data.y[valid_mask].cpu())
-            else:
-                all_predictions.append(out.cpu())
-                all_targets.append(data.y.cpu())
-    
-    # Concatenate all predictions
-    all_pred = torch.cat(all_predictions, dim=0)
-    all_true = torch.cat(all_targets, dim=0)
-    
-    return compute_metrics(all_true, all_pred)
 
 
 def get_model_configs() -> Dict[str, Dict[str, Any]]:
@@ -390,7 +86,7 @@ def get_model_configs() -> Dict[str, Dict[str, Any]]:
     base_config = {
         'trainer_params': {
             'device': 'auto',
-            'save_dir': 'experiments/gnn_temporal'
+            'save_dir': 'experiments/gnn'
         },
         'training_params': {
             'optimizer_name': 'adam',
@@ -403,9 +99,7 @@ def get_model_configs() -> Dict[str, Dict[str, Any]]:
             'epochs': 100,
             'early_stopping_patience': 15,
             'save_best_model': True,
-            'verbose': True,
-            'log_frequency': 10,
-            'min_improvement': 0.001
+            'verbose': True
         }
     }
     
@@ -485,7 +179,7 @@ def run_single_experiment(
     experiment_name: str = None
 ) -> Dict[str, Any]:
     """
-    Run a single GNN training experiment with temporal snapshots.
+    Run a single GNN training experiment.
     
     Args:
         model_type: Type of GNN model
@@ -500,38 +194,16 @@ def run_single_experiment(
     print(f"Training {model_type.upper()} Model")
     print(f"{'='*60}")
     
-    # Setup device
-    if config['trainer_params']['device'] == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    else:
-        device = torch.device(config['trainer_params']['device'])
-    
-    print(f"Using device: {device}")
-    
-    # Print data info
+    # print data info
     print(f"Dataset Information:")
-    if data['data_format'] == 'temporal_snapshots':
-        print(f"  Train snapshots: {data['n_snapshots']['train']}")
-        print(f"  Val snapshots: {data['n_snapshots']['val']}")
-        print(f"  Test snapshots: {data['n_snapshots']['test']}")
-        print(f"  Sequence length: {data['sequence_length']}")
-    else:
-        print(f"  Train nodes: {data['train_data'].x.shape[0]}")
-        print(f"  Val nodes: {data['val_data'].x.shape[0]}")
-        print(f"  Test nodes: {data['test_data'].x.shape[0]}")
-    
+    print(f"  Train nodes: {data['train_data'].x.shape[0]}")
+    print(f"  Val nodes: {data['val_data'].x.shape[0]}")
+    print(f"  Test nodes: {data['test_data'].x.shape[0]}")
     print(f"  Features: {data['n_features']}")
     print(f"  Targets: {data['n_targets']}")
     print(f"  Graph edges: {data['train_data'].edge_index.shape[1]}")
-    print(f"  Data format: {data['data_format']}")
     
-    # Check for data leakage fix
-    if data['processing_config'].get('leakage_fixed', False):
-        print(f"  ✅ Data leakage: FIXED")
-    else:
-        print(f"  ⚠️  Data leakage: NOT FIXED (legacy data)")
-    
-    # Create and print model summary
+    # create and print model summary
     model = create_gnn_model(
         model_type=model_type,
         num_features=data['n_features'],
@@ -542,55 +214,23 @@ def run_single_experiment(
     print(f"\nModel Summary:")
     print_model_summary(model, (data['train_data'].x.shape[0], data['n_features']))
     
-    # Train model using temporal approach
-    print(f"\nStarting training...")
-    trained_model, history = train_temporal_gnn(
-        model=model,
-        train_data_list=data['train_data_list'],
-        val_data_list=data['val_data_list'],
-        device=device,
-        config=config
+    # train model
+    trained_model, results = train_gnn_experiment(
+        model_type=model_type,
+        train_data=data['train_data'],
+        val_data=data['val_data'],
+        test_data=data['test_data'],
+        config=config,
+        experiment_name=experiment_name
     )
     
-    # Evaluate on test set
-    print(f"\nEvaluating on test set...")
-    test_metrics = evaluate_temporal_gnn(
-        model=trained_model,
-        data_list=data['test_data_list'],
-        device=device
-    )
-    
-    # Add test prefix to metrics
-    test_metrics_prefixed = {f"test_{k}": v for k, v in test_metrics.items()}
-    test_metrics_prefixed['test_loss'] = test_metrics['mse']  # For compatibility
-    
-    # Print results
+    # print results
     print(f"\nFinal Results:")
+    test_metrics = results['test_metrics']
     for metric, value in test_metrics.items():
         print(f"  {metric}: {value:.4f}")
     
-    # Save model if requested
-    if config['fit_params'].get('save_best_model', False):
-        save_dir = Path(config['trainer_params']['save_dir'])
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
-        model_path = save_dir / f"{experiment_name or model_type}_best_model.pt"
-        torch.save({
-            'model_state_dict': trained_model.state_dict(),
-            'model_config': config['model_params'],
-            'test_metrics': test_metrics,
-            'data_format': data['data_format']
-        }, model_path)
-        print(f"  Model saved to: {model_path}")
-    
-    return {
-        'model': trained_model,
-        'test_metrics': test_metrics_prefixed,
-        'training_history': history,
-        'experiment_name': experiment_name or model_type,
-        'config': config,
-        'data_format': data['data_format']
-    }
+    return results
 
 
 def run_model_comparison(
@@ -618,9 +258,6 @@ def run_model_comparison(
     print(f"\n{'='*80}")
     print(f"RUNNING MODEL COMPARISON")
     print(f"Models: {', '.join(models_to_compare)}")
-    print(f"Data format: {data['data_format']}")
-    if data['data_format'] == 'temporal_snapshots':
-        print(f"Total training snapshots: {data['n_snapshots']['train']}")
     print(f"{'='*80}")
     
     for model_type in models_to_compare:
@@ -640,55 +277,51 @@ def run_model_comparison(
             
         except Exception as e:
             print(f"Error training {model_type}: {str(e)}")
-            import traceback
-            traceback.print_exc()
             continue
     
-    # Create comparison summary
+    # create comparison summary
     if all_results:
         print(f"\n{'='*80}")
         print(f"MODEL COMPARISON SUMMARY")
         print(f"{'='*80}")
         
-        # Create comparison table
+        # create comparison table
         comparison_data = []
         for model_type, results in all_results.items():
             metrics = results['test_metrics']
             comparison_data.append({
                 'Model': model_type.upper(),
                 'Test Loss': f"{metrics.get('test_loss', float('nan')):.4f}",
-                'RMSE': f"{metrics.get('test_rmse', float('nan')):.4f}",
-                'MAE': f"{metrics.get('test_mae', float('nan')):.4f}",
-                'R²': f"{metrics.get('test_r2', float('nan')):.4f}",
-                'Data Format': results['data_format']
+                'RMSE': f"{metrics.get('rmse', float('nan')):.4f}",
+                'MAE': f"{metrics.get('mae', float('nan')):.4f}",
+                'R²': f"{metrics.get('r2', float('nan')):.4f}"
             })
         
         df_comparison = pd.DataFrame(comparison_data)
         print(df_comparison.to_string(index=False))
         
-        # Find best model
+        # find best model
         best_model = min(all_results.items(), key=lambda x: x[1]['test_metrics'].get('test_loss', float('inf')))
         print(f"\nBest Model: {best_model[0].upper()} (Test Loss: {best_model[1]['test_metrics']['test_loss']:.4f})")
         
-        # Save results
+        # save results
         if save_results:
-            results_dir = Path('experiments/gnn_temporal/comparison_results')
+            results_dir = Path('experiments/gnn/comparison_results')
             results_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save detailed results
+            # save detailed results
             with open(results_dir / 'detailed_results.json', 'w') as f:
-                # Convert any numpy arrays to lists for JSON serialization
+                # convert any numpy arrays to lists for JSON serialization
                 serializable_results = {}
                 for model_type, results in all_results.items():
                     serializable_results[model_type] = {
                         'test_metrics': results['test_metrics'],
                         'experiment_name': results['experiment_name'],
-                        'config': results['config'],
-                        'data_format': results['data_format']
+                        'config': results['config']
                     }
                 json.dump(serializable_results, f, indent=2)
             
-            # Save comparison table
+            # save comparison table
             df_comparison.to_csv(results_dir / 'model_comparison.csv', index=False)
             
             print(f"\nResults saved to {results_dir}")
@@ -737,6 +370,13 @@ def main():
                         help='Learning rate scheduler')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (cuda/cpu/auto)')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size for mini-batch training (None for full-batch)')
+    parser.add_argument('--num_neighbors', type=str, default='15,10,5',
+                        help='Number of neighbors to sample per layer (comma-separated)')
+    parser.add_argument('--use_neighbor_sampling', type=str, default='auto',
+                        choices=['auto', 'true', 'false'],
+                        help='Whether to use neighbor sampling')
     parser.add_argument('--log_frequency', type=int, default=10,
                         help='How often to log progress (every N epochs)')
     parser.add_argument('--min_improvement', type=float, default=0.001,
@@ -753,13 +393,6 @@ def main():
     try:
         data = load_gnn_data(args.data_dir)
         print(f"Data loaded successfully from {args.data_dir}")
-        print(f"Data format: {data['data_format']}")
-        
-        if data['processing_config'].get('leakage_fixed', False):
-            print("✅ Using data WITHOUT leakage - results will be realistic!")
-        else:
-            print("⚠️  Using data WITH potential leakage - results may be overly optimistic!")
-            
     except Exception as e:
         print(f"Error loading data: {str(e)}")
         print("Make sure you have run the data preparation script first:")
@@ -799,6 +432,21 @@ def main():
         
         # trainer params
         configs[model_type]['trainer_params']['device'] = args.device
+        if args.batch_size is not None:
+            configs[model_type]['trainer_params']['batch_size'] = args.batch_size
+            
+        # neighbor sampling params
+        if args.num_neighbors:
+            try:
+                num_neighbors = [int(x.strip()) for x in args.num_neighbors.split(',')]
+                configs[model_type]['trainer_params']['num_neighbors'] = num_neighbors
+            except ValueError:
+                print(f"Warning: Invalid num_neighbors format '{args.num_neighbors}', using default")
+        
+        # sampling strategy
+        if args.use_neighbor_sampling != 'auto':
+            use_sampling = args.use_neighbor_sampling.lower() == 'true'
+            configs[model_type]['trainer_params']['use_neighbor_sampling'] = use_sampling
     
     if args.model == 'all':
         # run comparison
@@ -821,15 +469,14 @@ def main():
         )
         
         if args.save_results:
-            results_dir = Path('experiments/gnn_temporal/single_results')
+            results_dir = Path('experiments/gnn/single_results')
             results_dir.mkdir(parents=True, exist_ok=True)
             
             with open(results_dir / f'{args.model}_results.json', 'w') as f:
                 serializable_results = {
                     'test_metrics': results['test_metrics'],
                     'experiment_name': results['experiment_name'],
-                    'config': results['config'],
-                    'data_format': results['data_format']
+                    'config': results['config']
                 }
                 json.dump(serializable_results, f, indent=2)
             
