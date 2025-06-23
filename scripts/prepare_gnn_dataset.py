@@ -270,6 +270,19 @@ def prepare_temporal_gnn_dataset_vectorized(
                 if cluster_id < n_clusters:
                     target_data_by_cluster[cluster_id] = df_np[row_idx, target_col_indices]
             
+            # DEBUG: Check target data
+            if len(batch_snapshots) == 0:  # Only debug first snapshot in first batch
+                print(f"DEBUG: Snapshot {snapshot_idx}")
+                print(f"  Current timestamp: {current_timestamp}")
+                print(f"  Next timestamp: {next_timestamp}")
+                print(f"  Target rows found: {len(target_rows)}")
+                print(f"  Clusters with target data: {len(target_data_by_cluster)}")
+                print(f"  Sample clusters: {list(target_data_by_cluster.keys())[:5]}")
+                if target_data_by_cluster:
+                    sample_cluster = list(target_data_by_cluster.keys())[0]
+                    sample_targets = target_data_by_cluster[sample_cluster]
+                    print(f"  Sample target values for cluster {sample_cluster}: {sample_targets}")
+            
             # Fill targets
             for cluster_id, target_values in target_data_by_cluster.items():
                 node_targets[cluster_id] = target_values
@@ -305,6 +318,18 @@ def prepare_temporal_gnn_dataset_vectorized(
                     node_features[cluster_id] = cluster_features
                     # Mark as valid if we have target data for this cluster
                     valid_mask[cluster_id] = cluster_id in target_data_by_cluster
+            
+            # DEBUG: Check valid mask
+            if len(batch_snapshots) == 0:  # Only debug first snapshot in first batch
+                valid_count = valid_mask.sum()
+                print(f"  Valid mask count: {valid_count}/{n_clusters}")
+                if valid_count > 0:
+                    valid_clusters = np.where(valid_mask)[0]
+                    print(f"  Valid clusters: {valid_clusters[:10]}")
+                else:
+                    print(f"  No valid clusters found!")
+                    print(f"  Expected n_clusters: {n_clusters}")
+                    print(f"  Max cluster_id in data: {max(target_data_by_cluster.keys()) if target_data_by_cluster else 'none'}")
             
             # Create data object only if we have some valid nodes
             if valid_mask.any():
