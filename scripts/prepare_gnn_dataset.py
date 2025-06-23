@@ -169,9 +169,7 @@ def create_temporal_snapshot_data(
     timestamp: pd.Timestamp,
     edge_index: torch.Tensor,
     n_clusters: int,
-    sequence_length: int = 24,
-    allow_insufficient_data: bool = False,
-    min_sequence_length: Optional[int] = None
+    sequence_length: int = 24
 ) -> Optional[Data]:
     """
     Create a single temporal snapshot for GNN training.
@@ -214,47 +212,13 @@ def create_temporal_snapshot_data(
         cluster_hist = historical_data.filter(pl.col('cluster_id') == cluster_id).sort('ts_start')
         cluster_target = target_data.filter(pl.col('cluster_id') == cluster_id)
         
-        # Check minimum requirements
-        min_required = min_sequence_length if min_sequence_length is not None else sequence_length
-        
-        if cluster_target.height == 0:
-            # No target data - include with zeros if allowed, otherwise skip
-            if allow_insufficient_data:
-                node_features.append(np.zeros(len(feature_cols) * sequence_length))
-                node_targets.append(np.zeros(len(target_cols)))
-                valid_nodes.append(0)
-            else:
-                # Use zeros to maintain cluster index consistency
-                node_features.append(np.zeros(len(feature_cols) * sequence_length))
-                node_targets.append(np.zeros(len(target_cols)))
-                valid_nodes.append(0)
-                
-        elif cluster_hist.height < min_required:
-            # Insufficient historical data
-            if allow_insufficient_data:
-                # Use all available data, pad with zeros if needed
-                available_data = cluster_hist.select(feature_cols).to_numpy()
-                if available_data.shape[0] < sequence_length:
-                    # Pad with zeros at the beginning
-                    padding_needed = sequence_length - available_data.shape[0]
-                    zero_padding = np.zeros((padding_needed, available_data.shape[1]))
-                    padded_data = np.vstack([zero_padding, available_data])
-                else:
-                    padded_data = available_data
-                
-                features = padded_data.flatten()
-                targets = cluster_target.select(target_cols).to_numpy().flatten()
-                
-                node_features.append(features)
-                node_targets.append(targets)
-                valid_nodes.append(1 if cluster_hist.height > 0 else 0)
-            else:
-                # Use zeros to maintain cluster index consistency
-                node_features.append(np.zeros(len(feature_cols) * sequence_length))
-                node_targets.append(np.zeros(len(target_cols)))
-                valid_nodes.append(0)
+        if cluster_hist.height < sequence_length or cluster_target.height == 0:
+            # Insufficient data for this cluster - use zeros
+            node_features.append(np.zeros(len(feature_cols) * sequence_length))
+            node_targets.append(np.zeros(len(target_cols)))
+            valid_nodes.append(0)  # Mark as invalid
         else:
-            # Sufficient data - normal processing
+            # Get last sequence_length timesteps
             recent_data = cluster_hist.tail(sequence_length)
             
             # Extract features and flatten temporal dimension
@@ -289,9 +253,7 @@ def prepare_temporal_gnn_dataset(
     edge_index: torch.Tensor,
     n_clusters: int,
     sequence_length: int = 24,
-    stride: int = 1,
-    allow_insufficient_data: bool = False,
-    min_sequence_length: Optional[int] = None
+    stride: int = 1
 ) -> List[Data]:
     """
     Prepare temporal GNN dataset with proper time-based splits.
@@ -316,26 +278,17 @@ def prepare_temporal_gnn_dataset(
     # Get unique timestamps
     timestamps = sorted(df['ts_start'].unique().to_list())
     
-    # Check minimum requirements
-    min_required = min_sequence_length if min_sequence_length is not None else sequence_length
-    min_timestamps_needed = min_required + 1
-    
-    if len(timestamps) < min_timestamps_needed and not allow_insufficient_data:
-        print(f"Warning: Not enough timestamps ({len(timestamps)}) for minimum sequence length {min_required}")
+    # Need at least sequence_length + 1 timestamps
+    if len(timestamps) < sequence_length + 1:
+        print(f"Warning: Not enough timestamps ({len(timestamps)}) for sequence length {sequence_length}")
         return []
     
     # Create snapshots
     data_list = []
     
-    # Adjust start index based on requirements
-    if allow_insufficient_data:
-        # Start from first timestamp that has any data
-        start_idx = max(1, min_required)  # At least 1 to have targets
-    else:
-        # Start from sequence_length to ensure we have enough history
-        start_idx = sequence_length
-    
+    # Start from sequence_length to ensure we have enough history
     # End before last timestamp to ensure we have targets
+    start_idx = sequence_length
     end_idx = len(timestamps) - 1
     
     for i in tqdm(range(start_idx, end_idx, stride), desc="Creating temporal snapshots"):
@@ -348,9 +301,7 @@ def prepare_temporal_gnn_dataset(
             timestamp=current_timestamp,
             edge_index=edge_index,
             n_clusters=n_clusters,
-            sequence_length=sequence_length,
-            allow_insufficient_data=allow_insufficient_data,
-            min_sequence_length=min_sequence_length
+            sequence_length=sequence_length
         )
         
         if snapshot is not None:
@@ -377,10 +328,6 @@ def main():
                         help='Target variable(s) to predict')
     parser.add_argument('--stride', type=int, default=1,
                         help='Stride for temporal snapshots (1 = every timestep, 2 = every other, etc.)')
-    parser.add_argument('--allow_insufficient_data', action='store_true',
-                        help='Keep clusters/snapshots even with insufficient historical data (fills with zeros)')
-    parser.add_argument('--min_sequence_length', type=int, default=None,
-                        help='Minimum sequence length required (default: no minimum, use all available)')
     
     args = parser.parse_args()
     
@@ -507,9 +454,7 @@ def main():
             edge_index=edge_index,
             n_clusters=n_clusters_or_stations,
             sequence_length=args.sequence_length,
-            stride=args.stride,
-            allow_insufficient_data=args.allow_insufficient_data,
-            min_sequence_length=args.min_sequence_length
+            stride=args.stride
         )
         
         if not data_list:
@@ -587,12 +532,9 @@ def main():
     print(f"  Total size: {total_size_mb:.1f} MB")
     
     print(f"\nIMPORTANT: This version fixes the data leakage issue!")
-    print(f"- Features: Only historical data (t-{args.sequence_length-1} to t)")
+    print(f"- Features: Only historical data (t-23 to t)")
     print(f"- Targets: Next timestep values (t+1)")
     print(f"- No aggregation across all time periods")
-    print(f"- Data filtering: {'Permissive (keeps insufficient data)' if args.allow_insufficient_data else 'Strict (requires sufficient history)'}")
-    if args.min_sequence_length:
-        print(f"- Minimum sequence: {args.min_sequence_length} timesteps required")
     print(f"\nTo train a GNN model, run:")
     print(f"python scripts/train_gnn.py --data_dir {output_dir}")
 
