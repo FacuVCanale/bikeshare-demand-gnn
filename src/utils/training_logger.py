@@ -114,7 +114,7 @@ class TrainingLogger:
         metrics_order: List[str] = None
     ):
         """
-        Log training progress for a single epoch.
+        Log training progress for a single epoch in a compact single line.
         
         Args:
             epoch: Current epoch number (1-indexed)
@@ -137,11 +137,11 @@ class TrainingLogger:
         for metric in metrics_order:
             value = train_metrics.get(metric, 0.0)
             if metric == 'loss':
-                train_values.append(f"{value:7.4f}")
+                train_values.append(f"{value:6.4f}")
             elif metric == 'r2':
-                train_values.append(f"{value:7.3f}")
+                train_values.append(f"{value:6.3f}")
             else:
-                train_values.append(f"{value:7.3f}")
+                train_values.append(f"{value:6.3f}")
         
         # format validation metrics
         val_values = []
@@ -149,33 +149,61 @@ class TrainingLogger:
             for metric in metrics_order:
                 value = val_metrics.get(metric, 0.0)
                 if metric == 'loss':
-                    val_values.append(f"{value:7.4f}")
+                    val_values.append(f"{value:6.4f}")
                 elif metric == 'r2':
-                    val_values.append(f"{value:7.3f}")
+                    val_values.append(f"{value:6.3f}")
                 else:
-                    val_values.append(f"{value:7.3f}")
+                    val_values.append(f"{value:6.3f}")
         
-        # format status
-        status_str = ""
+        # collect additional metrics for compact display
+        extra_train = []
+        for metric, value in train_metrics.items():
+            if metric not in metrics_order:
+                if metric == 'rmse':
+                    extra_train.append(f"RMSE:{value:.3f}")
+                elif metric == 'mape':
+                    extra_train.append(f"MAPE:{value:.1f}%")
+        
+        extra_val = []
+        if val_metrics:
+            for metric, value in val_metrics.items():
+                if metric not in metrics_order:
+                    if metric == 'rmse':
+                        extra_val.append(f"RMSE:{value:.3f}")
+                    elif metric == 'mape':
+                        extra_val.append(f"MAPE:{value:.1f}%")
+        
+        # format status with learning rate and best info
+        status_parts = []
         if status_info:
             if status_info.get('is_best', False):
                 improvement = status_info.get('improvement', 0.0)
-                status_str = f"NEW BEST -{improvement:.4f}"
+                status_parts.append(f"BEST↓{improvement:.4f}")
             elif status_info.get('epochs_since_best', -1) >= 0:
                 epochs_since = status_info.get('epochs_since_best')
-                status_str = f"{epochs_since} epochs since best"
-            else:
-                lr = status_info.get('learning_rate', 0.0)
-                status_str = f"LR: {lr:.1e}"
-        
-        # build log line
-        log_line = f"{epoch:6d} {progress_str:>10} "
-        log_line += f"{' '.join(train_values):>30} "
-        
-        if val_metrics is not None:
-            log_line += f"{' '.join(val_values):>30} "
+                status_parts.append(f"wait:{epochs_since}")
             
-        log_line += f"{status_str:>20} {epoch_time:8.2f}"
+            lr = status_info.get('learning_rate', 0.0)
+            status_parts.append(f"lr:{lr:.1e}")
+        
+        # build compact log line
+        log_line = f"{epoch:4d}|{progress_str:>5}| "
+        
+        # train metrics
+        log_line += f"T:{' '.join(train_values)}"
+        if extra_train:
+            log_line += f"({','.join(extra_train)})"
+        
+        # validation metrics
+        if val_metrics is not None:
+            log_line += f" V:{' '.join(val_values)}"
+            if extra_val:
+                log_line += f"({','.join(extra_val)})"
+        
+        # status and timing
+        if status_parts:
+            log_line += f" [{'/'.join(status_parts)}]"
+        log_line += f" {epoch_time:5.2f}s"
         
         self.logger.info(log_line)
         
