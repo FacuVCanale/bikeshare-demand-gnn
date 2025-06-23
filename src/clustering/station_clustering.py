@@ -12,10 +12,13 @@ import polars as pl
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 from typing import Tuple, Dict, List, Optional
 import logging
 from pathlib import Path
 import pickle
+import matplotlib.pyplot as plt
+from kneed import KneeLocator
 
 
 class StationClusterer:
@@ -146,6 +149,148 @@ class StationClusterer:
                 
         self.logger.info("✓ KMeans clustering completed successfully")
         return self
+        
+    def find_optimal_k(self, stations: pl.DataFrame, min_k: int = 2, max_k: int = 250, 
+                      sample_size: int = 10000, plot: bool = True) -> Tuple[int, int, Dict]:
+        """Find optimal number of clusters using Elbow method and Silhouette analysis.
+        
+        Args:
+            stations: DataFrame with columns ['station_id', 'lat', 'lon']
+            min_k: Minimum number of clusters to test
+            max_k: Maximum number of clusters to test
+            sample_size: Sample size for silhouette score calculation (for performance)
+            plot: Whether to display the analysis plots
+            
+        Returns:
+            Tuple of (k_elbow, k_silhouette, analysis_results)
+        """
+        self.logger.info(f"Finding optimal K for clustering (range: {min_k}-{max_k})...")
+        
+        # validate input
+        required_cols = ['station_id', 'lat', 'lon']
+        missing_cols = [col for col in required_cols if col not in stations.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # extract and prepare coordinates
+        coords = stations.select(['lat', 'lon']).to_numpy()
+        self.logger.info(f"  -> Analyzing {coords.shape[0]} stations")
+        
+        # standardize coordinates
+        scaler = StandardScaler()
+        X = scaler.fit_transform(coords)
+        
+        # prepare K range
+        K_range = range(min_k, max_k + 1)
+        inertias = []
+        sil_scores = []
+        
+        self.logger.info(f"  -> Testing {len(K_range)} different K values...")
+        
+        # perform K analysis
+        for i, k in enumerate(K_range):
+            if i % 25 == 0:  # progress logging
+                self.logger.info(f"     Progress: {i+1}/{len(K_range)} (K={k})")
+            
+            # fit KMeans
+            km = KMeans(n_clusters=k, n_init="auto", random_state=self.random_state)
+            labels = km.fit_predict(X)
+            
+            # calculate metrics
+            inertias.append(km.inertia_)
+            
+            # calculate silhouette score (with sampling for performance)
+            if len(X) > sample_size:
+                sil_score = silhouette_score(X, labels, sample_size=sample_size, random_state=self.random_state)
+            else:
+                sil_score = silhouette_score(X, labels)
+            sil_scores.append(sil_score)
+        
+        # find optimal K values
+        # 1. Elbow method
+        kneedle = KneeLocator(K_range, inertias, curve="convex", direction="decreasing")
+        k_elbow = kneedle.knee or min_k  # fallback if no clear elbow
+        
+        # 2. Silhouette method
+        k_sil = int(np.argmax(sil_scores) + min_k)
+        
+        self.logger.info(f"  -> Optimal K (Elbow method): {k_elbow}")
+        self.logger.info(f"  -> Optimal K (Silhouette): {k_sil}")
+        self.logger.info(f"  -> Max Silhouette score: {max(sil_scores):.4f}")
+        
+        # prepare results
+        analysis_results = {
+            'K_range': list(K_range),
+            'inertias': inertias,
+            'silhouette_scores': sil_scores,
+            'k_elbow': k_elbow,
+            'k_silhouette': k_sil,
+            'max_silhouette': max(sil_scores),
+            'elbow_inertia': inertias[k_elbow - min_k] if k_elbow else None
+        }
+        
+        if plot:
+            self._plot_k_analysis(K_range, inertias, sil_scores, k_elbow, k_sil)
+        
+        self.logger.info("✓ Optimal K analysis completed successfully")
+        return k_elbow, k_sil, analysis_results
+    
+    def _plot_k_analysis(self, K_range: range, inertias: List[float], 
+                        sil_scores: List[float], k_elbow: int, k_sil: int):
+        """Create visualization plots for K analysis.
+        
+        Args:
+            K_range: Range of K values tested
+            inertias: List of inertia values
+            sil_scores: List of silhouette scores
+            k_elbow: Optimal K from elbow method
+            k_sil: Optimal K from silhouette method
+        """
+        # normalize metrics for combined plot
+        inertias_arr = np.array(inertias)
+        sil_scores_arr = np.array(sil_scores)
+        inertia_norm = (inertias_arr - np.min(inertias_arr)) / (np.max(inertias_arr) - np.min(inertias_arr))
+        silhouette_norm = (sil_scores_arr - np.min(sil_scores_arr)) / (np.max(sil_scores_arr) - np.min(sil_scores_arr))
+        
+        # create plots
+        fig, ax = plt.subplots(1, 3, figsize=(18, 5))
+        fig.suptitle("Optimal K Analysis for Station Clustering", fontsize=16, fontweight="bold")
+        
+        # 1. Elbow method plot
+        ax[0].plot(K_range, inertias, "o-", color="royalblue", markersize=4)
+        ax[0].axvline(k_elbow, color="red", ls="--", label=f"Optimal K (Elbow): {k_elbow}")
+        ax[0].set_title("Elbow Method", fontweight="bold")
+        ax[0].set_xlabel("Number of Clusters (K)")
+        ax[0].set_ylabel("Within-cluster Sum of Squares (Inertia)")
+        ax[0].legend()
+        ax[0].grid(True, alpha=0.3)
+        
+        # 2. Silhouette score plot
+        ax[1].plot(K_range, sil_scores, "o", color="forestgreen", markersize=4)
+        ax[1].axvline(k_sil, color="red", ls="--", label=f"Optimal K (Silhouette): {k_sil}")
+        ax[1].set_title("Silhouette Score", fontweight="bold")
+        ax[1].set_xlabel("Number of Clusters (K)")
+        ax[1].set_ylabel("Average Silhouette Score")
+        ax[1].legend()
+        ax[1].grid(True, alpha=0.3)
+        
+        # 3. Combined analysis
+        ax3 = ax[2]
+        ax3.plot(K_range, inertia_norm, label="Normalized Inertia", color="blue")
+        ax3.set_ylabel("Normalized Inertia", color="blue")
+        ax3.tick_params(axis="y", labelcolor="blue")
+        
+        ax4 = ax3.twinx()
+        ax4.plot(K_range, silhouette_norm, label="Normalized Silhouette", color="green")
+        ax4.set_ylabel("Normalized Silhouette Score", color="green")
+        ax4.tick_params(axis="y", labelcolor="green")
+        
+        ax3.set_title("Combined Analysis", fontweight="bold")
+        ax3.set_xlabel("Number of Clusters (K)")
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
         
     def predict_cluster(self, stations: pl.DataFrame) -> pl.DataFrame:
         """Predict cluster assignments for stations.
