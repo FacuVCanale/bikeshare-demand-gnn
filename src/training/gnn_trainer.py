@@ -416,7 +416,7 @@ class GNNTrainer:
         
         # move data to device with memory monitoring
         try:
-        train_data = train_data.to(self.device)
+            train_data = train_data.to(self.device)
         except RuntimeError as e:
             if "out of memory" in str(e):
                 clear_gpu_memory()
@@ -436,13 +436,13 @@ class GNNTrainer:
                     use_reentrant=False
                 )
             else:
-        predictions = self.model(train_data)
+                predictions = self.model(train_data)
                 
-        targets = train_data.y
-        
-        # calculate loss
-        loss = self.criterion(predictions, targets)
-        
+            targets = train_data.y
+            
+            # calculate loss
+            loss = self.criterion(predictions, targets)
+            
         except RuntimeError as e:
             if "out of memory" in str(e):
                 memory_usage = get_memory_usage()
@@ -453,7 +453,7 @@ class GNNTrainer:
         
         # backward pass with memory monitoring
         try:
-        loss.backward()
+            loss.backward()
         except RuntimeError as e:
             if "out of memory" in str(e):
                 memory_usage = get_memory_usage()
@@ -514,16 +514,16 @@ class GNNTrainer:
         with torch.no_grad():
             try:
                 # move data to device with memory monitoring
-            val_data = val_data.to(self.device)
-            
-            # forward pass
-            predictions = self.model(val_data)
-            targets = val_data.y
-            
-            # calculate loss
-            loss = self.criterion(predictions, targets)
-            
-            total_loss += loss.item()
+                val_data = val_data.to(self.device)
+                
+                # forward pass
+                predictions = self.model(val_data)
+                targets = val_data.y
+                
+                # calculate loss
+                loss = self.criterion(predictions, targets)
+                
+                total_loss += loss.item()
                 # move to CPU to save GPU memory
                 all_predictions.append(predictions.cpu())
                 all_targets.append(targets.cpu())
