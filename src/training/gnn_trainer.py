@@ -417,7 +417,7 @@ class GNNTrainer:
                             x = self.model.activation(x)
                         else:
                             x = torch.relu(x)
-                        x = torch.dropout(x, p=getattr(self.model, 'dropout', 0.2), training=self.training)
+                        x = torch.nn.functional.dropout(x, p=getattr(self.model, 'dropout', 0.2), training=self.training)
             
             # apply final prediction layer if exists
             if hasattr(self.model, 'predictor'):
@@ -502,7 +502,9 @@ class GNNTrainer:
         checkpoint_frequency: int = 10,
         verbose: bool = True,
         train_mask: Optional[torch.Tensor] = None,
-        val_mask: Optional[torch.Tensor] = None
+        val_mask: Optional[torch.Tensor] = None,
+        log_frequency: int = 10,
+        min_improvement: float = 0.001
     ) -> Dict[str, Any]:
         """
         Train the GNN model.
@@ -518,6 +520,8 @@ class GNNTrainer:
             verbose: Whether to print progress
             train_mask: Mask for training nodes (for node-level tasks)
             val_mask: Mask for validation nodes (for node-level tasks)
+            log_frequency: How often to log progress (every N epochs)
+            min_improvement: Minimum improvement required to save best model
             
         Returns:
             Training history dictionary
@@ -550,10 +554,44 @@ class GNNTrainer:
         ) if val_loader is not None else None
         
         best_val_loss = float('inf')
+        last_model_save_epoch = -1
         start_time = time.time()
         
-        self.logger.info(f"Starting training for {epochs} epochs")
-        self.logger.info(f"Training strategy: {'Mini-batch' if isinstance(train_loader, NeighborLoader) else 'Full-batch'}")
+        # model parameter count
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        
+        self.logger.info("=" * 120)
+        self.logger.info(f"{'🚀 TRAINING CONFIGURATION':<30}")
+        self.logger.info("=" * 120)
+        self.logger.info(f"{'Model':<25}: {self.model.__class__.__name__} ({trainable_params:,} trainable parameters)")
+        self.logger.info(f"{'Training epochs':<25}: {epochs:,}")
+        self.logger.info(f"{'Strategy':<25}: {'Mini-batch' if isinstance(train_loader, NeighborLoader) else 'Full-batch'}")
+        if val_loader is not None:
+            self.logger.info(f"{'Early stopping':<25}: {early_stopping_patience} epochs patience, {min_improvement:.4f} min improvement")
+        self.logger.info(f"{'Logging frequency':<25}: every {log_frequency} epochs")
+        self.logger.info(f"{'Optimizer':<25}: {self.optimizer.__class__.__name__} (lr={self.optimizer.param_groups[0]['lr']:.1e})")
+        self.logger.info(f"{'Loss function':<25}: {self.criterion.__class__.__name__}")
+        if self.scheduler is not None:
+            self.logger.info(f"{'Scheduler':<25}: {self.scheduler.__class__.__name__}")
+        self.logger.info("=" * 120)
+        
+        # create header for training logs
+        header = f"{'EPOCH':>8} │ {'PROGRESS':>12} │ {'TRAIN':>32} │"
+        if val_loader is not None:
+            header += f" {'VALIDATION':>32} │"
+        header += f" {'STATUS':>25} │ {'TIME':>8}"
+        
+        self.logger.info(header)
+        self.logger.info("─" * len(header))
+        
+        subheader = f"{'':>8} │ {'[████████]':>12} │ {'Loss':>12} {'R²':>8} {'MAE':>8} │"
+        if val_loader is not None:
+            subheader += f" {'Loss':>12} {'R²':>8} {'MAE':>8} │"
+        subheader += f" {'Learning Rate':>25} │ {'(s)':>8}"
+        
+        self.logger.info(subheader)
+        self.logger.info("─" * len(header))
         
         for epoch in range(epochs):
             epoch_start = time.time()
@@ -568,6 +606,7 @@ class GNNTrainer:
                 val_loss, val_metrics = float('nan'), {}
             
             # update learning rate
+            current_lr = self.optimizer.param_groups[0]['lr']
             if self.scheduler is not None:
                 if isinstance(self.scheduler, ReduceLROnPlateau):
                     self.scheduler.step(val_loss if val_loader is not None else train_loss)
@@ -579,25 +618,89 @@ class GNNTrainer:
             self.history['val_loss'].append(val_loss)
             self.history['train_metrics'].append(train_metrics)
             self.history['val_metrics'].append(val_metrics)
-            self.history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
+            self.history['learning_rates'].append(current_lr)
             
-            # logging
+            # determine if this is the best model so far
+            is_best = False
+            improvement = 0.0
+            if save_best_model and val_loader is not None:
+                improvement = best_val_loss - val_loss
+                if improvement > min_improvement:
+                    best_val_loss = val_loss
+                    is_best = True
+                    last_model_save_epoch = epoch
+                    self.save_model('best_model.pt', silent=True)
+            
+            # enhanced logging
             epoch_time = time.time() - epoch_start
-            if verbose and (epoch + 1) % 5 == 0:
-                log_msg = f"Epoch {epoch+1:3d}/{epochs} | "
-                log_msg += f"Train Loss: {train_loss:.4f} | "
-                if val_loader is not None:
-                    log_msg += f"Val Loss: {val_loss:.4f} | "
-                log_msg += f"Train R²: {train_metrics.get('r2', 0):.4f} | "
-                if val_loader is not None:
-                    log_msg += f"Val R²: {val_metrics.get('r2', 0):.4f} | "
-                log_msg += f"Time: {epoch_time:.2f}s"
-                self.logger.info(log_msg)
+            should_log = verbose and ((epoch + 1) % log_frequency == 0 or is_best or epoch == 0 or epoch == epochs - 1)
             
-            # save best model
-            if save_best_model and val_loader is not None and val_loss < best_val_loss:
-                best_val_loss = val_loss
-                self.save_model('best_model.pt')
+            if should_log:
+                elapsed_time = time.time() - start_time
+                avg_epoch_time = elapsed_time / (epoch + 1)
+                eta = avg_epoch_time * (epochs - epoch - 1)
+                
+                # format progress bar
+                progress = (epoch + 1) / epochs
+                bar_length = 8
+                filled_length = int(bar_length * progress)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                progress_str = f"[{bar}] {progress*100:4.0f}%"
+                
+                # format train metrics
+                train_loss_str = f"{train_loss:8.4f}"
+                train_r2_str = f"{train_metrics.get('r2', 0):7.3f}"
+                train_mae_str = f"{train_metrics.get('mae', 0):7.3f}"
+                
+                # format validation metrics  
+                if val_loader is not None:
+                    val_loss_str = f"{val_loss:8.4f}"
+                    val_r2_str = f"{val_metrics.get('r2', 0):7.3f}"
+                    val_mae_str = f"{val_metrics.get('mae', 0):7.3f}"
+                
+                # format status
+                if is_best:
+                    status_str = f"🏆 NEW BEST (↓{improvement:.4f})"
+                elif val_loader is not None and last_model_save_epoch >= 0:
+                    epochs_since_best = epoch - last_model_save_epoch
+                    status_str = f"⏱️  {epochs_since_best:2d} epochs since best"
+                else:
+                    status_str = f"📈 LR: {current_lr:.1e}"
+                
+                # build main log line
+                log_line = f"{epoch+1:8d} │ {progress_str:>12} │ {train_loss_str} {train_r2_str} {train_mae_str} │"
+                
+                if val_loader is not None:
+                    log_line += f" {val_loss_str} {val_r2_str} {val_mae_str} │"
+                
+                log_line += f" {status_str:>25} │ {epoch_time:8.2f}"
+                
+                self.logger.info(log_line)
+                
+                # additional detailed metrics (less frequent)
+                if (epoch + 1) % (log_frequency * 3) == 0 or is_best:
+                    detail_metrics = []
+                    
+                    # train detailed metrics
+                    train_rmse = train_metrics.get('rmse', 0)
+                    train_mape = train_metrics.get('mape', 0)
+                    detail_metrics.append(f"TRAIN → RMSE: {train_rmse:.4f}, MAPE: {train_mape:.2f}%")
+                    
+                    # validation detailed metrics
+                    if val_loader is not None:
+                        val_rmse = val_metrics.get('rmse', 0)
+                        val_mape = val_metrics.get('mape', 0)
+                        detail_metrics.append(f"VAL → RMSE: {val_rmse:.4f}, MAPE: {val_mape:.2f}%")
+                    
+                    # learning rate and ETA
+                    eta_str = f"{eta/60:.0f}m" if eta > 60 else f"{eta:.0f}s"
+                    detail_metrics.append(f"LR: {current_lr:.1e}, ETA: {eta_str}")
+                    
+                    for detail in detail_metrics:
+                        self.logger.info(f"{'':>8} │ {'':>12} │ {detail:<65} │ {'':>25} │ {'':>8}")
+                    
+                    if detail_metrics:
+                        self.logger.info("─" * len(log_line))
             
             # save checkpoints
             if save_checkpoints and (epoch + 1) % checkpoint_frequency == 0:
@@ -605,20 +708,86 @@ class GNNTrainer:
             
             # early stopping
             if early_stopping is not None and early_stopping(val_loss, self.model):
-                self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                self.logger.info("=" * 120)
+                self.logger.info(f"🛑 EARLY STOPPING TRIGGERED AT EPOCH {epoch+1}")
+                self.logger.info(f"Best validation loss: {best_val_loss:.4f} (epoch {last_model_save_epoch + 1})")
+                self.logger.info("=" * 120)
                 break
         
         total_time = time.time() - start_time
-        self.logger.info(f"Training completed in {total_time:.2f} seconds")
+        total_epochs = len(self.history['train_loss'])
+        avg_time_per_epoch = total_time / max(total_epochs, 1)
         
-        # save final model, architecture, and history
+        # final training summary
+        self.logger.info("=" * 120)
+        self.logger.info(f"{'✅ TRAINING COMPLETED':<30}")
+        self.logger.info("=" * 120)
+        
+        # timing information
+        self.logger.info(f"{'Total duration':<25}: {total_time/60:.1f} minutes ({total_time:.1f} seconds)")
+        self.logger.info(f"{'Total epochs':<25}: {total_epochs:,}")
+        self.logger.info(f"{'Avg time per epoch':<25}: {avg_time_per_epoch:.3f}s")
+        
+        # model performance summary
+        final_train_metrics = self.history['train_metrics'][-1] if self.history['train_metrics'] else {}
+        final_val_metrics = self.history['val_metrics'][-1] if self.history['val_metrics'] else {}
+        
+        self.logger.info("─" * 120)
+        self.logger.info(f"{'📊 FINAL PERFORMANCE SUMMARY':<30}")
+        self.logger.info("─" * 120)
+        
+        # create performance table
+        metrics_header = f"{'DATASET':<12} │ {'LOSS':<12} │ {'R²':<12} │ {'MAE':<12} │ {'RMSE':<12} │ {'MAPE':<12}"
+        self.logger.info(metrics_header)
+        self.logger.info("─" * len(metrics_header))
+        
+        # train metrics
+        train_line = f"{'TRAIN':<12} │ {self.history['train_loss'][-1]:<12.4f} │ {final_train_metrics.get('r2', 0):<12.3f} │ "
+        train_line += f"{final_train_metrics.get('mae', 0):<12.4f} │ {final_train_metrics.get('rmse', 0):<12.4f} │ "
+        train_line += f"{final_train_metrics.get('mape', 0):<12.2f}"
+        self.logger.info(train_line)
+        
+        # validation metrics
+        if val_loader is not None:
+            val_line = f"{'VALIDATION':<12} │ {self.history['val_loss'][-1]:<12.4f} │ {final_val_metrics.get('r2', 0):<12.3f} │ "
+            val_line += f"{final_val_metrics.get('mae', 0):<12.4f} │ {final_val_metrics.get('rmse', 0):<12.4f} │ "
+            val_line += f"{final_val_metrics.get('mape', 0):<12.2f}"
+            self.logger.info(val_line)
+        
+        # best model information
+        if val_loader is not None and last_model_save_epoch >= 0:
+            self.logger.info("─" * len(metrics_header))
+            self.logger.info(f"{'🏆 BEST MODEL':<30}")
+            self.logger.info(f"{'Best validation loss':<25}: {best_val_loss:.6f} (epoch {last_model_save_epoch + 1})")
+            
+            final_val_loss = self.history['val_loss'][-1]
+            if not np.isnan(final_val_loss):
+                improvement_from_best = ((final_val_loss - best_val_loss) / abs(best_val_loss)) * 100
+                if improvement_from_best > 0:
+                    self.logger.info(f"{'Final vs best':<25}: {improvement_from_best:.2f}% worse")
+                else:
+                    self.logger.info(f"{'Final vs best':<25}: {abs(improvement_from_best):.2f}% better")
+        
+        # save model files
+        self.logger.info("─" * 120)
+        self.logger.info(f"{'💾 SAVING MODEL FILES':<30}")
+        self.logger.info("─" * 120)
+        
         self.save_model('final_model.pt')
         self.save_model_architecture('model_architecture.json')
         self.save_history()
         
+        self.logger.info(f"{'Final model':<25}: saved to {self.save_dir}/final_model.pt")
+        if val_loader is not None and last_model_save_epoch >= 0:
+            self.logger.info(f"{'Best model':<25}: saved to {self.save_dir}/best_model.pt")
+        self.logger.info(f"{'Model architecture':<25}: saved to {self.save_dir}/model_architecture.json")
+        self.logger.info(f"{'Training history':<25}: saved to {self.save_dir}/training_history.json")
+        
+        self.logger.info("=" * 120)
+        
         return self.history
     
-    def save_model(self, filename: str):
+    def save_model(self, filename: str, silent: bool = False):
         """Save model state dict and architecture information"""
         model_path = self.save_dir / filename
         
@@ -677,7 +846,9 @@ class GNNTrainer:
                 'use_neighbor_sampling': self.use_neighbor_sampling
             }
         }, model_path)
-        self.logger.info(f"Model saved to {model_path}")
+        
+        if not silent:
+            self.logger.info(f"Model saved to {model_path}")
     
     def save_model_architecture(self, filename: str = 'model_architecture.json'):
         """Save detailed model architecture as JSON"""
@@ -824,6 +995,11 @@ class GNNTrainer:
         Returns:
             Dictionary of evaluation metrics
         """
+        self.logger.info("=" * 120)
+        self.logger.info(f"{'🧪 EVALUATING MODEL ON TEST DATA':<30}")
+        self.logger.info("=" * 120)
+        
+        eval_start_time = time.time()
         self.model.eval()
         
         # create test loader
@@ -868,11 +1044,84 @@ class GNNTrainer:
         
         # add test loss
         metrics['test_loss'] = self.criterion(all_predictions, all_targets).item()
+        eval_time = time.time() - eval_start_time
         
-        self.logger.info("Test Results:")
+        # log evaluation results in professional format
+        self.logger.info(f"{'Evaluation time':<25}: {eval_time:.3f} seconds")
+        self.logger.info(f"{'Test samples':<25}: {len(all_predictions):,}")
+        
+        self.logger.info("─" * 120)
+        self.logger.info(f"{'📈 TEST RESULTS':<30}")
+        self.logger.info("─" * 120)
+        
+        # create results table
+        results_header = f"{'METRIC':<15} │ {'VALUE':<15} │ {'INTERPRETATION':<30}"
+        self.logger.info(results_header)
+        self.logger.info("─" * len(results_header))
+        
+        # prioritize important metrics with interpretations
+        metric_interpretations = {
+            'test_loss': 'Lower is better',
+            'r2': 'Coefficient of determination (1.0 = perfect)',
+            'mae': 'Mean Absolute Error',
+            'rmse': 'Root Mean Square Error',
+            'mape': 'Mean Absolute Percentage Error (%)'
+        }
+        
+        metric_order = ['test_loss', 'r2', 'mae', 'rmse', 'mape']
+        displayed_metrics = []
+        
+        for metric in metric_order:
+            if metric in metrics:
+                interpretation = metric_interpretations.get(metric, 'Custom metric')
+                value_str = f"{metrics[metric]:.6f}" if metric == 'test_loss' else f"{metrics[metric]:.4f}"
+                if metric == 'mape':
+                    value_str += "%"
+                
+                metric_line = f"{metric.upper():<15} │ {value_str:<15} │ {interpretation:<30}"
+                self.logger.info(metric_line)
+                displayed_metrics.append(metric)
+        
+        # display any remaining metrics
         for metric, value in metrics.items():
-            self.logger.info(f"  {metric}: {value:.4f}")
+            if metric not in displayed_metrics:
+                value_str = f"{value:.4f}"
+                metric_line = f"{metric.upper():<15} │ {value_str:<15} │ {'Custom metric':<30}"
+                self.logger.info(metric_line)
         
+        # performance assessment
+        self.logger.info("─" * len(results_header))
+        self.logger.info(f"{'🎯 PERFORMANCE ASSESSMENT':<30}")
+        
+        r2_score = metrics.get('r2', 0)
+        if r2_score >= 0.9:
+            performance = "🟢 Excellent"
+        elif r2_score >= 0.8:
+            performance = "🟡 Good" 
+        elif r2_score >= 0.7:
+            performance = "🟠 Fair"
+        elif r2_score >= 0.5:
+            performance = "🔴 Poor"
+        else:
+            performance = "⚫ Very Poor"
+        
+        self.logger.info(f"{'Overall performance':<25}: {performance} (R² = {r2_score:.3f})")
+        
+        mape_score = metrics.get('mape', 0)
+        if mape_score <= 5:
+            mape_assessment = "🟢 Very accurate"
+        elif mape_score <= 10:
+            mape_assessment = "🟡 Accurate"
+        elif mape_score <= 20:
+            mape_assessment = "🟠 Moderate"
+        elif mape_score <= 50:
+            mape_assessment = "🔴 Poor accuracy"
+        else:
+            mape_assessment = "⚫ Very poor accuracy"
+        
+        self.logger.info(f"{'Prediction accuracy':<25}: {mape_assessment} (MAPE = {mape_score:.1f}%)")
+        
+        self.logger.info("=" * 120)
         return metrics
     
     def predict(self, data: Data, input_nodes: Optional[torch.Tensor] = None) -> np.ndarray:
@@ -967,8 +1216,10 @@ def train_gnn_experiment(
         val_data=val_data,
         train_mask=fit_params.get('train_mask'),
         val_mask=fit_params.get('val_mask'),
+        log_frequency=fit_params.get('log_frequency', 10),
+        min_improvement=fit_params.get('min_improvement', 0.001),
         **{k: v for k, v in fit_params.items() 
-           if k not in ['train_mask', 'val_mask']}
+           if k not in ['train_mask', 'val_mask', 'log_frequency', 'min_improvement']}
     )
     
     # evaluate on test set
