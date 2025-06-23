@@ -368,6 +368,24 @@ def main():
     parser.add_argument('--scheduler', type=str, default='plateau',
                         choices=['plateau', 'cosine', 'none'],
                         help='Learning rate scheduler')
+    parser.add_argument('--loss_function', type=str, default='mse',
+                        choices=['mse', 'mae', 'huber', 'zero_inflated', 'weighted_mse', 
+                                'focal_regression', 'robust_l1', 'adaptive_zero_inflated'],
+                        help='Loss function to use')
+    parser.add_argument('--zero_weight', type=float, default=1.0,
+                        help='Weight for zero targets in weighted/zero-inflated losses')
+    parser.add_argument('--nonzero_weight', type=float, default=2.0,
+                        help='Weight for non-zero targets in weighted/zero-inflated losses')
+    parser.add_argument('--regression_weight', type=float, default=1.0,
+                        help='Weight for regression component in zero-inflated loss')
+    parser.add_argument('--focal_alpha', type=float, default=1.0,
+                        help='Alpha parameter for focal regression loss')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Gamma parameter for focal regression loss')
+    parser.add_argument('--adaptive_factor', type=float, default=0.5,
+                        help='Adaptive factor for adaptive zero-inflated loss')
+    parser.add_argument('--analyze_targets', action='store_true',
+                        help='Analyze target distribution for loss function recommendation')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (cuda/cpu/auto)')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -415,6 +433,24 @@ def main():
         configs[model_type]['training_params']['weight_decay'] = args.weight_decay
         configs[model_type]['training_params']['optimizer_name'] = args.optimizer
         configs[model_type]['training_params']['scheduler_name'] = args.scheduler
+        configs[model_type]['training_params']['loss_function'] = args.loss_function
+        configs[model_type]['training_params']['analyze_targets'] = args.analyze_targets
+        
+        # loss function parameters
+        loss_params = {}
+        if args.loss_function in ['zero_inflated', 'weighted_mse', 'robust_l1']:
+            loss_params['zero_weight'] = args.zero_weight
+            loss_params['nonzero_weight'] = args.nonzero_weight
+        if args.loss_function == 'zero_inflated':
+            loss_params['regression_weight'] = args.regression_weight
+        if args.loss_function == 'focal_regression':
+            loss_params['alpha'] = args.focal_alpha
+            loss_params['gamma'] = args.focal_gamma
+        if args.loss_function == 'adaptive_zero_inflated':
+            loss_params['base_nonzero_weight'] = args.nonzero_weight
+            loss_params['adaptive_factor'] = args.adaptive_factor
+        
+        configs[model_type]['training_params']['loss_params'] = loss_params
         
         # model params
         configs[model_type]['model_params']['hidden_dim'] = args.hidden_dim
