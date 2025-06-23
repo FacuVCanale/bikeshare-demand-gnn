@@ -79,29 +79,8 @@ class TrainingLogger:
             metrics_names: List of metric names to display
             has_validation: Whether to include validation columns
         """
-        self.log_section_header("TRAINING PROGRESS")
-        
-        # create header
-        header = f"{'Epoch':>6} {'Progress':>10} "
-        header += f"{'Train':>30} "
-        if has_validation:
-            header += f"{'Validation':>30} "
-        header += f"{'Status':>20} {'Time':>8}"
-        
-        self.logger.info(header)
-        
-        # create metric subheader
-        metrics_str = " ".join(f"{name:>7}" for name in metrics_names)
-        subheader = f"{'':>6} {'':>10} "
-        subheader += f"{metrics_str:>30} "
-        if has_validation:
-            subheader += f"{metrics_str:>30} "
-        subheader += f"{'Learning Rate':>20} {'(sec)':>8}"
-        
-        self.logger.info(subheader)
-        self.logger.info("-" * len(header))
-        
-        return len(header)
+        self.log_section_header("TRAINING STARTED")
+        return 80  # dummy return for compatibility
         
     def log_epoch_progress(
         self,
@@ -114,7 +93,7 @@ class TrainingLogger:
         metrics_order: List[str] = None
     ):
         """
-        Log training progress for a single epoch in a compact single line.
+        Log training progress for a single epoch in minimal format.
         
         Args:
             epoch: Current epoch number (1-indexed)
@@ -125,85 +104,39 @@ class TrainingLogger:
             epoch_time: Time taken for this epoch
             metrics_order: Order of metrics to display
         """
-        if metrics_order is None:
-            metrics_order = ['loss', 'r2', 'mae']
-            
-        # format progress
-        progress = epoch / total_epochs
-        progress_str = f"{progress*100:5.1f}%"
+        # build minimal log line
+        log_parts = []
         
-        # format train metrics
-        train_values = []
-        for metric in metrics_order:
-            value = train_metrics.get(metric, 0.0)
-            if metric == 'loss':
-                train_values.append(f"{value:6.4f}")
-            elif metric == 'r2':
-                train_values.append(f"{value:6.3f}")
-            else:
-                train_values.append(f"{value:6.3f}")
+        # epoch
+        log_parts.append(f"epoch {epoch:03d}")
         
-        # format validation metrics
-        val_values = []
+        # train loss
+        train_loss = train_metrics.get('loss', 0.0)
+        log_parts.append(f"train_loss {train_loss:.4f}")
+        
+        # validation loss
         if val_metrics is not None:
-            for metric in metrics_order:
-                value = val_metrics.get(metric, 0.0)
-                if metric == 'loss':
-                    val_values.append(f"{value:6.4f}")
-                elif metric == 'r2':
-                    val_values.append(f"{value:6.3f}")
-                else:
-                    val_values.append(f"{value:6.3f}")
+            val_loss = val_metrics.get('loss', 0.0)
+            log_parts.append(f"val_loss {val_loss:.4f}")
         
-        # collect additional metrics for compact display
-        extra_train = []
-        for metric, value in train_metrics.items():
-            if metric not in metrics_order:
-                if metric == 'rmse':
-                    extra_train.append(f"RMSE:{value:.3f}")
-                elif metric == 'mape':
-                    extra_train.append(f"MAPE:{value:.1f}%")
+        # train r²
+        train_r2 = train_metrics.get('r2', 0.0)
+        log_parts.append(f"train_r² {train_r2:.3f}")
         
-        extra_val = []
-        if val_metrics:
-            for metric, value in val_metrics.items():
-                if metric not in metrics_order:
-                    if metric == 'rmse':
-                        extra_val.append(f"RMSE:{value:.3f}")
-                    elif metric == 'mape':
-                        extra_val.append(f"MAPE:{value:.1f}%")
-        
-        # format status with learning rate and best info
-        status_parts = []
-        if status_info:
-            if status_info.get('is_best', False):
-                improvement = status_info.get('improvement', 0.0)
-                status_parts.append(f"BEST↓{improvement:.4f}")
-            elif status_info.get('epochs_since_best', -1) >= 0:
-                epochs_since = status_info.get('epochs_since_best')
-                status_parts.append(f"wait:{epochs_since}")
-            
-            lr = status_info.get('learning_rate', 0.0)
-            status_parts.append(f"lr:{lr:.1e}")
-        
-        # build compact log line
-        log_line = f"{epoch:4d}|{progress_str:>5}| "
-        
-        # train metrics
-        log_line += f"T:{' '.join(train_values)}"
-        if extra_train:
-            log_line += f"({','.join(extra_train)})"
-        
-        # validation metrics
+        # validation r²
         if val_metrics is not None:
-            log_line += f" V:{' '.join(val_values)}"
-            if extra_val:
-                log_line += f"({','.join(extra_val)})"
+            val_r2 = val_metrics.get('r2', 0.0)
+            log_parts.append(f"val_r² {val_r2:.3f}")
         
-        # status and timing
-        if status_parts:
-            log_line += f" [{'/'.join(status_parts)}]"
-        log_line += f" {epoch_time:5.2f}s"
+        # best model indicator
+        if status_info and status_info.get('is_best', False):
+            log_parts.append("★ NEW BEST")
+        
+        # timing
+        log_parts.append(f"{epoch_time:.1f}s")
+        
+        # format final line
+        log_line = "│ " + " │ ".join(log_parts) + " │"
         
         self.logger.info(log_line)
         
@@ -215,62 +148,10 @@ class TrainingLogger:
         separator_length: int = 100
     ):
         """
-        Log detailed metrics in a readable format.
-        
-        Args:
-            train_metrics: Training metrics
-            val_metrics: Validation metrics (optional)
-            additional_info: Additional information (LR, ETA, etc.)
-            separator_length: Length of separator line
+        Log detailed metrics - disabled for minimal logging.
         """
-        details = []
-        
-        # detailed train metrics
-        train_details = []
-        for metric, value in train_metrics.items():
-            if metric not in ['loss', 'r2', 'mae']:  # skip already shown metrics
-                if metric == 'mape':
-                    train_details.append(f"{metric.upper()}: {value:.2f}%")
-                else:
-                    train_details.append(f"{metric.upper()}: {value:.4f}")
-        
-        if train_details:
-            details.append(f"TRAIN -> {', '.join(train_details)}")
-        
-        # detailed validation metrics
-        if val_metrics:
-            val_details = []
-            for metric, value in val_metrics.items():
-                if metric not in ['loss', 'r2', 'mae']:
-                    if metric == 'mape':
-                        val_details.append(f"{metric.upper()}: {value:.2f}%")
-                    else:
-                        val_details.append(f"{metric.upper()}: {value:.4f}")
-            
-            if val_details:
-                details.append(f"VAL -> {', '.join(val_details)}")
-        
-        # additional information
-        if additional_info:
-            add_details = []
-            for key, value in additional_info.items():
-                if key == 'learning_rate':
-                    add_details.append(f"LR: {value:.1e}")
-                elif key == 'eta':
-                    eta_str = f"{value/60:.0f}m" if value > 60 else f"{value:.0f}s"
-                    add_details.append(f"ETA: {eta_str}")
-                else:
-                    add_details.append(f"{key}: {value}")
-            
-            if add_details:
-                details.append(f"INFO -> {', '.join(add_details)}")
-        
-        # log details
-        for detail in details:
-            self.logger.info(f"       {detail}")
-        
-        if details:
-            self.logger.info("")
+        # minimal logging - skip detailed metrics
+        pass
             
     def log_training_summary(
         self,

@@ -615,12 +615,22 @@ class GNNTrainer:
             is_best = False
             improvement = 0.0
             if save_best_model and val_loader is not None:
-                improvement = best_val_loss - val_loss
-                if improvement > min_improvement:
+                if first_validation:
+                    # first validation - always save as best
                     best_val_loss = val_loss
                     is_best = True
                     last_model_save_epoch = epoch
+                    improvement = 0.0  # no improvement to show on first epoch
+                    first_validation = False
                     self.save_model('best_model.pt', silent=True)
+                else:
+                    # subsequent validations - check for improvement
+                    improvement = best_val_loss - val_loss
+                    if improvement > min_improvement:
+                        best_val_loss = val_loss
+                        is_best = True
+                        last_model_save_epoch = epoch
+                        self.save_model('best_model.pt', silent=True)
             
             # enhanced logging
             epoch_time = time.time() - epoch_start
@@ -632,7 +642,7 @@ class GNNTrainer:
                 
                 # prepare status information
                 status_info = {
-                    'is_best': is_best,
+                    'is_best': is_best and improvement > 0,  # only show "NEW BEST" when there's actual improvement
                     'improvement': improvement if is_best else 0.0,
                     'epochs_since_best': epoch - last_model_save_epoch if last_model_save_epoch >= 0 else -1,
                     'learning_rate': current_lr
@@ -658,17 +668,6 @@ class GNNTrainer:
                     epoch + 1, epochs, train_log_metrics, val_log_metrics,
                     status_info, epoch_time, ['loss', 'r2', 'mae']
                 )
-                
-                # detailed metrics (less frequent)
-                if (epoch + 1) % (log_frequency * 3) == 0 or is_best:
-                    additional_info = {
-                        'learning_rate': current_lr,
-                        'eta': eta
-                    }
-                    
-                    self.training_logger.log_detailed_metrics(
-                        train_metrics, val_metrics, additional_info, header_length
-                    )
             
             # save checkpoints
             if save_checkpoints and (epoch + 1) % checkpoint_frequency == 0:
@@ -677,7 +676,7 @@ class GNNTrainer:
             # early stopping
             if early_stopping is not None and early_stopping(val_loss, self.model):
                 self.training_logger.log_section_header(
-                    f"EARLY STOPPING TRIGGERED AT EPOCH {epoch+1}", "🛑"
+                    f"EARLY STOPPING TRIGGERED AT EPOCH {epoch+1}"
                 )
                 self.logger.info(f"Best validation loss: {best_val_loss:.4f} (epoch {last_model_save_epoch + 1})")
                 break
