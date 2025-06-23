@@ -448,12 +448,18 @@ if "weather_weather_code" in df_sorted.columns:
     # One-hot encoding
     df_sorted = df_sorted.to_dummies("weather_code_cat", separator="_")
 
-# Temperature and wind buckets
+# Temperature and wind buckets using when/then/otherwise for reliability
 if "weather_temperature_2m" in df_sorted.columns:
     df_sorted = df_sorted.with_columns([
-        pl.col("weather_temperature_2m")
-        .cut([-50, 5, 15, 25, 35, 50], 
-             labels=["mucha_frio", "frio", "templado", "calor", "mucha_calor"])
+        pl.when(pl.col("weather_temperature_2m") < 5)
+        .then(pl.lit("mucha_frio"))
+        .when(pl.col("weather_temperature_2m") < 15)
+        .then(pl.lit("frio"))
+        .when(pl.col("weather_temperature_2m") < 25)
+        .then(pl.lit("templado"))
+        .when(pl.col("weather_temperature_2m") < 35)
+        .then(pl.lit("calor"))
+        .otherwise(pl.lit("mucha_calor"))
         .alias("temp_bucket")
     ])
 else:
@@ -461,9 +467,13 @@ else:
 
 if "weather_wind_speed_10m" in df_sorted.columns:
     df_sorted = df_sorted.with_columns([
-        pl.col("weather_wind_speed_10m")
-        .cut([0, 5, 15, 25, 100],
-             labels=["calma", "brisa", "ventoso", "muy_ventoso"])
+        pl.when(pl.col("weather_wind_speed_10m") < 5)
+        .then(pl.lit("calma"))
+        .when(pl.col("weather_wind_speed_10m") < 15)
+        .then(pl.lit("brisa"))
+        .when(pl.col("weather_wind_speed_10m") < 25)
+        .then(pl.lit("ventoso"))
+        .otherwise(pl.lit("muy_ventoso"))
         .alias("wind_bucket")
     ])
 else:
