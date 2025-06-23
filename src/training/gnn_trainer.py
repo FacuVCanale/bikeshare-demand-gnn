@@ -247,7 +247,7 @@ class GNNTrainer:
     
     def _determine_batching_strategy(self, data: Data) -> bool:
         """
-        Determine whether to use neighbor sampling based on graph size.
+        Determine whether to use neighbor sampling based on graph size and user preferences.
         
         Args:
             data: Graph data
@@ -255,17 +255,41 @@ class GNNTrainer:
         Returns:
             True if should use neighbor sampling, False for full-batch
         """
-        if self.use_neighbor_sampling == 'auto':
-            # use neighbor sampling for graphs with >500 nodes or >5000 edges
+        # if user explicitly set use_neighbor_sampling, respect their choice
+        if self.use_neighbor_sampling != 'auto':
+            should_use_sampling = bool(self.use_neighbor_sampling)
+            strategy_reason = "user-specified"
+        else:
+            # auto-detection logic
             num_nodes = data.x.shape[0] if data.x is not None else data.num_nodes
             num_edges = data.edge_index.shape[1] if data.edge_index is not None else 0
             
-            should_use_sampling = num_nodes > 500 or num_edges > 5000
-            self.logger.info(f"Auto-detected batching strategy: {'neighbor sampling' if should_use_sampling else 'full-batch'}")
-            self.logger.info(f"  Graph size: {num_nodes} nodes, {num_edges} edges")
-            return should_use_sampling
-        else:
-            return bool(self.use_neighbor_sampling)
+            # if user specified batch_size, they want mini-batch training
+            if self.batch_size is not None:
+                # for very large graphs, always use neighbor sampling
+                if num_nodes > 5000 or num_edges > 50000:
+                    should_use_sampling = True
+                    strategy_reason = "large graph detected, using neighbor sampling"
+                # for medium graphs, use neighbor sampling for efficiency  
+                elif num_nodes > 1000 or num_edges > 10000:
+                    should_use_sampling = True
+                    strategy_reason = "medium graph with batch_size specified, using neighbor sampling"
+                # for small graphs, use simple batching without neighbor sampling
+                else:
+                    should_use_sampling = False
+                    strategy_reason = "small graph with batch_size specified, using simple mini-batch"
+            else:
+                # no batch_size specified, use traditional thresholds for full-batch vs sampling
+                should_use_sampling = num_nodes > 500 or num_edges > 5000
+                strategy_reason = "auto-detected based on graph size for full-batch training"
+        
+        self.logger.info(f"Batching strategy: {'neighbor sampling' if should_use_sampling else 'simple mini-batch' if self.batch_size else 'full-batch'}")
+        self.logger.info(f"  Reason: {strategy_reason}")
+        self.logger.info(f"  Graph size: {data.x.shape[0] if data.x is not None else data.num_nodes} nodes, {data.edge_index.shape[1] if data.edge_index is not None else 0} edges")
+        if self.batch_size:
+            self.logger.info(f"  Batch size: {self.batch_size}")
+        
+        return should_use_sampling
     
     def _create_data_loader(self, data: Data, shuffle: bool = False, input_nodes: torch.Tensor = None):
         """
@@ -295,8 +319,65 @@ class GNNTrainer:
             )
             self.logger.info(f"Created NeighborLoader: batch_size={self.batch_size}, num_neighbors={self.num_neighbors}")
             return loader
+        elif not use_sampling and self.batch_size is not None:
+            # use simple mini-batch training without neighbor sampling for small/medium graphs
+            from torch_geometric.loader import DataLoader as GeometricDataLoader
+            
+            # create mini-batch indices for node-level tasks
+            if input_nodes is not None:
+                # node-level batching
+                num_nodes = len(input_nodes)
+                indices = torch.arange(num_nodes)
+                
+                # create batched data loader
+                batched_data = []
+                for i in range(0, num_nodes, self.batch_size):
+                    batch_indices = indices[i:i + self.batch_size]
+                    batch_nodes = input_nodes[batch_indices]
+                    
+                    # create mini-batch data
+                    batch_data = Data(
+                        x=data.x,
+                        edge_index=data.edge_index,
+                        y=data.y,
+                        input_nodes=batch_nodes,
+                        batch_size=len(batch_nodes)
+                    )
+                    batched_data.append(batch_data)
+                
+                if shuffle:
+                    import random
+                    random.shuffle(batched_data)
+                
+                self.logger.info(f"Created simple mini-batch loader: {len(batched_data)} batches of size ~{self.batch_size}")
+                return batched_data
+            else:
+                # graph-level batching - create multiple copies with different subsets
+                num_nodes = data.x.shape[0] if data.x is not None else data.num_nodes
+                indices = torch.arange(num_nodes)
+                
+                batched_data = []
+                for i in range(0, num_nodes, self.batch_size):
+                    batch_indices = indices[i:i + self.batch_size]
+                    
+                    # create mini-batch data
+                    batch_data = Data(
+                        x=data.x,
+                        edge_index=data.edge_index,
+                        y=data.y,
+                        input_nodes=batch_indices,
+                        batch_size=len(batch_indices)
+                    )
+                    batched_data.append(batch_data)
+                
+                if shuffle:
+                    import random
+                    random.shuffle(batched_data)
+                
+                self.logger.info(f"Created simple mini-batch loader: {len(batched_data)} batches of size ~{self.batch_size}")
+                return batched_data
         else:
-            # use full-batch training for small graphs
+            # use full-batch training for small graphs when no batch_size specified
             if input_nodes is not None:
                 # create subset of data for train/val split
                 data_subset = Data(
@@ -345,11 +426,11 @@ class GNNTrainer:
                 else:
                     targets = batch.y
             else:
-                # full-batch or regular batch
+                # full-batch or simple mini-batch
                 predictions = self.model(batch)
                 targets = batch.y
                 
-                # if using input_nodes subset, filter predictions and targets
+                # if using input_nodes subset (simple mini-batch), filter predictions and targets
                 if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
                     input_nodes = batch.input_nodes
                     predictions = predictions[input_nodes]
@@ -462,11 +543,11 @@ class GNNTrainer:
                     else:
                         targets = batch.y
                 else:
-                    # full-batch
+                    # full-batch or simple mini-batch
                     predictions = self.model(batch)
                     targets = batch.y
                     
-                    # filter if using input_nodes
+                    # filter if using input_nodes (simple mini-batch)
                     if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
                         input_nodes = batch.input_nodes
                         predictions = predictions[input_nodes]
@@ -564,14 +645,28 @@ class GNNTrainer:
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         
         # log training configuration
+        # determine training strategy for display
+        if isinstance(train_loader, NeighborLoader):
+            strategy_display = "Neighbor sampling mini-batch"
+        elif isinstance(train_loader, list) and len(train_loader) > 1:
+            strategy_display = "Simple mini-batch"
+        else:
+            strategy_display = "Full-batch"
+        
         config_data = {
             "Model": f"{self.model.__class__.__name__} ({trainable_params:,} trainable parameters)",
             "Training epochs": f"{epochs:,}",
-            "Strategy": "Mini-batch" if isinstance(train_loader, NeighborLoader) else "Full-batch",
+            "Strategy": strategy_display,
             "Logging frequency": f"every {log_frequency} epochs",
             "Optimizer": f"{self.optimizer.__class__.__name__} (lr={self.optimizer.param_groups[0]['lr']:.1e})",
             "Loss function": self.criterion.__class__.__name__
         }
+        
+        # add batch size information if using mini-batch
+        if self.batch_size is not None:
+            config_data["Batch size"] = f"{self.batch_size}"
+            if isinstance(train_loader, list):
+                config_data["Number of batches"] = f"{len(train_loader)}"
         
         if val_loader is not None:
             config_data["Early stopping"] = f"{early_stopping_patience} epochs patience, {min_improvement:.4f} min improvement"
@@ -957,6 +1052,7 @@ class GNNTrainer:
                 
                 # forward pass
                 if hasattr(batch, 'num_sampled_nodes') and hasattr(batch, 'num_sampled_edges'):
+                    # neighbor sampled batch
                     predictions = self._forward_with_sampling(batch)
                     if hasattr(batch, 'batch_size'):
                         targets = batch.y[:batch.batch_size]
@@ -964,9 +1060,11 @@ class GNNTrainer:
                     else:
                         targets = batch.y
                 else:
+                    # full-batch or simple mini-batch
                     predictions = self.model(batch)
                     targets = batch.y
                     
+                    # filter if using input_nodes (simple mini-batch)
                     if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
                         input_nodes = batch.input_nodes
                         predictions = predictions[input_nodes]
