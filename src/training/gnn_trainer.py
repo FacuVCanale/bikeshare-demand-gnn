@@ -53,13 +53,16 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
             if self.restore_best_weights:
-                self.best_weights = model.state_dict().copy()
+                # deep copy to avoid reference issues
+                import copy
+                self.best_weights = copy.deepcopy(model.state_dict())
         else:
             self.counter += 1
             
         if self.counter >= self.patience:
             if self.restore_best_weights and self.best_weights is not None:
                 model.load_state_dict(self.best_weights)
+                print(f"Early stopping: Restored best model weights (best loss: {self.best_loss:.4f})")
             return True
         return False
 
@@ -811,10 +814,18 @@ class GNNTrainer:
         if val_loader is not None and last_model_save_epoch >= 0:
             saved_files['Best model'] = f"{self.save_dir}/best_model.pt"
         
-        # save model files first
+        # save model files
+        # note: if early stopping restored best weights, "final" model is actually the best model
         self.save_model('final_model.pt')
         self.save_model_architecture('model_architecture.json')
         self.save_history()
+        
+        # if we have a different best model saved, indicate this
+        if val_loader is not None and last_model_save_epoch >= 0:
+            if early_stopping and early_stopping.restore_best_weights and early_stopping.best_weights is not None:
+                self.logger.info("Note: Final model contains restored best weights from early stopping")
+            else:
+                self.logger.info(f"Note: Best model is from epoch {last_model_save_epoch + 1}, consider using best_model.pt for evaluation")
         
         # log comprehensive training summary
         self.training_logger.log_training_summary(
@@ -1186,7 +1197,17 @@ def train_gnn_experiment(
            if k not in ['train_mask', 'val_mask', 'log_frequency', 'min_improvement']}
     )
     
-    # evaluate on test set
+    # load best model if it exists (e.g., from early stopping)
+    best_model_path = trainer.save_dir / 'best_model.pt'
+    if best_model_path.exists():
+        trainer.logger.info("Loading best model for evaluation...")
+        checkpoint = torch.load(best_model_path, map_location=trainer.device, weights_only=False)
+        trainer.model.load_state_dict(checkpoint['model_state_dict'])
+        trainer.logger.info("Best model loaded successfully")
+    else:
+        trainer.logger.info("No best model found, using final model for evaluation")
+    
+    # evaluate on test set with best model
     test_metrics = trainer.evaluate(
         test_data, 
         test_mask=fit_params.get('test_mask')
@@ -1200,4 +1221,4 @@ def train_gnn_experiment(
         'experiment_name': trainer.experiment_name
     }
     
-    return model, results 
+    return trainer.model, results 
