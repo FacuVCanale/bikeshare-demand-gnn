@@ -370,6 +370,17 @@ def main():
                         help='Learning rate scheduler')
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (cuda/cpu/auto)')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size for mini-batch training (None for full-batch)')
+    parser.add_argument('--num_neighbors', type=str, default='15,10,5',
+                        help='Number of neighbors to sample per layer (comma-separated)')
+    parser.add_argument('--use_neighbor_sampling', type=str, default='auto',
+                        choices=['auto', 'true', 'false'],
+                        help='Whether to use neighbor sampling')
+    parser.add_argument('--log_frequency', type=int, default=10,
+                        help='How often to log progress (every N epochs)')
+    parser.add_argument('--min_improvement', type=float, default=0.001,
+                        help='Minimum improvement required to save best model')
     parser.add_argument('--save_results', action='store_true',
                         help='Save detailed results')
     
@@ -396,6 +407,8 @@ def main():
         # fit params
         configs[model_type]['fit_params']['epochs'] = args.epochs
         configs[model_type]['fit_params']['early_stopping_patience'] = args.patience
+        configs[model_type]['fit_params']['log_frequency'] = args.log_frequency
+        configs[model_type]['fit_params']['min_improvement'] = args.min_improvement
         
         # training params
         configs[model_type]['training_params']['learning_rate'] = args.learning_rate
@@ -419,6 +432,21 @@ def main():
         
         # trainer params
         configs[model_type]['trainer_params']['device'] = args.device
+        if args.batch_size is not None:
+            configs[model_type]['trainer_params']['batch_size'] = args.batch_size
+            
+        # neighbor sampling params
+        if args.num_neighbors:
+            try:
+                num_neighbors = [int(x.strip()) for x in args.num_neighbors.split(',')]
+                configs[model_type]['trainer_params']['num_neighbors'] = num_neighbors
+            except ValueError:
+                print(f"Warning: Invalid num_neighbors format '{args.num_neighbors}', using default")
+        
+        # sampling strategy
+        if args.use_neighbor_sampling != 'auto':
+            use_sampling = args.use_neighbor_sampling.lower() == 'true'
+            configs[model_type]['trainer_params']['use_neighbor_sampling'] = use_sampling
     
     if args.model == 'all':
         # run comparison
