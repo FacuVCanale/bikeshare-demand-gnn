@@ -193,7 +193,11 @@ def create_point_in_time_aggregations(
     safe_features = [f for f in feature_names if any(
         pattern in f for pattern in ['hour_', 'dow_', 'month_', 'is_weekend', 'is_morning_rush', 
                                    'is_evening_rush', 'is_daytime', 'is_summer', 'is_winter',
-                                   'cluster_centroid_', 'cluster_station_count', 'weather_data_available']
+                                   'cluster_centroid_', 'cluster_station_count', 
+                                   # weather features (current conditions are known at prediction time)
+                                   'temp', 'humidity', 'wind_speed', 'precipitation', 'pressure', 'visibility', 'weather_condition',
+                                   'precipitation', 'pressure', 'visibility', 'weather_condition',
+                                   'feels_like', 'uv_index', 'cloud_cover']
     )]
     
     # combine lag and safe features
