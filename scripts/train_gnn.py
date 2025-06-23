@@ -259,12 +259,18 @@ def main():
     # model configuration
     model_group = parser.add_argument_group('Model Configuration')
     model_group.add_argument('--model-type', type=str, default='gcn',
-                            choices=['gcn', 'gat', 'sage', 'transformer', 'hybrid'],
+                            choices=['gcn', 'gat', 'sage', 'transformer', 'memory-efficient-transformer', 'hybrid'],
                             help='Type of GNN model to train')
     model_group.add_argument('--hidden-dim', type=int, default=64,
                             help='Hidden dimension size')
     model_group.add_argument('--dropout', type=float, default=0.2,
                             help='Dropout rate')
+    model_group.add_argument('--memory-efficient', action='store_true', default=True,
+                            help='Use memory-efficient model versions')
+    model_group.add_argument('--max-memory-gb', type=float, default=20.0,
+                            help='Maximum memory to use per GPU (GB)')
+    model_group.add_argument('--gradient-checkpointing', action='store_true', default=True,
+                            help='Use gradient checkpointing for memory efficiency')
     model_group.add_argument('--num-layers', type=int, default=3,
                             help='Number of GNN layers (gcn, gat, sage, transformer)')
     model_group.add_argument('--num-heads', type=int, default=4,
@@ -385,6 +391,7 @@ def main():
     
     model = create_gnn_model(
         model_type=args.model_type,
+        memory_efficient=args.memory_efficient,
         **model_config
     )
     
@@ -394,13 +401,15 @@ def main():
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     
-    # create trainer with multi-GPU support
-    print(f"\nInitializing trainer with multi-GPU support...")
+    # create trainer with memory optimization and multi-GPU support
+    print(f"\nInitializing trainer with memory optimization...")
     trainer = GNNTrainer(
         model=model,
         device=args.device,
         experiment_name=args.experiment_name,
-        save_dir=args.output_dir
+        save_dir=args.output_dir,
+        use_gradient_checkpointing=args.gradient_checkpointing,
+        max_memory_gb=args.max_memory_gb
     )
     
     # setup training components

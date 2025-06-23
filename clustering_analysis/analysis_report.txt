@@ -1,0 +1,33 @@
+K-MEANS++ CLUSTERING ANALYSIS REPORT
+==================================================
+Generated on: 2025-06-23 01:10:48
+Data directory: data
+Output directory: data/clustering_analysis
+
+ANALYSIS CONFIGURATION:
+  Total stations analyzed: 338
+  K range tested: 2 to 147 (step: 5)
+  Total k values tested: 30
+  Random state: 42
+
+OPTIMAL K RESULTS:
+  Best k: 2
+  Best silhouette score: 0.3915
+
+TOP 5 K VALUES BY SILHOUETTE SCORE:
+  1. k=2: silhouette=0.3915, inertia=391.19
+  2. k=7: silhouette=0.3600, inertia=100.58
+  3. k=12: silhouette=0.3530, inertia=56.96
+  4. k=17: silhouette=0.3407, inertia=39.19
+  5. k=32: silhouette=0.3313, inertia=19.93
+
+PERFORMANCE SUMMARY:
+  Total execution time: 4.0 seconds
+  Average time per k: 0.13 seconds
+
+OUTPUT FILES:
+  Analysis summary: analysis_summary.json
+  Results CSV: k_analysis_results.csv
+  Visualizations: images/ directory
+
+✓ K-means++ clustering analysis completed successfully!

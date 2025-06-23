@@ -6,6 +6,10 @@ training loops, validation, early stopping, model checkpointing, and experiment 
 Multi-GPU support is included for accelerated training.
 """
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -21,11 +25,54 @@ import time
 from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
 from datetime import datetime
+import gc
 
 from src.models.gnn_models import (
     TemporalGCN, SpatialGAT, GraphSAGE, GraphTransformer, 
     HybridSpatioTemporalGNN, calculate_gnn_metrics, create_gnn_model
 )
+
+
+def clear_gpu_memory():
+    """Clear GPU memory cache and force garbage collection"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+
+def get_memory_usage() -> Dict[str, float]:
+    """Get current GPU memory usage in GB"""
+    if not torch.cuda.is_available():
+        return {'allocated': 0.0, 'reserved': 0.0, 'free': 0.0}
+    
+    allocated = torch.cuda.memory_allocated() / (1024**3)
+    reserved = torch.cuda.memory_reserved() / (1024**3)
+    total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    free = total - allocated
+    
+    return {
+        'allocated': allocated,
+        'reserved': reserved, 
+        'free': free,
+        'total': total
+    }
+
+
+def enable_memory_optimizations():
+    """Enable PyTorch memory optimizations"""
+    # enable memory efficient attention if available
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        print("Flash attention enabled")
+    except:
+        pass
+    
+    # set memory allocation strategy
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    # enable memory mapping for large tensors
+    torch.multiprocessing.set_sharing_strategy('file_system')
 
 
 def get_device_info() -> Dict[str, Any]:
@@ -144,10 +191,10 @@ class EarlyStopping:
 
 class GNNTrainer:
     """
-    Comprehensive trainer for Graph Neural Network models with multi-GPU support.
+    Comprehensive trainer for Graph Neural Network models with memory optimization and multi-GPU support.
     
     Handles training, validation, model checkpointing, and experiment tracking
-    for various GNN architectures on bike demand prediction.
+    for various GNN architectures on bike demand prediction with memory-efficient techniques.
     """
     
     def __init__(
@@ -155,35 +202,57 @@ class GNNTrainer:
         model: nn.Module,
         device: str = 'auto',
         experiment_name: str = None,
-        save_dir: str = 'experiments'
+        save_dir: str = 'experiments',
+        use_gradient_checkpointing: bool = True,
+        max_memory_gb: float = 20.0
     ):
         """
-        Initialize GNN trainer with multi-GPU support.
+        Initialize GNN trainer with memory optimization and multi-GPU support.
         
         Args:
             model: GNN model to train
             device: Device specification ('auto', 'cpu', 'cuda', 'multi-gpu')
             experiment_name: Name for this experiment
             save_dir: Directory to save experiment results
+            use_gradient_checkpointing: Whether to use gradient checkpointing for memory efficiency
+            max_memory_gb: Maximum memory to use per GPU (GB)
         """
-        # setup device configuration
+        # enable memory optimizations
+        enable_memory_optimizations()
+        clear_gpu_memory()
+        
+        # setup device configuration  
         self.device, self.use_multi_gpu, self.device_info = setup_device(device)
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.max_memory_gb = max_memory_gb
         
         # store original model reference
         self.original_model = model
         
-        # setup multi-GPU if available and requested
+        # enable gradient checkpointing if requested
+        if self.use_gradient_checkpointing:
+            if hasattr(model, 'gradient_checkpointing_enable'):
+                model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for memory efficiency")
+        
+        # setup multi-GPU with memory considerations
         if self.use_multi_gpu:
-            print(f"Setting up multi-GPU training on {self.device_info['num_gpus']} GPUs:")
+            print(f"Setting up memory-optimized multi-GPU training on {self.device_info['num_gpus']} GPUs:")
             for i, name in enumerate(self.device_info['gpu_names']):
                 memory_gb = self.device_info['total_memory'][i] / (1024**3)
                 print(f"  GPU {i}: {name} ({memory_gb:.1f} GB)")
             
-            # wrap model with DataParallel
-            self.model = nn.DataParallel(model)
-            self.model = self.model.to(self.device)
+            # For GNNs, use single GPU with manual batching instead of DataParallel
+            # DataParallel replicates the entire graph, causing memory issues
+            print("WARNING: Using single GPU for GNN training due to memory efficiency.")
+            print("DataParallel with large graphs can cause OOM. Consider using smaller models or graph sampling.")
+            self.use_multi_gpu = False
+            self.model = model.to(self.device)
         else:
             self.model = model.to(self.device)
+        
+        # clear memory after model setup
+        clear_gpu_memory()
         
         # experiment setup
         self.experiment_name = experiment_name or f"gnn_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -326,7 +395,7 @@ class GNNTrainer:
         
     def train_epoch(self, train_data: Data) -> Tuple[float, Dict[str, float]]:
         """
-        Train for one epoch with multi-GPU support.
+        Train for one epoch with memory optimization.
         
         Args:
             train_data: Training data
@@ -339,40 +408,94 @@ class GNNTrainer:
         all_predictions = []
         all_targets = []
         
-        # move data to device
-        train_data = train_data.to(self.device)
+        # check memory before training
+        memory_before = get_memory_usage()
+        if memory_before['allocated'] > self.max_memory_gb:
+            clear_gpu_memory()
+            self.logger.warning(f"High memory usage detected: {memory_before['allocated']:.1f}GB. Cleared cache.")
         
-        # forward pass
+        # move data to device with memory monitoring
+        try:
+            train_data = train_data.to(self.device)
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                clear_gpu_memory()
+                self.logger.error(f"OOM during data transfer. Memory: {get_memory_usage()}")
+                raise MemoryError(f"Cannot fit data on GPU. Try reducing batch size or model size.")
+            raise e
+        
+        # forward pass with memory checkpointing
         self.optimizer.zero_grad()
-        predictions = self.model(train_data)
-        targets = train_data.y
         
-        # calculate loss
-        loss = self.criterion(predictions, targets)
+        try:
+            if self.use_gradient_checkpointing:
+                # use gradient checkpointing for memory efficiency
+                predictions = torch.utils.checkpoint.checkpoint(
+                    self._forward_with_checkpointing, 
+                    train_data,
+                    use_reentrant=False
+                )
+            else:
+                predictions = self.model(train_data)
+                
+            targets = train_data.y
+            
+            # calculate loss
+            loss = self.criterion(predictions, targets)
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                memory_usage = get_memory_usage()
+                self.logger.error(f"OOM during forward pass. Memory: {memory_usage}")
+                clear_gpu_memory()
+                raise MemoryError(f"Out of memory during forward pass. Memory usage: {memory_usage['allocated']:.1f}GB")
+            raise e
         
-        # backward pass
-        loss.backward()
+        # backward pass with memory monitoring
+        try:
+            loss.backward()
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                memory_usage = get_memory_usage()
+                self.logger.error(f"OOM during backward pass. Memory: {memory_usage}")
+                clear_gpu_memory()
+                raise MemoryError(f"Out of memory during backward pass. Memory usage: {memory_usage['allocated']:.1f}GB")
+            raise e
         
-        # gradient clipping (optional)
+        # gradient clipping
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         
         # optimizer step
         self.optimizer.step()
         
+        # store results and clear intermediate tensors
         total_loss += loss.item()
-        all_predictions.append(predictions.detach())
-        all_targets.append(targets.detach())
+        all_predictions.append(predictions.detach().cpu())  # move to CPU to save GPU memory
+        all_targets.append(targets.detach().cpu())
         
-        # calculate metrics
+        # clear GPU memory
+        del predictions, targets, loss
+        clear_gpu_memory()
+        
+        # calculate metrics on CPU
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        metrics = calculate_gnn_metrics(all_predictions.to(self.device), all_targets.to(self.device))
+        
+        # log memory usage
+        memory_after = get_memory_usage()
+        metrics['memory_allocated_gb'] = memory_after['allocated']
+        metrics['memory_free_gb'] = memory_after['free']
         
         return total_loss, metrics
         
+    def _forward_with_checkpointing(self, data: Data) -> torch.Tensor:
+        """Helper method for gradient checkpointing"""
+        return self.model(data)
+        
     def validate_epoch(self, val_data: Data) -> Tuple[float, Dict[str, float]]:
         """
-        Validate for one epoch with multi-GPU support.
+        Validate for one epoch with memory optimization.
         
         Args:
             val_data: Validation data
@@ -385,25 +508,47 @@ class GNNTrainer:
         all_predictions = []
         all_targets = []
         
-        with torch.no_grad():
-            # move data to device
-            val_data = val_data.to(self.device)
-            
-            # forward pass
-            predictions = self.model(val_data)
-            targets = val_data.y
-            
-            # calculate loss
-            loss = self.criterion(predictions, targets)
-            
-            total_loss += loss.item()
-            all_predictions.append(predictions)
-            all_targets.append(targets)
+        # clear memory before validation
+        clear_gpu_memory()
         
-        # calculate metrics
+        with torch.no_grad():
+            try:
+                # move data to device with memory monitoring
+                val_data = val_data.to(self.device)
+                
+                # forward pass
+                predictions = self.model(val_data)
+                targets = val_data.y
+                
+                # calculate loss
+                loss = self.criterion(predictions, targets)
+                
+                total_loss += loss.item()
+                # move to CPU to save GPU memory
+                all_predictions.append(predictions.cpu())
+                all_targets.append(targets.cpu())
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    memory_usage = get_memory_usage()
+                    self.logger.error(f"OOM during validation. Memory: {memory_usage}")
+                    clear_gpu_memory()
+                    raise MemoryError(f"Out of memory during validation. Memory usage: {memory_usage['allocated']:.1f}GB")
+                raise e
+            
+            # clear intermediate tensors
+            del predictions, targets, loss
+            clear_gpu_memory()
+        
+        # calculate metrics on CPU
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        metrics = calculate_gnn_metrics(all_predictions.to(self.device), all_targets.to(self.device))
+        
+        # log memory usage
+        memory_after = get_memory_usage()
+        metrics['memory_allocated_gb'] = memory_after['allocated']
+        metrics['memory_free_gb'] = memory_after['free']
         
         return total_loss, metrics
     
@@ -477,7 +622,7 @@ class GNNTrainer:
             self.history['val_metrics'].append(val_metrics)
             self.history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
             
-            # logging
+            # logging with memory information
             epoch_time = time.time() - epoch_start
             if verbose and (epoch + 1) % 5 == 0:
                 log_msg = f"Epoch {epoch+1:3d}/{epochs} | "
@@ -488,14 +633,24 @@ class GNNTrainer:
                 if val_data is not None:
                     log_msg += f"Val R²: {val_metrics.get('r2', 0):.4f} | "
                 log_msg += f"Time: {epoch_time:.2f}s"
-                if self.use_multi_gpu:
-                    # add GPU utilization info if available
-                    try:
-                        gpu_memory = [torch.cuda.memory_allocated(i) / (1024**3) for i in range(self.device_info['num_gpus'])]
-                        log_msg += f" | GPU Mem: {[f'{mem:.1f}GB' for mem in gpu_memory]}"
-                    except:
-                        pass
+                
+                # add memory usage information
+                if torch.cuda.is_available():
+                    train_mem = train_metrics.get('memory_allocated_gb', 0)
+                    train_free = train_metrics.get('memory_free_gb', 0)
+                    log_msg += f" | GPU Mem: {train_mem:.1f}GB used, {train_free:.1f}GB free"
+                    
+                    # memory warning if getting close to limit
+                    if train_mem > self.max_memory_gb * 0.9:
+                        log_msg += " ⚠️ HIGH MEMORY"
+                
                 self.logger.info(log_msg)
+                
+            # periodic memory cleanup
+            if (epoch + 1) % 10 == 0:
+                clear_gpu_memory()
+                memory_usage = get_memory_usage()
+                self.logger.info(f"Memory cleanup - Allocated: {memory_usage['allocated']:.1f}GB, Free: {memory_usage['free']:.1f}GB")
             
             # save best model
             if save_best_model and val_data is not None and val_loss < best_val_loss:
