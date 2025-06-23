@@ -772,7 +772,7 @@ def create_gnn_model(
         if memory_efficient:
             return MemoryEfficientGraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
         else:
-        return GraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
+            return GraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
     elif model_type == 'memory-efficient-transformer':
         return MemoryEfficientGraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
     elif model_type == 'hybrid':
