@@ -442,7 +442,7 @@ if "weather_weather_code" in df_sorted.columns:
     }
     
     df_sorted = df_sorted.with_columns([
-        pl.col("weather_weather_code").replace(weather_code_mapping, default="null").alias("weather_code_cat")
+        pl.col("weather_weather_code").replace_strict(weather_code_mapping, default="null").alias("weather_code_cat")
     ])
     
     # One-hot encoding
@@ -452,7 +452,7 @@ if "weather_weather_code" in df_sorted.columns:
 if "weather_temperature_2m" in df_sorted.columns:
     df_sorted = df_sorted.with_columns([
         pl.col("weather_temperature_2m")
-        .cut([-np.inf, 5, 15, 25, 35, np.inf], 
+        .cut([-50, 5, 15, 25, 35, 50], 
              labels=["mucha_frio", "frio", "templado", "calor", "mucha_calor"])
         .alias("temp_bucket")
     ])
@@ -462,7 +462,7 @@ else:
 if "weather_wind_speed_10m" in df_sorted.columns:
     df_sorted = df_sorted.with_columns([
         pl.col("weather_wind_speed_10m")
-        .cut([-np.inf, 5, 15, 25, np.inf],
+        .cut([0, 5, 15, 25, 100],
              labels=["calma", "brisa", "ventoso", "muy_ventoso"])
         .alias("wind_bucket")
     ])
