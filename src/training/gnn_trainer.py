@@ -3,14 +3,17 @@ Training module for Graph Neural Network models in EcoBici demand prediction.
 
 This module provides comprehensive training functionality for GNN models including
 training loops, validation, early stopping, model checkpointing, and experiment tracking.
+Supports both full-batch training (for small graphs) and mini-batch training with 
+neighbor sampling (for large graphs).
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-from torch_geometric.data import Data, DataLoader
-from torch_geometric.loader import DataLoader as GeometricDataLoader
+from torch_geometric.data import Data
+from torch_geometric.loader import NeighborLoader, DataLoader as GeometricDataLoader
+from torch_geometric.utils import trim_to_layer
 
 import numpy as np
 import pandas as pd
@@ -65,7 +68,9 @@ class GNNTrainer:
     Comprehensive trainer for Graph Neural Network models.
     
     Handles training, validation, model checkpointing, and experiment tracking
-    for various GNN architectures on bike demand prediction.
+    for various GNN architectures on bike demand prediction. Supports both
+    full-batch training (small graphs) and mini-batch training with neighbor
+    sampling (large graphs).
     """
     
     def __init__(
@@ -73,7 +78,10 @@ class GNNTrainer:
         model: nn.Module,
         device: str = 'auto',
         experiment_name: str = None,
-        save_dir: str = 'experiments'
+        save_dir: str = 'experiments',
+        batch_size: int = None,
+        num_neighbors: List[int] = None,
+        use_neighbor_sampling: bool = 'auto'
     ):
         """
         Initialize GNN trainer.
@@ -83,6 +91,9 @@ class GNNTrainer:
             device: Device to use ('cuda', 'cpu', or 'auto')
             experiment_name: Name for this experiment
             save_dir: Directory to save experiment results
+            batch_size: Batch size for mini-batch training (None for full-batch)
+            num_neighbors: Number of neighbors to sample per layer for NeighborLoader
+            use_neighbor_sampling: Whether to use neighbor sampling ('auto', True, False)
         """
         # set device
         if device == 'auto':
@@ -97,6 +108,11 @@ class GNNTrainer:
         self.experiment_name = experiment_name or f"gnn_experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.save_dir = Path(save_dir) / self.experiment_name
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # batching configuration
+        self.batch_size = batch_size
+        self.num_neighbors = num_neighbors or [15, 10, 5]  # default neighbor sampling
+        self.use_neighbor_sampling = use_neighbor_sampling
         
         # setup logging
         self.setup_logging()
@@ -116,6 +132,8 @@ class GNNTrainer:
         self.logger.info(f"Initialized GNN trainer for {model.__class__.__name__}")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Experiment: {self.experiment_name}")
+        self.logger.info(f"Batch size: {self.batch_size}")
+        self.logger.info(f"Neighbor sampling: {self.use_neighbor_sampling}")
         
     def setup_logging(self):
         """Setup logging for the experiment"""
@@ -225,89 +243,253 @@ class GNNTrainer:
         self.logger.info(f"  Optimizer: {optimizer_name} (lr={learning_rate}, wd={weight_decay})")
         self.logger.info(f"  Scheduler: {scheduler_name}")
         self.logger.info(f"  Loss: {loss_function}")
+    
+    def _determine_batching_strategy(self, data: Data) -> bool:
+        """
+        Determine whether to use neighbor sampling based on graph size.
         
-    def train_epoch(self, train_data: Data) -> Tuple[float, Dict[str, float]]:
+        Args:
+            data: Graph data
+            
+        Returns:
+            True if should use neighbor sampling, False for full-batch
+        """
+        if self.use_neighbor_sampling == 'auto':
+            # use neighbor sampling for graphs with >500 nodes or >5000 edges
+            num_nodes = data.x.shape[0] if data.x is not None else data.num_nodes
+            num_edges = data.edge_index.shape[1] if data.edge_index is not None else 0
+            
+            should_use_sampling = num_nodes > 500 or num_edges > 5000
+            self.logger.info(f"Auto-detected batching strategy: {'neighbor sampling' if should_use_sampling else 'full-batch'}")
+            self.logger.info(f"  Graph size: {num_nodes} nodes, {num_edges} edges")
+            return should_use_sampling
+        else:
+            return bool(self.use_neighbor_sampling)
+    
+    def _create_data_loader(self, data: Data, shuffle: bool = False, input_nodes: torch.Tensor = None):
+        """
+        Create appropriate data loader based on batching strategy.
+        
+        Args:
+            data: Graph data
+            shuffle: Whether to shuffle data
+            input_nodes: Specific nodes to sample from (for train/val split)
+            
+        Returns:
+            DataLoader or iterable
+        """
+        use_sampling = self._determine_batching_strategy(data)
+        
+        if use_sampling and self.batch_size is not None:
+            # use neighbor sampling for large graphs
+            loader = NeighborLoader(
+                data,
+                num_neighbors=self.num_neighbors,
+                batch_size=self.batch_size,
+                input_nodes=input_nodes,
+                shuffle=shuffle,
+                num_workers=0,  # avoid multiprocessing issues
+                replace=False,
+                directed=True
+            )
+            self.logger.info(f"Created NeighborLoader: batch_size={self.batch_size}, num_neighbors={self.num_neighbors}")
+            return loader
+        else:
+            # use full-batch training for small graphs
+            if input_nodes is not None:
+                # create subset of data for train/val split
+                data_subset = Data(
+                    x=data.x,
+                    edge_index=data.edge_index,
+                    y=data.y,
+                    input_nodes=input_nodes
+                )
+                self.logger.info(f"Created full-batch loader with input_nodes subset")
+                return [data_subset]
+            else:
+                self.logger.info(f"Created full-batch loader")
+                return [data]
+    
+    def train_epoch(self, train_loader) -> Tuple[float, Dict[str, float]]:
         """
         Train for one epoch.
         
         Args:
-            train_data: Training data
+            train_loader: Training data loader
             
         Returns:
             Tuple of (average_loss, metrics_dict)
         """
         self.model.train()
         total_loss = 0.0
+        num_batches = 0
         all_predictions = []
         all_targets = []
         
-        # move data to device
-        train_data = train_data.to(self.device)
+        for batch in train_loader:
+            # move batch to device
+            batch = batch.to(self.device)
+            
+            # forward pass
+            self.optimizer.zero_grad()
+            
+            # check if this is a neighbor sampled batch or full graph
+            if hasattr(batch, 'num_sampled_nodes') and hasattr(batch, 'num_sampled_edges'):
+                # neighbor sampled batch - use hierarchical sampling
+                predictions = self._forward_with_sampling(batch)
+                # for neighbor sampling, only compute loss on seed nodes
+                if hasattr(batch, 'batch_size'):
+                    targets = batch.y[:batch.batch_size]
+                    predictions = predictions[:batch.batch_size]
+                else:
+                    targets = batch.y
+            else:
+                # full-batch or regular batch
+                predictions = self.model(batch)
+                targets = batch.y
+                
+                # if using input_nodes subset, filter predictions and targets
+                if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
+                    input_nodes = batch.input_nodes
+                    predictions = predictions[input_nodes]
+                    targets = targets[input_nodes]
+            
+            # calculate loss
+            loss = self.criterion(predictions, targets)
+            
+            # backward pass
+            loss.backward()
+            
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            # optimizer step
+            self.optimizer.step()
+            
+            # accumulate metrics
+            total_loss += loss.item()
+            num_batches += 1
+            all_predictions.append(predictions.detach())
+            all_targets.append(targets.detach())
         
-        # forward pass
-        self.optimizer.zero_grad()
-        predictions = self.model(train_data)
-        targets = train_data.y
+        # calculate epoch metrics
+        if all_predictions:
+            all_predictions = torch.cat(all_predictions, dim=0)
+            all_targets = torch.cat(all_targets, dim=0)
+            metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        else:
+            metrics = {}
         
-        # calculate loss
-        loss = self.criterion(predictions, targets)
+        avg_loss = total_loss / max(num_batches, 1)
+        return avg_loss, metrics
+    
+    def _forward_with_sampling(self, batch: Data) -> torch.Tensor:
+        """
+        Forward pass with hierarchical neighbor sampling using trim_to_layer.
         
-        # backward pass
-        loss.backward()
+        Args:
+            batch: Sampled batch with num_sampled_nodes/edges attributes
+            
+        Returns:
+            Model predictions
+        """
+        x, edge_index = batch.x, batch.edge_index
+        num_sampled_nodes = batch.num_sampled_nodes
+        num_sampled_edges = batch.num_sampled_edges
         
-        # gradient clipping (optional)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # check if model supports hierarchical sampling
+        if hasattr(self.model, 'convs') and hasattr(self.model.convs, '__iter__'):
+            # apply hierarchical sampling for models with conv layers
+            for i, conv in enumerate(self.model.convs):
+                # trim to current layer
+                if i < len(num_sampled_edges):
+                    x, edge_index, _ = trim_to_layer(
+                        i, num_sampled_nodes, num_sampled_edges, x, edge_index
+                    )
+                
+                # apply conv layer with appropriate activation
+                if hasattr(conv, '__call__'):
+                    x = conv(x, edge_index)
+                    
+                    # apply activation and dropout if not last layer
+                    if i < len(self.model.convs) - 1:
+                        if hasattr(self.model, 'activation'):
+                            x = self.model.activation(x)
+                        else:
+                            x = torch.relu(x)
+                        x = torch.dropout(x, p=getattr(self.model, 'dropout', 0.2), training=self.training)
+            
+            # apply final prediction layer if exists
+            if hasattr(self.model, 'predictor'):
+                x = self.model.predictor(x)
+            elif hasattr(self.model, 'lin'):
+                x = self.model.lin(x)
+                
+            return x
+        else:
+            # fallback to regular forward for models without hierarchical support
+            return self.model(batch)
         
-        # optimizer step
-        self.optimizer.step()
-        
-        total_loss += loss.item()
-        all_predictions.append(predictions.detach())
-        all_targets.append(targets.detach())
-        
-        # calculate metrics
-        all_predictions = torch.cat(all_predictions, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_gnn_metrics(all_predictions, all_targets)
-        
-        return total_loss, metrics
-        
-    def validate_epoch(self, val_data: Data) -> Tuple[float, Dict[str, float]]:
+    def validate_epoch(self, val_loader) -> Tuple[float, Dict[str, float]]:
         """
         Validate for one epoch.
         
         Args:
-            val_data: Validation data
+            val_loader: Validation data loader
             
         Returns:
             Tuple of (average_loss, metrics_dict)
         """
         self.model.eval()
         total_loss = 0.0
+        num_batches = 0
         all_predictions = []
         all_targets = []
         
         with torch.no_grad():
-            # move data to device
-            val_data = val_data.to(self.device)
-            
-            # forward pass
-            predictions = self.model(val_data)
-            targets = val_data.y
-            
-            # calculate loss
-            loss = self.criterion(predictions, targets)
-            
-            total_loss += loss.item()
-            all_predictions.append(predictions)
-            all_targets.append(targets)
+            for batch in val_loader:
+                # move batch to device
+                batch = batch.to(self.device)
+                
+                # forward pass
+                if hasattr(batch, 'num_sampled_nodes') and hasattr(batch, 'num_sampled_edges'):
+                    # neighbor sampled batch
+                    predictions = self._forward_with_sampling(batch)
+                    if hasattr(batch, 'batch_size'):
+                        targets = batch.y[:batch.batch_size]
+                        predictions = predictions[:batch.batch_size]
+                    else:
+                        targets = batch.y
+                else:
+                    # full-batch
+                    predictions = self.model(batch)
+                    targets = batch.y
+                    
+                    # filter if using input_nodes
+                    if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
+                        input_nodes = batch.input_nodes
+                        predictions = predictions[input_nodes]
+                        targets = targets[input_nodes]
+                
+                # calculate loss
+                loss = self.criterion(predictions, targets)
+                
+                # accumulate metrics
+                total_loss += loss.item()
+                num_batches += 1
+                all_predictions.append(predictions)
+                all_targets.append(targets)
         
-        # calculate metrics
-        all_predictions = torch.cat(all_predictions, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        # calculate epoch metrics
+        if all_predictions:
+            all_predictions = torch.cat(all_predictions, dim=0)
+            all_targets = torch.cat(all_targets, dim=0)
+            metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        else:
+            metrics = {}
         
-        return total_loss, metrics
+        avg_loss = total_loss / max(num_batches, 1)
+        return avg_loss, metrics
     
     def fit(
         self,
@@ -318,7 +500,9 @@ class GNNTrainer:
         save_best_model: bool = True,
         save_checkpoints: bool = True,
         checkpoint_frequency: int = 10,
-        verbose: bool = True
+        verbose: bool = True,
+        train_mask: Optional[torch.Tensor] = None,
+        val_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, Any]:
         """
         Train the GNN model.
@@ -332,6 +516,8 @@ class GNNTrainer:
             save_checkpoints: Whether to save periodic checkpoints
             checkpoint_frequency: How often to save checkpoints
             verbose: Whether to print progress
+            train_mask: Mask for training nodes (for node-level tasks)
+            val_mask: Mask for validation nodes (for node-level tasks)
             
         Returns:
             Training history dictionary
@@ -339,36 +525,52 @@ class GNNTrainer:
         if self.optimizer is None:
             self.setup_training()
         
+        # create data loaders
+        if train_mask is not None:
+            train_nodes = train_mask.nonzero().squeeze() if train_mask.dtype == torch.bool else train_mask
+        else:
+            train_nodes = None
+            
+        if val_mask is not None:
+            val_nodes = val_mask.nonzero().squeeze() if val_mask.dtype == torch.bool else val_mask
+        else:
+            val_nodes = None
+        
+        train_loader = self._create_data_loader(train_data, shuffle=True, input_nodes=train_nodes)
+        
+        if val_data is not None:
+            val_loader = self._create_data_loader(val_data, shuffle=False, input_nodes=val_nodes)
+        else:
+            val_loader = None
+        
         # setup early stopping
         early_stopping = EarlyStopping(
             patience=early_stopping_patience,
             restore_best_weights=True
-        ) if val_data is not None else None
+        ) if val_loader is not None else None
         
         best_val_loss = float('inf')
         start_time = time.time()
         
         self.logger.info(f"Starting training for {epochs} epochs")
-        self.logger.info(f"Training samples: {train_data.x.shape[0]}")
-        if val_data is not None:
-            self.logger.info(f"Validation samples: {val_data.x.shape[0]}")
+        self.logger.info(f"Training strategy: {'Mini-batch' if isinstance(train_loader, NeighborLoader) else 'Full-batch'}")
         
         for epoch in range(epochs):
             epoch_start = time.time()
             
             # training step
-            train_loss, train_metrics = self.train_epoch(train_data)
+            train_loss, train_metrics = self.train_epoch(train_loader)
             
             # validation step
-            if val_data is not None:
-                val_loss, val_metrics = self.validate_epoch(val_data)
+            if val_loader is not None:
+                val_loss, val_metrics = self.validate_epoch(val_loader)
             else:
                 val_loss, val_metrics = float('nan'), {}
             
             # update learning rate
             if self.scheduler is not None:
                 if isinstance(self.scheduler, ReduceLROnPlateau):
-                    self.scheduler.step(val_loss if val_data is not None else train_loss)
+                    self.scheduler.step(val_loss if val_loader is not None else train_loss)
                 else:
                     self.scheduler.step()
             
@@ -384,16 +586,16 @@ class GNNTrainer:
             if verbose and (epoch + 1) % 5 == 0:
                 log_msg = f"Epoch {epoch+1:3d}/{epochs} | "
                 log_msg += f"Train Loss: {train_loss:.4f} | "
-                if val_data is not None:
+                if val_loader is not None:
                     log_msg += f"Val Loss: {val_loss:.4f} | "
                 log_msg += f"Train R²: {train_metrics.get('r2', 0):.4f} | "
-                if val_data is not None:
+                if val_loader is not None:
                     log_msg += f"Val R²: {val_metrics.get('r2', 0):.4f} | "
                 log_msg += f"Time: {epoch_time:.2f}s"
                 self.logger.info(log_msg)
             
             # save best model
-            if save_best_model and val_data is not None and val_loss < best_val_loss:
+            if save_best_model and val_loader is not None and val_loss < best_val_loss:
                 best_val_loss = val_loss
                 self.save_model('best_model.pt')
             
@@ -469,6 +671,11 @@ class GNNTrainer:
             'model_class': model_class_name,
             'model_init_params': model_init_params,
             'model_config': getattr(self.model, 'config', {}),
+            'training_config': {
+                'batch_size': self.batch_size,
+                'num_neighbors': self.num_neighbors,
+                'use_neighbor_sampling': self.use_neighbor_sampling
+            }
         }, model_path)
         self.logger.info(f"Model saved to {model_path}")
     
@@ -483,6 +690,11 @@ class GNNTrainer:
             'total_parameters': sum(p.numel() for p in self.model.parameters()),
             'trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             'model_structure': str(self.model),
+            'training_config': {
+                'batch_size': self.batch_size,
+                'num_neighbors': self.num_neighbors,
+                'use_neighbor_sampling': self.use_neighbor_sampling
+            },
             'initialization_parameters': {}
         }
         
@@ -556,6 +768,11 @@ class GNNTrainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'history': self.history,
+            'training_config': {
+                'batch_size': self.batch_size,
+                'num_neighbors': self.num_neighbors,
+                'use_neighbor_sampling': self.use_neighbor_sampling
+            }
         }, checkpoint_path)
     
     def load_checkpoint(self, checkpoint_path: str):
@@ -568,6 +785,11 @@ class GNNTrainer:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         if 'history' in checkpoint:
             self.history = checkpoint['history']
+        if 'training_config' in checkpoint:
+            config = checkpoint['training_config']
+            self.batch_size = config.get('batch_size', self.batch_size)
+            self.num_neighbors = config.get('num_neighbors', self.num_neighbors)
+            self.use_neighbor_sampling = config.get('use_neighbor_sampling', self.use_neighbor_sampling)
         self.logger.info(f"Checkpoint loaded from {checkpoint_path}")
         return checkpoint.get('epoch', 0)
     
@@ -591,51 +813,103 @@ class GNNTrainer:
         
         self.logger.info(f"Training history saved to {history_path}")
     
-    def evaluate(self, test_data: Data) -> Dict[str, float]:
+    def evaluate(self, test_data: Data, test_mask: Optional[torch.Tensor] = None) -> Dict[str, float]:
         """
         Evaluate model on test data.
         
         Args:
             test_data: Test data
+            test_mask: Mask for test nodes (for node-level tasks)
             
         Returns:
             Dictionary of evaluation metrics
         """
         self.model.eval()
-        test_data = test_data.to(self.device)
+        
+        # create test loader
+        if test_mask is not None:
+            test_nodes = test_mask.nonzero().squeeze() if test_mask.dtype == torch.bool else test_mask
+        else:
+            test_nodes = None
+        
+        test_loader = self._create_data_loader(test_data, shuffle=False, input_nodes=test_nodes)
+        
+        all_predictions = []
+        all_targets = []
         
         with torch.no_grad():
-            predictions = self.model(test_data)
-            targets = test_data.y
-            
-            # calculate metrics
-            metrics = calculate_gnn_metrics(predictions, targets)
-            
-            # add additional evaluation metrics
-            metrics['test_loss'] = self.criterion(predictions, targets).item()
-            
+            for batch in test_loader:
+                batch = batch.to(self.device)
+                
+                # forward pass
+                if hasattr(batch, 'num_sampled_nodes') and hasattr(batch, 'num_sampled_edges'):
+                    predictions = self._forward_with_sampling(batch)
+                    if hasattr(batch, 'batch_size'):
+                        targets = batch.y[:batch.batch_size]
+                        predictions = predictions[:batch.batch_size]
+                    else:
+                        targets = batch.y
+                else:
+                    predictions = self.model(batch)
+                    targets = batch.y
+                    
+                    if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
+                        input_nodes = batch.input_nodes
+                        predictions = predictions[input_nodes]
+                        targets = targets[input_nodes]
+                
+                all_predictions.append(predictions)
+                all_targets.append(targets)
+        
+        # calculate metrics
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+        metrics = calculate_gnn_metrics(all_predictions, all_targets)
+        
+        # add test loss
+        metrics['test_loss'] = self.criterion(all_predictions, all_targets).item()
+        
         self.logger.info("Test Results:")
         for metric, value in metrics.items():
             self.logger.info(f"  {metric}: {value:.4f}")
         
         return metrics
     
-    def predict(self, data: Data) -> np.ndarray:
+    def predict(self, data: Data, input_nodes: Optional[torch.Tensor] = None) -> np.ndarray:
         """
         Make predictions on new data.
         
         Args:
             data: Input data
+            input_nodes: Specific nodes to predict for
             
         Returns:
             Predictions as numpy array
         """
         self.model.eval()
-        data = data.to(self.device)
+        
+        # create data loader
+        data_loader = self._create_data_loader(data, shuffle=False, input_nodes=input_nodes)
+        
+        all_predictions = []
         
         with torch.no_grad():
-            predictions = self.model(data)
-            return predictions.cpu().numpy()
+            for batch in data_loader:
+                batch = batch.to(self.device)
+                
+                if hasattr(batch, 'num_sampled_nodes') and hasattr(batch, 'num_sampled_edges'):
+                    predictions = self._forward_with_sampling(batch)
+                    if hasattr(batch, 'batch_size'):
+                        predictions = predictions[:batch.batch_size]
+                else:
+                    predictions = self.model(batch)
+                    if hasattr(batch, 'input_nodes') and batch.input_nodes is not None:
+                        predictions = predictions[batch.input_nodes]
+                
+                all_predictions.append(predictions)
+        
+        all_predictions = torch.cat(all_predictions, dim=0)
+        return all_predictions.cpu().numpy()
 
 
 def train_gnn_experiment(
@@ -647,7 +921,7 @@ def train_gnn_experiment(
     experiment_name: str = None
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """
-    Run a complete GNN training experiment.
+    Run a complete GNN training experiment with automatic batching strategy.
     
     Args:
         model_type: Type of GNN model to train
@@ -671,25 +945,37 @@ def train_gnn_experiment(
         **config.get('model_params', {})
     )
     
-    # create trainer
+    # create trainer with batching configuration
+    trainer_params = config.get('trainer_params', {})
     trainer = GNNTrainer(
         model=model,
         experiment_name=experiment_name,
-        **config.get('trainer_params', {})
+        batch_size=trainer_params.get('batch_size', None),
+        num_neighbors=trainer_params.get('num_neighbors', [15, 10, 5]),
+        use_neighbor_sampling=trainer_params.get('use_neighbor_sampling', 'auto'),
+        **{k: v for k, v in trainer_params.items() 
+           if k not in ['batch_size', 'num_neighbors', 'use_neighbor_sampling']}
     )
     
     # setup training
     trainer.setup_training(**config.get('training_params', {}))
     
     # train model
+    fit_params = config.get('fit_params', {})
     history = trainer.fit(
         train_data=train_data,
         val_data=val_data,
-        **config.get('fit_params', {})
+        train_mask=fit_params.get('train_mask'),
+        val_mask=fit_params.get('val_mask'),
+        **{k: v for k, v in fit_params.items() 
+           if k not in ['train_mask', 'val_mask']}
     )
     
     # evaluate on test set
-    test_metrics = trainer.evaluate(test_data)
+    test_metrics = trainer.evaluate(
+        test_data, 
+        test_mask=fit_params.get('test_mask')
+    )
     
     results = {
         'model_type': model_type,

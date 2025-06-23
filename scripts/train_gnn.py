@@ -339,12 +339,33 @@ def main():
                         help='Name for the experiment')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
+    
+    # Training configuration
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
     parser.add_argument('--patience', type=int, default=15,
                         help='Early stopping patience (epochs without improvement)')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                         help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-5,
+                        help='Weight decay for regularization')
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        choices=['adam', 'adamw', 'sgd'],
+                        help='Optimizer type')
+    parser.add_argument('--scheduler', type=str, default='plateau',
+                        choices=['plateau', 'cosine', 'none'],
+                        help='Learning rate scheduler')
+    
+    # Batching and sampling configuration
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size for mini-batch training (None for full-batch)')
+    parser.add_argument('--use_neighbor_sampling', type=str, default='auto',
+                        choices=['auto', 'true', 'false'],
+                        help='Whether to use neighbor sampling (auto: decide based on graph size)')
+    parser.add_argument('--num_neighbors', type=int, nargs='+', default=[15, 10, 5],
+                        help='Number of neighbors to sample per layer (e.g., --num_neighbors 15 10 5)')
+    
+    # Model architecture
     parser.add_argument('--hidden_dim', type=int, default=128,
                         help='Hidden dimension size')
     parser.add_argument('--num_layers', type=int, default=3,
@@ -360,14 +381,8 @@ def main():
                         help='Activation function')
     parser.add_argument('--batch_norm', action='store_true', default=True,
                         help='Use batch normalization')
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                        help='Weight decay for regularization')
-    parser.add_argument('--optimizer', type=str, default='adam',
-                        choices=['adam', 'adamw', 'sgd'],
-                        help='Optimizer type')
-    parser.add_argument('--scheduler', type=str, default='plateau',
-                        choices=['plateau', 'cosine', 'none'],
-                        help='Learning rate scheduler')
+    
+    # System configuration
     parser.add_argument('--device', type=str, default='auto',
                         help='Device to use (cuda/cpu/auto)')
     parser.add_argument('--save_results', action='store_true',
@@ -388,6 +403,14 @@ def main():
         print("  python scripts/prepare_gnn_dataset.py")
         return
     
+    # convert string boolean to actual boolean for neighbor sampling
+    if args.use_neighbor_sampling == 'auto':
+        use_neighbor_sampling = 'auto'
+    elif args.use_neighbor_sampling == 'true':
+        use_neighbor_sampling = True
+    else:
+        use_neighbor_sampling = False
+    
     # get configurations
     configs = get_model_configs()
     
@@ -403,6 +426,12 @@ def main():
         configs[model_type]['training_params']['optimizer_name'] = args.optimizer
         configs[model_type]['training_params']['scheduler_name'] = args.scheduler
         
+        # trainer params (batching configuration)
+        configs[model_type]['trainer_params']['device'] = args.device
+        configs[model_type]['trainer_params']['batch_size'] = args.batch_size
+        configs[model_type]['trainer_params']['num_neighbors'] = args.num_neighbors
+        configs[model_type]['trainer_params']['use_neighbor_sampling'] = use_neighbor_sampling
+        
         # model params
         configs[model_type]['model_params']['hidden_dim'] = args.hidden_dim
         configs[model_type]['model_params']['num_layers'] = args.num_layers
@@ -416,9 +445,22 @@ def main():
             configs[model_type]['model_params']['attention_dropout'] = args.attention_dropout
         if model_type in ['gcn', 'sage']:
             configs[model_type]['model_params']['activation'] = args.activation
-        
-        # trainer params
-        configs[model_type]['trainer_params']['device'] = args.device
+    
+    # print configuration summary
+    print(f"\n{'='*60}")
+    print(f"TRAINING CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"Data: {args.data_dir}")
+    print(f"Model(s): {args.model}")
+    print(f"Batch size: {args.batch_size if args.batch_size else 'Full-batch'}")
+    print(f"Neighbor sampling: {args.use_neighbor_sampling}")
+    if args.batch_size:
+        print(f"Neighbors per layer: {args.num_neighbors}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Hidden dim: {args.hidden_dim}")
+    print(f"Device: {args.device}")
+    print(f"{'='*60}")
     
     if args.model == 'all':
         # run comparison
