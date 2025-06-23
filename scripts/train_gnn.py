@@ -221,7 +221,10 @@ def train_temporal_gnn(
     
     model.to(device)
     
-    for epoch in range(epochs):
+    # Main epoch progress bar
+    epoch_pbar = tqdm(range(epochs), desc="Training Progress")
+    
+    for epoch in epoch_pbar:
         # Training phase
         model.train()
         train_losses = []
@@ -232,6 +235,7 @@ def train_temporal_gnn(
         # Shuffle training snapshots
         train_indices = torch.randperm(len(train_data_list))
         
+        # Training snapshots progress bar
         for idx in tqdm(train_indices, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False):
             data = train_data_list[idx].to(device)
             
@@ -300,14 +304,21 @@ def train_temporal_gnn(
         history['train_metrics'].append(train_metrics)
         history['val_metrics'].append(val_metrics)
         
+        # Update epoch progress bar with metrics
+        epoch_pbar.set_description(
+            f"TL:{avg_train_loss:.4f} VL:{avg_val_loss:.4f} "
+            f"TR²:{train_metrics['r2']:.3f} VR²:{val_metrics['r2']:.3f}"
+        )
+        
         # Learning rate scheduling
         scheduler.step(avg_val_loss)
         
         # Print progress
         if (epoch + 1) % config['fit_params'].get('log_frequency', 10) == 0:
-            print(f"Epoch {epoch+1:3d}: "
+            print(f"\nEpoch {epoch+1:3d}: "
                   f"Train Loss={avg_train_loss:.4f}, "
                   f"Val Loss={avg_val_loss:.4f}, "
+                  f"Train R²={train_metrics['r2']:.4f}, "
                   f"Val R²={val_metrics['r2']:.4f}")
         
         # Early stopping
@@ -320,11 +331,12 @@ def train_temporal_gnn(
             patience_counter += 1
             
         if patience_counter >= patience:
-            print(f"Early stopping triggered after {epoch+1} epochs")
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
             # Restore best model
             model.load_state_dict(best_model_state)
             break
     
+    epoch_pbar.close()
     return model, history
 
 
