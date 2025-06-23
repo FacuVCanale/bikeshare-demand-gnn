@@ -557,6 +557,7 @@ class GNNTrainer:
         best_val_loss = float('inf')
         last_model_save_epoch = -1
         start_time = time.time()
+        first_validation = True
         
         # model parameter count
         total_params = sum(p.numel() for p in self.model.parameters())
