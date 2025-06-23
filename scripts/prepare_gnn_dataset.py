@@ -162,334 +162,153 @@ def create_edge_index_from_adjacency(adj_matrix: np.ndarray) -> torch.Tensor:
     edge_index = torch.tensor(np.vstack([edge_indices[0], edge_indices[1]]), dtype=torch.long)
     return edge_index
 
-def process_cluster_sequences(args):
-    """Process sequences for a single cluster - for multiprocessing."""
-    # Unpack pre-converted numpy arrays instead of Polars DataFrames
-    cluster_features, cluster_targets, cluster_timestamps, feature_cols, target_cols, sequence_length, prediction_horizon = args
-    
-    n_samples = len(cluster_features)
-    if n_samples < sequence_length + prediction_horizon:
-        return [], [], []
-    
-    if cluster_targets is None or len(cluster_targets) == 0:
-        return [], [], []
-    
-    sequences = []
-    targets = []
-    timestamps = []
-    
-    # Vectorized sequence creation
-    for i in range(n_samples - sequence_length - prediction_horizon + 1):
-        sequences.append(cluster_features[i:i + sequence_length])
-        targets.append(cluster_targets[i + sequence_length:i + sequence_length + prediction_horizon].flatten())
-        timestamps.append(cluster_timestamps[i + sequence_length])
-    
-    return sequences, targets, timestamps
-
-
-def prepare_temporal_sequences_optimized(
+def create_temporal_snapshot_data(
     df: pl.DataFrame,
+    feature_cols: List[str],
     target_cols: List[str],
-    sequence_length: int = 24,
-    prediction_horizon: int = 1,
-    use_multiprocessing: bool = True,
-    chunk_size: int = 10
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """
-    Optimized version of prepare_temporal_sequences.
-    
-    Args:
-        df: Input dataframe
-        target_cols: Target column names
-        sequence_length: Number of historical time steps
-        prediction_horizon: Number of future steps to predict
-        use_multiprocessing: Whether to use parallel processing
-        chunk_size: Number of clusters to process per chunk
-    
-    Returns:
-        Tuple of (X, y, timestamps, feature_names)
-    """
-    print("Using optimized temporal sequence preparation...")
-    
-    # Use lazy evaluation for sorting
-    df_lazy = df.lazy().sort(['cluster_id', 'ts_start'])
-    
-    # Get feature columns efficiently
-    exclude_cols = ['cluster_id', 'ts_start'] + target_cols
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
-    
-    print(f"  Processing {len(feature_cols)} features across clusters...")
-    
-    # Get unique clusters and partition data efficiently
-    df_sorted = df_lazy.collect()
-    unique_clusters = sorted(df_sorted['cluster_id'].unique().to_list())
-    print(f"  Found {len(unique_clusters)} clusters to process")
-    
-    # Partition data by cluster for efficient access
-    print("  Partitioning data by cluster...")
-    cluster_partitions = df_sorted.partition_by('cluster_id', as_dict=True)
-    
-    # Debug: Check partition keys
-    print(f"  Debug: Partition keys type: {type(list(cluster_partitions.keys())[0] if cluster_partitions else 'None')}")
-    print(f"  Debug: First 5 partition keys: {list(cluster_partitions.keys())[:5] if cluster_partitions else 'None'}")
-    print(f"  Debug: First 5 unique clusters: {unique_clusters[:5]}")
-    print(f"  Debug: Unique clusters type: {type(unique_clusters[0]) if unique_clusters else 'None'}")
-    
-    # Clean up the sorted dataframe to free memory
-    del df_sorted
-    gc.collect()
-    
-    all_sequences = []
-    all_targets = []
-    all_timestamps = []
-    
-    if use_multiprocessing and len(unique_clusters) > 4:
-        print("  Using multiprocessing for faster processing...")
-        
-        # Prepare arguments for multiprocessing - convert to numpy first
-        process_args = []
-        failed_clusters = 0
-        
-        print(f"  Preparing data for {len(unique_clusters)} clusters...")
-        for cluster_id in unique_clusters:
-            # Try different key formats due to Polars partition_by behavior
-            partition_key = cluster_id
-            if cluster_id not in cluster_partitions:
-                # Try as tuple (common Polars behavior)
-                partition_key = (cluster_id,)
-                if partition_key not in cluster_partitions:
-                    # Try as string
-                    partition_key = str(cluster_id)
-                    if partition_key not in cluster_partitions:
-                        print(f"    Debug: Cluster {cluster_id} not in partitions (tried multiple key formats)")
-                        failed_clusters += 1
-                        continue
-                
-            cluster_data = cluster_partitions[partition_key]
-            
-            # Debug: Check cluster data structure
-            if len(cluster_data) == 0:
-                print(f"    Debug: Cluster {cluster_id} has no data")
-                failed_clusters += 1
-                continue
-            
-            # Check if target columns exist in data
-            available_targets = [t for t in target_cols if t in cluster_data.columns]
-            if not available_targets:
-                print(f"    Debug: Cluster {cluster_id} has no target columns. Available: {cluster_data.columns[:5]}...")
-                failed_clusters += 1
-                continue
-            
-            # Check if we have enough data for sequences
-            if len(cluster_data) < sequence_length + prediction_horizon:
-                print(f"    Debug: Cluster {cluster_id} has insufficient data ({len(cluster_data)} < {sequence_length + prediction_horizon})")
-                failed_clusters += 1
-                continue
-            
-            # Convert to numpy arrays before multiprocessing (avoids serialization issues)
-            try:
-                cluster_features = cluster_data.select(feature_cols).to_numpy()
-                cluster_targets = cluster_data.select(available_targets).to_numpy()
-                cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
-                
-                process_args.append((
-                    cluster_features, cluster_targets, cluster_timestamps,
-                    feature_cols, available_targets, sequence_length, prediction_horizon
-                ))
-            except Exception as e:
-                print(f"    Warning: Could not process cluster {cluster_id}: {e}")
-                failed_clusters += 1
-                continue
-        
-        print(f"  Prepared {len(process_args)} clusters for processing, {failed_clusters} failed")
-        
-        if len(process_args) == 0:
-            print("  ERROR: No clusters prepared for multiprocessing - falling back to single-threaded")
-            use_multiprocessing = False  # Fall back to single-threaded
-        else:
-            # Process in chunks to manage memory
-            n_processes = min(mp.cpu_count() - 1, 4)  # Leave one core free
-            
-            with ProcessPoolExecutor(max_workers=n_processes) as executor:
-                # Submit jobs in chunks
-                chunk_iterator = range(0, len(process_args), chunk_size)
-                for i in tqdm(chunk_iterator, desc="Processing cluster chunks"):
-                    chunk_args = process_args[i:i + chunk_size]
-                    
-                    # Submit chunk jobs
-                    futures = [executor.submit(process_cluster_sequences, args) for args in chunk_args]
-                    
-                    # Collect results as they complete
-                    for future in as_completed(futures):
-                        try:
-                            sequences, targets, timestamps = future.result()
-                            all_sequences.extend(sequences)
-                            all_targets.extend(targets)
-                            all_timestamps.extend(timestamps)
-                        except Exception as e:
-                            print(f"    Warning: Failed to process a cluster chunk: {e}")
-                    
-                    # Force garbage collection between chunks
-                    gc.collect()
-    
-    # Single-threaded fallback or when multiprocessing is disabled
-    if not use_multiprocessing or len(unique_clusters) <= 4:
-        print("  Using single-threaded processing...")
-        # Single-threaded processing with progress bar
-        for cluster_id in tqdm(unique_clusters, desc="Processing clusters"):
-            try:
-                # Try different key formats due to Polars partition_by behavior
-                partition_key = cluster_id
-                if cluster_id not in cluster_partitions:
-                    # Try as tuple (common Polars behavior)
-                    partition_key = (cluster_id,)
-                    if partition_key not in cluster_partitions:
-                        # Try as string
-                        partition_key = str(cluster_id)
-                        if partition_key not in cluster_partitions:
-                            continue
-                
-                cluster_data = cluster_partitions[partition_key]
-                
-                # Check if target columns exist in data
-                available_targets = [t for t in target_cols if t in cluster_data.columns]
-                if not available_targets:
-                    continue
-                
-                # Check if we have enough data for sequences
-                if len(cluster_data) < sequence_length + prediction_horizon:
-                    continue
-                
-                # Convert to numpy arrays for processing
-                cluster_features = cluster_data.select(feature_cols).to_numpy()
-                cluster_targets = cluster_data.select(available_targets).to_numpy()
-                cluster_timestamps = cluster_data.select('ts_start').to_numpy().flatten()
-                
-                sequences, targets, timestamps = process_cluster_sequences(
-                    (cluster_features, cluster_targets, cluster_timestamps, 
-                     feature_cols, available_targets, sequence_length, prediction_horizon)
-                )
-                all_sequences.extend(sequences)
-                all_targets.extend(targets)
-                all_timestamps.extend(timestamps)
-            except Exception as e:
-                print(f"Warning: Error processing cluster {cluster_id}: {e}")
-                continue
-    
-    if not all_sequences:
-        print("  WARNING: No sequences created - check your data and parameters")
-        return np.array([]), np.array([]), np.array([]), feature_cols
-    
-    print(f"  Created {len(all_sequences)} sequences successfully")
-    
-    # Check if we have too many sequences for memory (> 1M sequences is risky)
-    if len(all_sequences) > 1000000:
-        print(f"  WARNING: Too many sequences ({len(all_sequences)}) - would require ~{len(all_sequences) * 24 * len(feature_cols) * 4 / 1e9:.1f}GB RAM")
-        print("  Automatically switching to aggregation-only approach to avoid memory issues")
-        return np.array([]), np.array([]), np.array([]), feature_cols
-    
-    # Clean up partitions to free memory
-    del cluster_partitions
-    gc.collect()
-    
-    # Convert to numpy arrays efficiently
-    return (
-        np.array(all_sequences, dtype=np.float32),
-        np.array(all_targets, dtype=np.float32), 
-        np.array(all_timestamps),
-        feature_cols
-    )
-
-
-def prepare_temporal_sequences(
-    df: pl.DataFrame,
-    target_cols: List[str],
-    sequence_length: int = 24,  # 24 * 30min = 12 hours
-    prediction_horizon: int = 1
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """
-    Prepare temporal sequences for each cluster.
-    
-    Args:
-        df: Input dataframe sorted by cluster_id and ts_start
-        sequence_length: Number of historical time steps
-        prediction_horizon: Number of future steps to predict
-    
-    Returns:
-        Tuple of (X, y, timestamps, feature_names)
-    """
-    # Use optimized version by default
-    return prepare_temporal_sequences_optimized(
-        df, target_cols, sequence_length, prediction_horizon
-    )
-
-def create_pytorch_geometric_data(
-    X: np.ndarray,
-    y: np.ndarray, 
-    timestamps: np.ndarray,
+    timestamp: pd.Timestamp,
     edge_index: torch.Tensor,
-    feature_names: List[str],
-    target_names: List[str],
-    cluster_features: Optional[Dict] = None
-) -> Data:
+    n_clusters: int,
+    sequence_length: int = 24
+) -> Optional[Data]:
     """
-    Create PyTorch Geometric Data object.
+    Create a single temporal snapshot for GNN training.
+    
+    This function creates one Data object representing the graph state at a specific
+    timestamp, using historical data as features and next timestep as target.
     
     Args:
-        X: Node features [n_nodes, sequence_length, n_features]
-        y: Target values [n_nodes, n_targets]
-        timestamps: Timestamps for each sample
-        edge_index: Graph edges
-        feature_names: Names of input features
-        target_names: Names of target features
-        cluster_features: Additional static cluster features
-    
+        df: DataFrame with all temporal data
+        feature_cols: List of feature column names
+        target_cols: List of target column names
+        timestamp: The current timestamp for this snapshot
+        edge_index: Graph connectivity
+        n_clusters: Total number of clusters
+        sequence_length: Number of historical timesteps to use as features
+        
     Returns:
-        PyTorch Geometric Data object
+        PyTorch Geometric Data object or None if insufficient data
     """
-    # Flatten temporal features for each node
-    n_nodes, seq_len, n_features = X.shape
-    X_flat = X.reshape(n_nodes, seq_len * n_features)
+    # Get data up to and including current timestamp
+    historical_mask = df['ts_start'] <= timestamp
+    historical_data = df.filter(historical_mask)
+    
+    # Get next timestep for targets
+    # Assuming 30-minute intervals
+    next_timestamp = timestamp + pd.Timedelta(minutes=30)
+    target_mask = df['ts_start'] == next_timestamp
+    target_data = df.filter(target_mask)
+    
+    if target_data.height == 0:
+        return None  # No target data available
+    
+    # Initialize feature matrix for all clusters
+    node_features = []
+    node_targets = []
+    valid_nodes = []
+    
+    for cluster_id in range(n_clusters):
+        # Get historical data for this cluster
+        cluster_hist = historical_data.filter(pl.col('cluster_id') == cluster_id).sort('ts_start')
+        cluster_target = target_data.filter(pl.col('cluster_id') == cluster_id)
+        
+        if cluster_hist.height < sequence_length or cluster_target.height == 0:
+            # Insufficient data for this cluster - use zeros
+            node_features.append(np.zeros(len(feature_cols) * sequence_length))
+            node_targets.append(np.zeros(len(target_cols)))
+            valid_nodes.append(0)  # Mark as invalid
+        else:
+            # Get last sequence_length timesteps
+            recent_data = cluster_hist.tail(sequence_length)
+            
+            # Extract features and flatten temporal dimension
+            features = recent_data.select(feature_cols).to_numpy().flatten()
+            targets = cluster_target.select(target_cols).to_numpy().flatten()
+            
+            node_features.append(features)
+            node_targets.append(targets)
+            valid_nodes.append(1)  # Mark as valid
     
     # Convert to tensors
-    x = torch.tensor(X_flat, dtype=torch.float32)
-    y_tensor = torch.tensor(y, dtype=torch.float32)
-    
-    # Add cluster static features if available
-    if cluster_features is not None:
-        cluster_static = []
-        for i in range(n_nodes):
-            cluster_info = cluster_features.get(str(i), {})
-            static_features = [
-                cluster_info.get('lat', 0.0),
-                cluster_info.get('lon', 0.0), 
-                cluster_info.get('station_count', 0)
-            ]
-            cluster_static.append(static_features)
-        
-        cluster_static_tensor = torch.tensor(cluster_static, dtype=torch.float32)
-        x = torch.cat([x, cluster_static_tensor], dim=1)
-        
-        # Update feature names
-        static_feature_names = ['cluster_lat', 'cluster_lon', 'cluster_station_count']
-        expanded_feature_names = []
-        for t in range(seq_len):
-            for fname in feature_names:
-                expanded_feature_names.append(f"{fname}_t_{t}")
-        expanded_feature_names.extend(static_feature_names)
-        feature_names = expanded_feature_names
+    x = torch.tensor(np.array(node_features), dtype=torch.float32)
+    y = torch.tensor(np.array(node_targets), dtype=torch.float32)
+    valid_mask = torch.tensor(valid_nodes, dtype=torch.bool)
     
     # Create data object
     data = Data(
         x=x,
-        y=y_tensor,
+        y=y,
         edge_index=edge_index,
-        timestamps=timestamps,
-        feature_names=feature_names,
-        target_names=target_names
+        valid_mask=valid_mask,  # Mask to identify nodes with valid data
+        timestamp=timestamp.isoformat(),
+        num_nodes=n_clusters
     )
     
     return data
+
+def prepare_temporal_gnn_dataset(
+    df: pl.DataFrame,
+    feature_cols: List[str],
+    target_cols: List[str],
+    edge_index: torch.Tensor,
+    n_clusters: int,
+    sequence_length: int = 24,
+    stride: int = 1
+) -> List[Data]:
+    """
+    Prepare temporal GNN dataset with proper time-based splits.
+    
+    Creates multiple temporal snapshots, each representing the graph state
+    at a specific time with historical features and future targets.
+    
+    Args:
+        df: DataFrame with temporal data
+        feature_cols: List of feature columns
+        target_cols: List of target columns
+        edge_index: Graph connectivity
+        n_clusters: Number of clusters
+        sequence_length: Historical window size
+        stride: Number of timesteps to skip between snapshots
+        
+    Returns:
+        List of PyTorch Geometric Data objects
+    """
+    print("Creating temporal snapshots for GNN...")
+    
+    # Get unique timestamps
+    timestamps = sorted(df['ts_start'].unique().to_list())
+    
+    # Need at least sequence_length + 1 timestamps
+    if len(timestamps) < sequence_length + 1:
+        print(f"Warning: Not enough timestamps ({len(timestamps)}) for sequence length {sequence_length}")
+        return []
+    
+    # Create snapshots
+    data_list = []
+    
+    # Start from sequence_length to ensure we have enough history
+    # End before last timestamp to ensure we have targets
+    start_idx = sequence_length
+    end_idx = len(timestamps) - 1
+    
+    for i in tqdm(range(start_idx, end_idx, stride), desc="Creating temporal snapshots"):
+        current_timestamp = pd.Timestamp(timestamps[i])
+        
+        snapshot = create_temporal_snapshot_data(
+            df=df,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
+            timestamp=current_timestamp,
+            edge_index=edge_index,
+            n_clusters=n_clusters,
+            sequence_length=sequence_length
+        )
+        
+        if snapshot is not None:
+            data_list.append(snapshot)
+    
+    print(f"Created {len(data_list)} temporal snapshots")
+    return data_list
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare GNN dataset from clustered EcoBici data')
@@ -504,10 +323,11 @@ def main():
     parser.add_argument('--distance_threshold', type=float, default=5.0,
                         help='Maximum distance (km) for cluster connectivity')
     parser.add_argument('--target', type=str, default='arr_external_count',
-                        choices=['arr_external_count', 'dep_external_count', 'both_external_counts', 'arr_external_demographics', 'dep_external_demographics', 'all_external_demographics'],
+                        choices=['arr_external_count', 'dep_external_count', 'both_external_counts', 
+                                'arr_external_demographics', 'dep_external_demographics', 'all_external_demographics'],
                         help='Target variable(s) to predict')
-    parser.add_argument('--no_multiprocessing', action='store_true',
-                        help='Disable multiprocessing for sequence creation (useful for debugging)')
+    parser.add_argument('--stride', type=int, default=1,
+                        help='Stride for temporal snapshots (1 = every timestep, 2 = every other, etc.)')
     
     args = parser.parse_args()
     
@@ -529,54 +349,61 @@ def main():
         print(f"Loaded metadata for {n_clusters_or_stations} stations (station-level dataset)")
     print(f"Data splits: Train={metadata['train_shape']}, Val={metadata['val_shape']}, Test={metadata['test_shape']}")
     
-    # Process each split with optimizations
+    # Create cluster graph only once
+    print("Creating cluster connectivity graph...")
+    print(f"  Graph parameters: k_neighbors={args.k_neighbors}, distance_threshold={args.distance_threshold}km")
+    
+    adj_matrix = create_cluster_adjacency_matrix(
+        metadata['cluster_centroids'],
+        k_neighbors=args.k_neighbors,
+        distance_threshold=args.distance_threshold
+    )
+    edge_index = create_edge_index_from_adjacency(adj_matrix)
+    
+    # Calculate graph density
+    if n_clusters_or_stations > 1:
+        density = edge_index.shape[1] / (n_clusters_or_stations * (n_clusters_or_stations - 1))
+        avg_edges_per_node = edge_index.shape[1] / n_clusters_or_stations
+    else:
+        density = 0.0
+        avg_edges_per_node = 0.0
+        
+    print(f"Created graph with {edge_index.shape[1]} edges")
+    print(f"  Graph density: {density:.4f}")
+    print(f"  Avg edges per node: {avg_edges_per_node:.1f}")
+    
+    # Save adjacency matrix and edge index
+    print("Saving graph structure...")
+    np.save(output_dir / 'adjacency_matrix.npy', adj_matrix)
+    torch.save(edge_index, output_dir / 'edge_index.pt')
+    
+    # Process each split
     for split in ['train', 'val', 'test']:
         print(f"\n{'='*60}")
         print(f"Processing {split.upper()} split...")
         print(f"{'='*60}")
         
-        # Determine the correct file naming pattern based on clustering configuration
+        # Determine the correct file naming pattern
         cluster_features_path = Path(args.input_dir) / f'{split}_cluster_features.parquet'
         station_features_path = Path(args.input_dir) / f'{split}_station_features.parquet'
         
         # Auto-detect which file pattern exists
         if cluster_features_path.exists():
             parquet_path = cluster_features_path
-            print(f"Found clustered data file: {parquet_path}")
         elif station_features_path.exists():
             parquet_path = station_features_path
-            print(f"Found station-level data file: {parquet_path}")
         else:
             # Try to infer from metadata
-            clustering_enabled = metadata.get('clustering_enabled', metadata.get('n_clusters') is not None)
             if clustering_enabled:
                 parquet_path = cluster_features_path
-                print(f"Using cluster-based naming (from metadata): {parquet_path}")
             else:
                 parquet_path = station_features_path
-                print(f"Using station-based naming (from metadata): {parquet_path}")
-            
-            # Final check if the inferred path exists
-            if not parquet_path.exists():
-                available_files = list(Path(args.input_dir).glob(f'{split}_*.parquet'))
-                raise FileNotFoundError(
-                    f"Neither {cluster_features_path} nor {station_features_path} exists.\n"
-                    f"Available files: {available_files}\n"
-                    f"Please check that the dataset generation step completed successfully."
-                )
         
         print(f"Loading data from {parquet_path}...")
-        
-        # Use lazy loading for better memory management
-        df_lazy = pl.scan_parquet(str(parquet_path))
-        initial_shape = df_lazy.collect().shape  # Get shape without loading all data
-        
-        print(f"  Initial {split} data shape: {initial_shape}")
-        
-        # Load only the columns we need to save memory
         df = pl.read_parquet(str(parquet_path))
+        print(f"  Initial {split} data shape: {df.shape}")
         
-        # Determine target columns first (before cleaning)
+        # Determine target columns
         all_target_cols = identify_target_features(df.columns)
         
         # Select targets based on user choice
@@ -592,190 +419,79 @@ def main():
         elif args.target == 'dep_external_demographics':
             target_cols = [t for t in all_target_cols if 'dep_external' in t]
         elif args.target == 'all_external_demographics':
-            target_cols = all_target_cols  # Include all external targets
+            target_cols = all_target_cols
         else:
             raise ValueError(f"Unknown target option: {args.target}")
         
-        # Filter targets that exist in data
+        # Filter targets that exist
         target_cols = [t for t in target_cols if t in all_target_cols]
         print(f"  Selected target columns: {target_cols}")
         
-        # Identify and remove data leakage features efficiently
+        # Identify and remove data leakage features
         print("Cleaning data leakage features...")
         features_to_remove = identify_features_to_remove(df.columns)
         
-        # Don't remove target columns yet - we need them to create sequences
+        # Don't remove target columns yet - we need them for creating targets
         features_to_remove_filtered = [f for f in features_to_remove if f not in target_cols]
         
         print(f"  Removing {len(features_to_remove_filtered)} leakage features")
-        if len(features_to_remove_filtered) > 0:
-            print(f"  Sample removed features: {features_to_remove_filtered[:5]}{'...' if len(features_to_remove_filtered) > 5 else ''}")
         
-        # Keep only valid features + targets using lazy evaluation
-        valid_columns = [c for c in df.columns if c not in features_to_remove_filtered]
+        # Get feature columns (everything except removed features, targets, and metadata)
+        metadata_cols = ['cluster_id', 'ts_start']
+        feature_cols = [c for c in df.columns 
+                       if c not in features_to_remove_filtered 
+                       and c not in target_cols 
+                       and c not in metadata_cols]
         
-        print("  Applying column filtering...")
-        df_clean = df.lazy().select(valid_columns).collect()
+        print(f"  Using {len(feature_cols)} features for model input")
+        print(f"  Sample features: {feature_cols[:5]}...")
         
-        print(f"  Cleaned dataset shape: {df_clean.shape}")
-        print(f"  Memory reduction: {initial_shape[1] - df_clean.shape[1]} columns removed")
-        
-        # Force garbage collection
-        del df
-        gc.collect()
-        
-        # Prepare sequences for GNN
-        print("Creating temporal sequences...")
-        print(f"  Sequence parameters: length={args.sequence_length}, horizon=1")
-        
-        # Use optimized sequence preparation
-        X, y, timestamps, feature_names = prepare_temporal_sequences_optimized(
-            df_clean, 
-            target_cols,  # Pass target columns explicitly
-            sequence_length=args.sequence_length,
-            prediction_horizon=1,
-            use_multiprocessing=not args.no_multiprocessing  # Disable if flag is set
-        )
-        
-        if len(X) > 0:
-            print(f"  Created {len(X)} sequences with shape: X={X.shape}, y={y.shape}")
-            print(f"  Sequence memory usage: ~{X.nbytes + y.nbytes:.1f} MB")
-        else:
-            print("  WARNING: No sequences created - using aggregation-only approach")
-        
-        # Clean up sequences if not needed (since we only use aggregations)
-        del X, y, timestamps
-        gc.collect()
-        
-        # Create cluster graph only once (for train split)
-        if split == 'train':
-            print("Creating cluster connectivity graph...")
-            print(f"  Graph parameters: k_neighbors={args.k_neighbors}, distance_threshold={args.distance_threshold}km")
-            
-            # Get the actual number of nodes from the data
-            actual_num_nodes = len(metadata['cluster_centroids'])
-            print(f"  Detected {actual_num_nodes} nodes from centroids data")
-            
-            adj_matrix = create_cluster_adjacency_matrix(
-                metadata['cluster_centroids'],
-                k_neighbors=args.k_neighbors,
-                distance_threshold=args.distance_threshold
-            )
-            edge_index = create_edge_index_from_adjacency(adj_matrix)
-            
-            # Calculate graph density using actual number of nodes
-            if actual_num_nodes > 1:
-                density = edge_index.shape[1] / (actual_num_nodes * (actual_num_nodes - 1))
-                avg_edges_per_node = edge_index.shape[1] / actual_num_nodes
-            else:
-                density = 0.0
-                avg_edges_per_node = 0.0
-                
-            print(f"Created graph with {edge_index.shape[1]} edges")
-            print(f"  Graph density: {density:.4f}")
-            print(f"  Avg edges per node: {avg_edges_per_node:.1f}")
-            
-            # Save adjacency matrix and edge index
-            print("Saving graph structure...")
-            np.save(output_dir / 'adjacency_matrix.npy', adj_matrix)
-            torch.save(edge_index, output_dir / 'edge_index.pt')
-            
-        else:
-            # Load edge index for val/test
-            print("  Loading graph structure...")
-            edge_index = torch.load(output_dir / 'edge_index.pt', weights_only=False)
-        
-
-        
-        # Create PyTorch Geometric data
-        print("Creating PyTorch Geometric data object...")
-        
-        # Note: Using cluster-level aggregations for efficient GNN training
-        # This approach balances temporal information with computational efficiency
-        
-        # Create cluster-level aggregations efficiently
-        print("Computing cluster-level aggregations...")
-        
-        # Use lazy evaluation for aggregations
-        agg_exprs = []
-        
-        # Add mean and std for each feature
-        for fn in tqdm(feature_names, desc="Preparing aggregation expressions", leave=False):
-            agg_exprs.extend([
-                pl.col(fn).mean().alias(f"{fn}_mean"),
-                pl.col(fn).std().alias(f"{fn}_std")
-            ])
-        
-        # Add target aggregations
-        for target in target_cols:
-            agg_exprs.append(pl.col(target).mean().alias(f"{target}_mean"))
-        
-        print(f"  Computing {len(agg_exprs)} aggregations across {metadata['n_clusters']} clusters...")
-        
-        # Perform all aggregations in one pass (much faster)
-        cluster_stats = (
-            df_clean
-            .lazy()
-            .group_by('cluster_id')
-            .agg(agg_exprs)
-            .sort('cluster_id')
-            .collect()
-        )
-        
-        # Split features and targets efficiently
-        feature_cols_expanded = [f"{fn}_{stat}" for fn in feature_names for stat in ['mean', 'std']]
-        target_cols_aggregated = [f"{target}_mean" for target in target_cols]
-        
-        # Extract node features
-        node_features = cluster_stats.select(feature_cols_expanded).to_numpy(writable=False)
-        node_features = np.nan_to_num(node_features, copy=False, nan=0.0)  # In-place replacement
-        
-        # Extract targets
-        target_values = cluster_stats.select(target_cols_aggregated).to_numpy(writable=False)
-        
-        print(f"  Generated features: {node_features.shape}")
-        print(f"  Generated targets: {target_values.shape}")
-        
-        # Clean up intermediate variables
-        del cluster_stats, agg_exprs
-        gc.collect()
-        
-        # Create data object efficiently
-        print("Building PyTorch Geometric Data object...")
-        # Get actual number of nodes from the data shape
-        actual_num_nodes = node_features.shape[0]
-        
-        data = Data(
-            x=torch.tensor(node_features, dtype=torch.float32),
-            y=torch.tensor(target_values, dtype=torch.float32),
+        # Prepare temporal dataset
+        data_list = prepare_temporal_gnn_dataset(
+            df=df,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
             edge_index=edge_index,
-            num_nodes=actual_num_nodes
+            n_clusters=n_clusters_or_stations,
+            sequence_length=args.sequence_length,
+            stride=args.stride
         )
         
-        # Save processed data with compression
+        if not data_list:
+            print(f"  WARNING: No valid temporal snapshots created for {split}")
+            continue
+        
+        # Save processed data
         print(f"Saving {split} data...")
-        data_file = output_dir / f'{split}_data.pt'
-        torch.save(data, data_file)
-        data_size_mb = data_file.stat().st_size / (1024 * 1024)
         
-        # Save feature and target names
-        feature_cols_expanded = [f"{fn}_{stat}" for fn in feature_names for stat in ['mean', 'std']]
+        # Save as a list of Data objects
+        data_file = output_dir / f'{split}_data_list.pt'
+        torch.save(data_list, data_file)
         
+        # For compatibility with existing training scripts, also save first snapshot
+        if data_list:
+            compat_file = output_dir / f'{split}_data.pt'
+            torch.save(data_list[0], compat_file)
+        
+        # Save metadata
         metadata_file = output_dir / f'{split}_feature_names.json'
         with open(metadata_file, 'w') as f:
             json.dump({
-                'features': feature_cols_expanded,
+                'features': feature_cols,
                 'targets': target_cols,
-                'n_features': len(feature_cols_expanded),
-                'n_targets': len(target_cols)
+                'n_features': len(feature_cols) * args.sequence_length,  # Features are flattened sequences
+                'n_targets': len(target_cols),
+                'sequence_length': args.sequence_length,
+                'n_snapshots': len(data_list),
+                'temporal_stride': args.stride
             }, f, indent=2)
         
-        print(f"  Saved {split} data: {data.x.shape[0]} nodes, {data.x.shape[1]} features")
-        print(f"  File size: {data_size_mb:.1f} MB")
-        print(f"  Targets: {data.y.shape[1]} variables")
+        print(f"  Saved {split} data: {len(data_list)} temporal snapshots")
+        print(f"  Each snapshot: {n_clusters_or_stations} nodes, {len(feature_cols) * args.sequence_length} features")
+        print(f"  Targets: {len(target_cols)} variables per node")
         
         # Clean up memory
-        del node_features, target_values, data, df_clean
+        del df, data_list
         gc.collect()
     
     # Save processing configuration
@@ -784,11 +500,14 @@ def main():
         'k_neighbors': args.k_neighbors,
         'distance_threshold': args.distance_threshold,
         'sequence_length': args.sequence_length,
+        'temporal_stride': args.stride,
         'processing_timestamp': pd.Timestamp.now().isoformat(),
-        'optimization_version': '2.0',  # Track optimization version
+        'optimization_version': '3.0',  # New version without data leakage
         'n_clusters': n_clusters_or_stations,
         'clustering_enabled': clustering_enabled,
-        'dt_minutes': metadata['dt_minutes']
+        'dt_minutes': metadata['dt_minutes'],
+        'temporal_approach': 'snapshot_based',  # New approach
+        'leakage_fixed': True  # Flag to indicate this version fixes leakage
     }
     
     with open(output_dir / 'processing_config.json', 'w') as f:
@@ -798,13 +517,10 @@ def main():
     print(f"DATASET PREPARATION COMPLETED SUCCESSFULLY!")
     print(f"{'='*80}")
     print(f"Output directory: {output_dir}")
-    print(f"Target strategy: {args.target}")
+    print(f"Target strategy: {args.target} (predicting next timestep values)")
     print(f"Graph connectivity: {args.k_neighbors} neighbors, {args.distance_threshold}km threshold")
-    actual_nodes = len(metadata['cluster_centroids'])
-    if clustering_enabled:
-        print(f"Graph structure: {actual_nodes} cluster nodes, {edge_index.shape[1]} edges")
-    else:
-        print(f"Graph structure: {actual_nodes} station nodes, {edge_index.shape[1]} edges")
+    print(f"Temporal approach: Snapshot-based with {args.sequence_length} historical steps")
+    print(f"Data leakage: FIXED - using only historical data to predict future")
     
     print(f"\nFiles created:")
     total_size_mb = 0
@@ -815,23 +531,12 @@ def main():
             print(f"  {file.name} ({size_mb:.1f} MB)")
     print(f"  Total size: {total_size_mb:.1f} MB")
     
+    print(f"\nIMPORTANT: This version fixes the data leakage issue!")
+    print(f"- Features: Only historical data (t-23 to t)")
+    print(f"- Targets: Next timestep values (t+1)")
+    print(f"- No aggregation across all time periods")
     print(f"\nTo train a GNN model, run:")
     print(f"python scripts/train_gnn.py --data_dir {output_dir}")
-    
-    print(f"\nOptimization features used:")
-    print(f"  - Lazy evaluation with Polars")
-    print(f"  - Vectorized operations")
-    print(f"  - Memory-efficient processing")
-    print(f"  - Progress tracking with tqdm")
-    print(f"  - Automatic garbage collection")
-    print(f"  - Parallel processing (when beneficial)")
-    print(f"  - In-place operations where possible")
-    
-    print(f"\nPerformance improvements:")
-    print(f"  - 2-10x faster processing")
-    print(f"  - Reduced memory usage (~50%)")
-    print(f"  - Better progress visibility")
-    print(f"  - Improved error handling")
 
 if __name__ == '__main__':
     main() 

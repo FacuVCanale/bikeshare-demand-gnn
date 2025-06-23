@@ -1,0 +1,347 @@
+{
+  "model_class": "GraphTransformer",
+  "model_module": "src.models.gnn_models",
+  "total_parameters": 109096194,
+  "trainable_parameters": 109096194,
+  "model_structure": "GraphTransformer(\n  (convs): ModuleList(\n    (0): TransformerConv(196, 512, heads=16)\n    (1-8): 8 x TransformerConv(512, 512, heads=16)\n    (9): TransformerConv(512, 512, heads=1)\n  )\n  (batch_norms): ModuleList(\n    (0-9): 10 x BatchNorm(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n  )\n  (predictor): Sequential(\n    (0): Linear(in_features=512, out_features=256, bias=True)\n    (1): GELU(approximate='none')\n    (2): Dropout(p=0.05, inplace=False)\n    (3): Linear(in_features=256, out_features=2, bias=True)\n  )\n)",
+  "training_config": {
+    "batch_size": 128,
+    "num_neighbors": [
+      15,
+      10,
+      5
+    ],
+    "use_neighbor_sampling": "auto"
+  },
+  "initialization_parameters": {
+    "num_features": 196,
+    "hidden_dim": 512,
+    "num_targets": 2,
+    "dropout": 0.05,
+    "num_layers": 10,
+    "num_heads": 16,
+    "use_batch_norm": null
+  },
+  "layers": [
+    {
+      "name": "convs.0.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.0.lin_key",
+      "type": "Linear",
+      "parameters": 1613824
+    },
+    {
+      "name": "convs.0.lin_query",
+      "type": "Linear",
+      "parameters": 1613824
+    },
+    {
+      "name": "convs.0.lin_value",
+      "type": "Linear",
+      "parameters": 1613824
+    },
+    {
+      "name": "convs.0.lin_skip",
+      "type": "Linear",
+      "parameters": 100864
+    },
+    {
+      "name": "convs.1.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.1.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.1.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.1.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.1.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.2.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.2.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.2.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.2.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.2.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.3.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.3.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.3.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.3.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.3.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.4.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.4.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.4.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.4.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.4.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.5.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.5.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.5.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.5.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.5.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.6.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.6.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.6.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.6.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.6.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.7.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.7.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.7.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.7.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.7.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.8.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.8.lin_key",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.8.lin_query",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.8.lin_value",
+      "type": "Linear",
+      "parameters": 4202496
+    },
+    {
+      "name": "convs.8.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.9.aggr_module",
+      "type": "SumAggregation",
+      "parameters": 0
+    },
+    {
+      "name": "convs.9.lin_key",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.9.lin_query",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.9.lin_value",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "convs.9.lin_skip",
+      "type": "Linear",
+      "parameters": 262656
+    },
+    {
+      "name": "batch_norms.0.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.1.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.2.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.3.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.4.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.5.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.6.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.7.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.8.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "batch_norms.9.module",
+      "type": "BatchNorm1d",
+      "parameters": 1024
+    },
+    {
+      "name": "predictor.0",
+      "type": "Linear",
+      "parameters": 131328
+    },
+    {
+      "name": "predictor.1",
+      "type": "GELU",
+      "parameters": 0
+    },
+    {
+      "name": "predictor.2",
+      "type": "Dropout",
+      "parameters": 0
+    },
+    {
+      "name": "predictor.3",
+      "type": "Linear",
+      "parameters": 514
+    }
+  ]
+}

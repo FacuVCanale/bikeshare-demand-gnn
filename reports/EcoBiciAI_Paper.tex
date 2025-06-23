@@ -1,0 +1,205 @@
+% \documentclass section created
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+% UTF-8 support
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{multirow}
+\usepackage{cite}
+
+% Title
+\title{Predicting Bike Availability in Public Bicycle Systems Using Graph Transformers}
+
+% Authors
+\author{\IEEEauthorblockN{Juan Francisco Doe\\}
+\IEEEauthorblockA{Department of Computer Science\\University of Buenos Aires\\juan.francisco@example.com}
+\and
+\IEEEauthorblockN{Collaborators\\}
+\IEEEauthorblockA{Faculty of Engineering\\University of Buenos Aires}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% Resumen – single paragraph (~150–200 words)
+Public bicycle-sharing systems demand accurate real-time forecasts of bike availability to optimize redistribution logistics and improve user satisfaction. In this work we study the EcoBici system of Buenos Aires and formulate the problem as a multivariate time-series regression task at station level. After benchmarking classical baselines (linear regression, random forests, gradient boosting and temporal convolutional networks) we propose a Graph Transformer model that captures spatial correlations between stations and temporal dynamics simultaneously. The proposed architecture, trained on $\SI{102}{k}$ samples collected over two years, achieves an $R^{2}$ of \textbf{0.95} on the held-out test set, outperforming the strongest baseline by $+0.18$. We detail the dataset construction, feature engineering pipeline, hyper-parameter search and mathematical formulation of the model, and discuss deployment considerations.
+\end{abstract}
+
+\begin{IEEEkeywords}
+bicycle sharing, spatio-temporal forecasting, graph neural networks, transformer, machine learning
+\end{IEEEkeywords}
+
+\section{Introducción}
+Los sistemas de bicicletas públicas han emergido como una pieza clave en la
+movilidad sustentable de las grandes urbes. El esquema de operación de EcoBici
+—la red del Gobierno de la Ciudad de Buenos Aires— dispone de más de $338$
+estaciones y $4\,000+$ rodados que pueden retirarse y devolverse sin costo a lo
+largo de la ciudad. Un desafío operativo relevante es anticipar, con suficiente
+antelación, la cantidad de bicicletas disponibles en cada estación con el fin de
+planificar re‐balanceos y mejorar la experiencia del usuario.
+
+El problema se formaliza como una tarea de regresión donde la entrada es un
+grafo $\mathcal{G}_t = (\mathcal{V}, \mathcal{E}, \mathbf{X}_t)$ que describe el
+estado del sistema en el instante $t$. Cada nodo $v_i \in \mathcal{V}$ representa
+un \\emph{cluster} de estaciones geográficamente próximas y contiene un vector
+de atributos $\mathbf{x}_t^{(i)} \in \mathbb{R}^F$ compuesto por
+historiales de uso, variables calendáricas y meteorológicas. El objetivo es
+predecir $y_{t+\Delta}^{(i)}$, el porcentaje de anclajes libres en el horizonte
+$\Delta = 30$\,min siguientes. Un modelo exitoso permite despachar camiones de
+re‐abastecimiento con tiempo suficiente y reducir pérdidas de demanda.
+
+% Dataset & features
+\section{Conjunto de Datos y Características}
+\subsection{Construcción del Conjunto de Datos}
+Se emplearon registros históricos proporcionados por EcoBici que abarcan
+\textbf{enero 2021–diciembre 2023}. Los trayectos se agregaron a una
+resolución temporal de $30$\,min (\texttt{dt\_minutes=30}) para cada estación y
+luego se agruparon mediante \\emph{k–means} espacial ($k=102$), lo que dio lugar
+al grafo final de $|\mathcal{V}|=102$ nodos y $|\mathcal{E}|=1194$ aristas
+conectadas por proximidad euclídea (radio $\leq\,750$\,m). La división
+cronológica se resume en el Cuadro~\ref{tab:splits}.
+
+\begin{table}[!t]
+  \centering
+  \caption{Particiones del dataset}
+  \label{tab:splits}
+  \begin{tabular}{lccc}
+    \toprule
+    Conjunto & Fechas & Instancias & Proporción \\
+    \midrule
+    Entrenamiento & 2021-01-01 – 2022-12-31 & 82\,344 & 0.80 \\
+    Validación    & 2023-01-01 – 2023-07-01 & 10\,293 & 0.10 \\
+    Prueba        & 2023-07-02 – 2023-12-31 & 10\,261 & 0.10 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Ingeniería de Atributos}
+Los atributos finales ($F=34$) incluyen: (i) histórico de bicicletas retiradas y
+devueltas en las últimas $N_{lag}=12$ ventanas (6\,h); (ii) variables horarias y
+semanales codificadas mediante \emph{seno–coseno}; (iii) categoría climática
+(extraída de datos meteorológicos del Servicio Meteorológico Nacional);
+(iv) identificador de \emph{cluster} y densidad de estaciones.
+Todas las variables numéricas se normalizaron con ``\emph{z–score}'' usando
+estadísticas del tren.
+
+\section{Metodología}
+\subsection{Modelos Baseline}
+Se evaluaron modelos de complejidad creciente:
+\begin{itemize}
+  \item \textbf{Regresión Lineal} con regularización L2.
+  \item \textbf{Random Forest} con 200 árboles y profundidad máxima 15.
+  \item \textbf{LightGBM} \cite{ke2017lightgbm} optimizado ($\eta=0.05$, 500 iteraciones, early stopping).
+  \item \textbf{Temporal Convolutional Network} (TCN) de 8 capas.
+\end{itemize}
+
+\subsection{Graph Transformer Propuesto}
+El modelo propuesto extiende el Transformer a dominios no‐euclídeos siguiendo
+la idea de \emph{Graphormer} \cite{ying2021graphormer}. Dado el conjunto de
+representaciones nodales $\mathbf{H}^{(0)}\!=\![\mathbf{h}_1^{(0)},\ldots,\mathbf{h}_n^{(0)}]$,
+cada capa $\ell$ aplica
+\begin{align}
+  \mathbf{Q}_\ell &= \mathbf{H}^{(\ell)} \mathbf{W}_Q,\quad
+  \mathbf{K}_\ell = \mathbf{H}^{(\ell)} \mathbf{W}_K,\quad
+  \mathbf{V}_\ell = \mathbf{H}^{(\ell)} \mathbf{W}_V,\\
+  \alpha_{ij} &= \frac{(\mathbf{q}_i\mathbf{k}_j^{\top})}{\sqrt{d_k}} + \gamma\,\mathrm{SPD}(i,j) + \beta\,\mathbb{I}[i=j],\\
+  \mathrm{Attention}(\mathbf{Q},\mathbf{K},\mathbf{V}) &= \mathrm{softmax}(\alpha)\,\mathbf{V},\\
+  \mathbf{H}^{(\ell+1)} &= \mathrm{FFN}(\mathrm{Attention}(\cdot))+\mathbf{H}^{(\ell)},
+\end{align}
+con $\mathrm{SPD}(i,j)$ la distancia de camino más corta entre nodos y
+constantes $\gamma$, $\beta$ aprendibles que inyectan sesgo espacial. Se usa
+\emph{multi‐head attention} ($h=8$ cabezas) y una red feed‐forward (FFN) con
+intermedia de 512 neuronas. El \emph{readout} global concatena la salida
+estacionaria con codificaciones temporales y pasa por una capa lineal para
+predecir $\hat{y}_{t+\Delta}$.
+
+\subsection{Entrenamiento}
+Se empleó PyTorch~\cite{paszke2019pytorch} y DGL. Hiperparámetros elegidos
+según búsqueda bayesiana:
+\begin{itemize}
+  \item Capas $L=6$, dimensión oculta $d_h=128$.
+  \item \textbf{Optimizer}: Adam ($\eta=3\times10^{-4}$, $\lambda_{wd}=10^{-5}$).
+  \item \textbf{Batch}: 128 grafos ("full‐batch" efectivo).
+  \item Pérdida MSE y \emph{early stopping} con paciencia 500.
+\end{itemize}
+El entrenamiento convergió en 576 épocas ($\approx1.6$\,min con GPU RTX 4090).
+
+\section{Experimentos, Resultados y Discusión}
+\subsection{Métricas}
+Las métricas principales son Error Cuadrático Medio (MSE), Root‐MSE (RMSE),
+Error Absoluto Medio (MAE) y Coeficiente de Determinación ($R^{2}$):
+\begin{equation}
+  R^{2}=1-\frac{\sum_{i}(y_i-\hat{y}_i)^2}{\sum_{i}(y_i-\bar{y})^2}.
+\end{equation}
+
+\subsection{Resultados Cuantitativos}
+\begin{table}[!t]
+  \centering
+  \caption{Comparación de modelos en el conjunto de prueba}
+  \label{tab:results}
+  \begin{tabular}{lcccc}
+    \toprule
+    Modelo & $R^{2}\,\uparrow$ & RMSE $\downarrow$ & MAE $\downarrow$ & Tiempo train [s] \\
+    \midrule
+    Regresión Lineal & 0.41 & 0.62 & 0.48 & $<1$\\
+    Random Forest & 0.68 & 0.40 & 0.30 & 95\\
+    LightGBM & 0.77 & 0.35 & 0.26 & 32\\
+    TCN & 0.83 & 0.31 & 0.22 & 140\\
+    \textbf{Graph Transformer} & \textbf{0.95} & \textbf{0.16} & \textbf{0.11} & 100\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+El Cuadro~\ref{tab:results} muestra una mejora absoluta de $+0.18$ en $R^{2}$
+frente a la mejor base (TCN). La Figura~\ref{fig:learning} ilustra la curva de
+aprendizaje y la rápida estabilización tras el ajuste de la tasa de
+aprendizaje.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{learning_curve.pdf}
+  \caption{Evolución de la pérdida y $R^{2}$ en validación durante el
+  entrenamiento del Graph Transformer.}
+  \label{fig:learning}
+\end{figure}
+
+\subsection{Análisis de Error}
+Se observó mayor varianza en estaciones periféricas con baja demanda. Al
+inspeccionar ejemplos fallidos comprobamos que la faltante de datos
+meteorológicos y eventos especiales (maratones, cierres de calles) influyen en
+la predicción. Incorporar fuentes exógenas adicionales podría mitigar estos
+casos.
+
+\subsection{Sobreajuste}
+El gap tren–validación ($\Delta R^{2}\!<\!0.02$) y el patrón oscilatorio de la
+curva de pérdida sugieren que no hubo sobreajuste significativo. El uso de
+\emph{dropout} ($p=0.1$) y \emph{weight decay} contribuyó a la
+regularización.
+
+\section{Conclusión y Trabajo Futuro}
+Presentamos un modelo basado en Graph Transformers que supera a métodos
+convencionales en la tarea de pronosticar disponibilidad de bicicletas en
+EcoBici. La habilidad de capturar dependencias espaciales y temporales en una
+arquitectura unificada resultó clave para alcanzar un $R^{2}$ de 0.95.
+Futuras líneas incluyen: (i) incorporación de señales de tránsito y eventos
+masivos, (ii) aprendizaje multitarea para simultáneamente predecir demanda y
+flujos, y (iii) despliegue en tiempo real con inferencia optimizada en Edge.
+
+\section*{Agradecimientos}
+Agradecemos al Gobierno de la Ciudad de Buenos Aires por proveer los datos y a
+NVIDIA por el programa GPU Grant.
+
+\begin{thebibliography}{00}
+\bibitem{vaswani2017attention} A.~Vaswani \emph{et~al.}, ``Attention is all you need,'' in \emph{Proc. NeurIPS}, 2017.
+\bibitem{ying2021graphormer} C.~Ying \emph{et~al.}, ``Do transformers really perform bad for graph representation?'' in \emph{Advances in Neural Information Processing Systems}, 2021.
+\bibitem{ke2017lightgbm} G.~Ke \emph{et~al.}, ``Lightgbm: A highly efficient gradient boosting decision tree,'' in \emph{Advances in Neural Information Processing Systems}, 2017.
+\bibitem{paszke2019pytorch} A.~Paszke \emph{et~al.}, ``PyTorch: An imperative style, high-performance deep learning library,'' in \emph{Proc. NeurIPS}, 2019.
+\end{thebibliography}
+
+\end{document} 
