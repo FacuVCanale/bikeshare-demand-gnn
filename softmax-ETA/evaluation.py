@@ -550,4 +550,249 @@ def print_station_arrival_evaluation(
     
     print(f"\n📈 DATASET INFO:")
     print(f"  Number of Stations: {metrics['n_stations']}")
-    print(f"  Number of Timepoints: {metrics['n_timepoints']}") 
+    print(f"  Number of Timepoints: {metrics['n_timepoints']}")
+
+
+def create_station_arrival_targets_parallel(
+    df: pl.DataFrame, 
+    delta_t: int = 1800,
+    timestamp_col: str = "fecha_origen_recorrido",
+    duration_col: str = "duracion_recorrido",
+    destination_col: str = "id_estacion_destino",
+    n_processes: int = None
+) -> Tuple[np.ndarray, List[int]]:
+    """
+    OPTIMIZED: Create station-level arrival count targets using parallel processing.
+    
+    This function leverages multiprocessing to efficiently process large datasets
+    by splitting the work across time chunks and using all available CPU cores.
+    
+    Args:
+        df: DataFrame with trip data including timestamps, durations, and destinations
+        delta_t: Time window in seconds (default: 1800 = 30 minutes)
+        timestamp_col: Column name for trip start timestamp
+        duration_col: Column name for trip duration in seconds
+        destination_col: Column name for destination station ID
+        n_processes: Number of processes (default: all available cores)
+        
+    Returns:
+        Tuple of (arrival_targets, station_list) where:
+        - arrival_targets: Array of shape (n_timestamps, n_stations) with arrival counts
+        - station_list: List of station IDs corresponding to array columns
+    """
+    import multiprocessing as mp
+    import time
+    
+    if n_processes is None:
+        n_processes = mp.cpu_count()
+    
+    print(f"🚀 OPTIMIZED: Using {n_processes} processes for station arrival targets")
+    print(f"Creating station arrival targets for delta_T = {delta_t} seconds ({delta_t/60:.1f} minutes)")
+    
+    start_time = time.time()
+    
+    # Convert to pandas for time operations and add arrival time
+    df_pd = df.to_pandas()
+    df_pd = df_pd.sort_values(timestamp_col)
+    df_pd['arrival_time'] = df_pd[timestamp_col] + pd.to_timedelta(df_pd[duration_col], unit='s')
+    
+    # Get stations and time points
+    unique_stations = sorted(df_pd[destination_col].unique())
+    n_stations = len(unique_stations)
+    station_to_idx = {station: idx for idx, station in enumerate(unique_stations)}
+    
+    trip_times = df_pd[timestamp_col].unique()
+    n_times = len(trip_times)
+    
+    print(f"Processing {n_times:,} time points and {n_stations} stations")
+    
+    # Split time points into chunks for parallel processing
+    chunk_size = max(100, n_times // (n_processes * 4))
+    time_chunks = [trip_times[i:i + chunk_size] for i in range(0, n_times, chunk_size)]
+    
+    print(f"📦 Split into {len(time_chunks)} chunks of ~{chunk_size:,} time points each")
+    
+    def process_time_chunk_true(chunk_times):
+        """Process a chunk of time points for true arrivals."""
+        chunk_results = []
+        
+        for current_time in chunk_times:
+            window_start = current_time
+            window_end = current_time + pd.Timedelta(seconds=delta_t)
+            
+            # Find arrivals in this window
+            arrivals_mask = (
+                (df_pd['arrival_time'] >= window_start) & 
+                (df_pd['arrival_time'] < window_end)
+            )
+            
+            if arrivals_mask.sum() > 0:
+                arrivals_in_window = df_pd.loc[arrivals_mask, destination_col]
+                station_counts = arrivals_in_window.value_counts()
+                
+                # Convert to station array
+                station_array = np.zeros(n_stations, dtype=np.int32)
+                for station, count in station_counts.items():
+                    if station in station_to_idx:
+                        station_array[station_to_idx[station]] = count
+                
+                chunk_results.append((current_time, station_array))
+            else:
+                chunk_results.append((current_time, np.zeros(n_stations, dtype=np.int32)))
+        
+        return chunk_results
+    
+    # Process chunks in parallel
+    print("🔥 Processing in parallel...")
+    
+    if len(time_chunks) == 1:
+        # Single chunk - no multiprocessing overhead
+        results = [process_time_chunk_true(time_chunks[0])]
+    else:
+        with mp.Pool(processes=n_processes) as pool:
+            results = pool.map(process_time_chunk_true, time_chunks)
+    
+    # Combine results
+    print("🔗 Combining results...")
+    arrival_targets = np.zeros((n_times, n_stations), dtype=np.int32)
+    time_to_idx = {time: idx for idx, time in enumerate(trip_times)}
+    
+    for chunk_result in results:
+        for time_point, station_array in chunk_result:
+            if time_point in time_to_idx:
+                arrival_targets[time_to_idx[time_point]] = station_array
+    
+    elapsed_time = time.time() - start_time
+    print(f"⚡ Parallel processing completed in {elapsed_time:.1f} seconds")
+    print(f"📊 Average arrivals per time window: {arrival_targets.mean():.2f}")
+    print(f"📊 Max arrivals per station per window: {arrival_targets.max()}")
+    
+    return arrival_targets, unique_stations
+
+
+def create_predicted_station_arrivals_parallel(
+    df: pl.DataFrame,
+    eta_predictions: np.ndarray,
+    dest_predictions: np.ndarray,
+    delta_t: int = 1800,
+    timestamp_col: str = "fecha_origen_recorrido",
+    destination_col: str = "id_estacion_destino",
+    n_processes: int = None
+) -> Tuple[np.ndarray, List[int]]:
+    """
+    OPTIMIZED: Create station-level arrival count predictions using parallel processing.
+    
+    This function uses parallel processing to efficiently compute predicted arrivals
+    across all CPU cores, dramatically reducing computation time.
+    
+    Args:
+        df: DataFrame with trip data including timestamps
+        eta_predictions: Array of predicted trip durations in seconds
+        dest_predictions: Array of predicted destination station IDs
+        delta_t: Time window in seconds (default: 1800 = 30 minutes)
+        timestamp_col: Column name for trip start timestamp
+        destination_col: Column name for actual destination station ID (for reference)
+        n_processes: Number of processes (default: all available cores)
+        
+    Returns:
+        Tuple of (predicted_arrivals, station_list) where:
+        - predicted_arrivals: Array of shape (n_timestamps, n_stations) with predicted counts
+        - station_list: List of station IDs corresponding to array columns
+    """
+    import multiprocessing as mp
+    import time
+    
+    if n_processes is None:
+        n_processes = mp.cpu_count()
+    
+    print(f"🚀 OPTIMIZED: Using {n_processes} processes for predicted station arrivals")
+    print(f"Creating predicted station arrivals for delta_T = {delta_t} seconds ({delta_t/60:.1f} minutes)")
+    
+    start_time = time.time()
+    
+    # Convert to pandas and add predictions
+    df_pd = df.to_pandas()
+    df_pd['eta_pred'] = eta_predictions
+    df_pd['dest_pred'] = dest_predictions
+    df_pd = df_pd.sort_values(timestamp_col)
+    
+    # Calculate predicted arrival time
+    df_pd['predicted_arrival_time'] = df_pd[timestamp_col] + pd.to_timedelta(df_pd['eta_pred'], unit='s')
+    
+    # Get stations and times (use actual destinations for consistency)
+    unique_stations = sorted(df_pd[destination_col].unique())
+    n_stations = len(unique_stations)
+    station_to_idx = {station: idx for idx, station in enumerate(unique_stations)}
+    
+    trip_times = df_pd[timestamp_col].unique()
+    n_times = len(trip_times)
+    
+    print(f"Processing {n_times:,} time points and {n_stations} stations")
+    
+    # Split into chunks
+    chunk_size = max(100, n_times // (n_processes * 4))
+    time_chunks = [trip_times[i:i + chunk_size] for i in range(0, n_times, chunk_size)]
+    
+    print(f"📦 Split into {len(time_chunks)} chunks of ~{chunk_size:,} time points each")
+    
+    def process_time_chunk_pred(chunk_times):
+        """Process a chunk of time points for predicted arrivals."""
+        chunk_results = []
+        
+        for current_time in chunk_times:
+            window_start = current_time
+            window_end = current_time + pd.Timedelta(seconds=delta_t)
+            
+            # Find predicted arrivals in this window
+            pred_arrivals_mask = (
+                (df_pd['predicted_arrival_time'] >= window_start) & 
+                (df_pd['predicted_arrival_time'] < window_end)
+            )
+            
+            if pred_arrivals_mask.sum() > 0:
+                pred_arrivals_in_window = df_pd.loc[pred_arrivals_mask, 'dest_pred']
+                # Filter out predictions not in our station list
+                valid_preds = pred_arrivals_in_window[pred_arrivals_in_window.isin(unique_stations)]
+                
+                if len(valid_preds) > 0:
+                    pred_counts = valid_preds.value_counts()
+                    
+                    # Convert to station array
+                    station_array = np.zeros(n_stations, dtype=np.float32)
+                    for station, count in pred_counts.items():
+                        if station in station_to_idx:
+                            station_array[station_to_idx[station]] = count
+                    
+                    chunk_results.append((current_time, station_array))
+                else:
+                    chunk_results.append((current_time, np.zeros(n_stations, dtype=np.float32)))
+            else:
+                chunk_results.append((current_time, np.zeros(n_stations, dtype=np.float32)))
+        
+        return chunk_results
+    
+    # Process in parallel
+    print("🔥 Processing predictions in parallel...")
+    
+    if len(time_chunks) == 1:
+        results = [process_time_chunk_pred(time_chunks[0])]
+    else:
+        with mp.Pool(processes=n_processes) as pool:
+            results = pool.map(process_time_chunk_pred, time_chunks)
+    
+    # Combine results
+    print("🔗 Combining prediction results...")
+    predicted_arrivals = np.zeros((n_times, n_stations), dtype=np.float32)
+    time_to_idx = {time: idx for idx, time in enumerate(trip_times)}
+    
+    for chunk_result in results:
+        for time_point, station_array in chunk_result:
+            if time_point in time_to_idx:
+                predicted_arrivals[time_to_idx[time_point]] = station_array
+    
+    elapsed_time = time.time() - start_time
+    print(f"⚡ Parallel processing completed in {elapsed_time:.1f} seconds")
+    print(f"📊 Average predicted arrivals per time window: {predicted_arrivals.mean():.2f}")
+    print(f"📊 Max predicted arrivals per station per window: {predicted_arrivals.max()}")
+    
+    return predicted_arrivals, unique_stations 
