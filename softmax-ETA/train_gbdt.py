@@ -566,7 +566,7 @@ def main():
     val_dest_true = val_df.select("id_estacion_destino").to_numpy().flatten()
     
     val_eta_metrics = evaluate_eta_prediction(val_eta_true, val_eta_pred)
-    val_dest_metrics = evaluate_destination_prediction(val_dest_true, val_dest_pred, val_dest_proba)
+    val_dest_metrics = evaluate_destination_prediction(val_dest_true, val_dest_pred, val_dest_proba, trainer.dest_classes)
     
     print_evaluation_results(val_eta_metrics, val_dest_metrics, f"{args.model.upper()} (Validation)")
     
@@ -579,7 +579,7 @@ def main():
     test_dest_true = test_df.select("id_estacion_destino").to_numpy().flatten()
     
     test_eta_metrics = evaluate_eta_prediction(test_eta_true, test_eta_pred)
-    test_dest_metrics = evaluate_destination_prediction(test_dest_true, test_dest_pred, test_dest_proba)
+    test_dest_metrics = evaluate_destination_prediction(test_dest_true, test_dest_pred, test_dest_proba, trainer.dest_classes)
     
     print_evaluation_results(test_eta_metrics, test_dest_metrics, f"{args.model.upper()} (Test)")
     

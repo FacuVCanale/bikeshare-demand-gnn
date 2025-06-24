@@ -245,8 +245,10 @@ def main():
     
     # Calculate metrics
     eta_metrics = evaluate_eta_prediction(val_eta_true, val_eta_pred)
+    # Get class labels (destination IDs) for top-k accuracy calculation
+    class_labels = sorted(model.overall_dest_frequencies.keys())
     dest_metrics = evaluate_destination_prediction(
-        val_dest_true, val_dest_pred, val_dest_proba
+        val_dest_true, val_dest_pred, val_dest_proba, class_labels
     )
     
     # Print results
@@ -267,7 +269,7 @@ def main():
     # Calculate metrics
     test_eta_metrics = evaluate_eta_prediction(test_eta_true, test_eta_pred)
     test_dest_metrics = evaluate_destination_prediction(
-        test_dest_true, test_dest_pred, test_dest_proba
+        test_dest_true, test_dest_pred, test_dest_proba, class_labels
     )
     
     # Print results

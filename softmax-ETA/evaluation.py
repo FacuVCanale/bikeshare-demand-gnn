@@ -43,14 +43,15 @@ def evaluate_eta_prediction(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str,
     }
 
 
-def top_k_accuracy(y_true: np.ndarray, y_proba: np.ndarray, k: int) -> float:
+def top_k_accuracy(y_true: np.ndarray, y_proba: np.ndarray, k: int, class_labels: Optional[np.ndarray] = None) -> float:
     """
     Calculate top-k accuracy for multi-class classification.
     
     Args:
-        y_true: True class labels
+        y_true: True class labels (original labels, not encoded)
         y_proba: Prediction probabilities matrix (n_samples, n_classes)
         k: Number of top predictions to consider
+        class_labels: Array of class labels corresponding to probability columns (optional)
         
     Returns:
         Top-k accuracy score
@@ -59,8 +60,15 @@ def top_k_accuracy(y_true: np.ndarray, y_proba: np.ndarray, k: int) -> float:
         # Binary case - convert to 2D
         y_proba = np.column_stack([1 - y_proba, y_proba])
     
-    # Get top k predictions
-    top_k_preds = np.argsort(y_proba, axis=1)[:, -k:]
+    # Get top k prediction indices
+    top_k_indices = np.argsort(y_proba, axis=1)[:, -k:]
+    
+    # If class_labels provided, map indices to actual labels
+    if class_labels is not None:
+        top_k_preds = class_labels[top_k_indices]
+    else:
+        # Assume labels are indices 0, 1, 2, ...
+        top_k_preds = top_k_indices
     
     # Check if true label is in top k predictions
     correct = 0
@@ -84,7 +92,7 @@ def evaluate_destination_prediction(
         y_true: True destination station IDs
         y_pred: Predicted destination station IDs
         y_proba: Prediction probabilities (optional, for top-k metrics)
-        class_labels: List of all possible class labels (optional)
+        class_labels: List of all possible class labels (optional, needed for top-k accuracy)
         
     Returns:
         Dictionary with precision, recall, accuracy, and top-k accuracy metrics
@@ -105,8 +113,9 @@ def evaluate_destination_prediction(
     # Top-k accuracy if probabilities are provided
     if y_proba is not None:
         try:
-            metrics["top_5_accuracy"] = top_k_accuracy(y_true, y_proba, k=5)
-            metrics["top_10_accuracy"] = top_k_accuracy(y_true, y_proba, k=10)
+            class_labels_array = np.array(class_labels) if class_labels is not None else None
+            metrics["top_5_accuracy"] = top_k_accuracy(y_true, y_proba, k=5, class_labels=class_labels_array)
+            metrics["top_10_accuracy"] = top_k_accuracy(y_true, y_proba, k=10, class_labels=class_labels_array)
         except Exception as e:
             print(f"Warning: Could not compute top-k accuracy: {e}")
             metrics["top_5_accuracy"] = np.nan
