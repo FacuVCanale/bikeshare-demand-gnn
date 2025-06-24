@@ -10,6 +10,91 @@ from sklearn.metrics import precision_score, recall_score, accuracy_score
 from typing import Dict, Any, List, Tuple, Optional
 import pandas as pd
 
+# Global variables for multiprocessing worker functions
+_df_pd_global = None
+_station_to_idx_global = None
+_n_stations_global = None
+_destination_col_global = None
+_delta_t_global = None
+
+
+def _process_time_chunk_true_worker(chunk_times):
+    """
+    Worker function for processing time chunks for true arrivals.
+    This needs to be at module level to be pickleable by multiprocessing.
+    """
+    global _df_pd_global, _station_to_idx_global, _n_stations_global, _destination_col_global, _delta_t_global
+    
+    chunk_results = []
+    
+    for current_time in chunk_times:
+        window_start = current_time
+        window_end = current_time + pd.Timedelta(seconds=_delta_t_global)
+        
+        # Find arrivals in this window
+        arrivals_mask = (
+            (_df_pd_global['arrival_time'] >= window_start) & 
+            (_df_pd_global['arrival_time'] < window_end)
+        )
+        
+        if arrivals_mask.sum() > 0:
+            arrivals_in_window = _df_pd_global.loc[arrivals_mask, _destination_col_global]
+            station_counts = arrivals_in_window.value_counts()
+            
+            # Convert to station array
+            station_array = np.zeros(_n_stations_global, dtype=np.int32)
+            for station, count in station_counts.items():
+                if station in _station_to_idx_global:
+                    station_array[_station_to_idx_global[station]] = count
+            
+            chunk_results.append((current_time, station_array))
+        else:
+            chunk_results.append((current_time, np.zeros(_n_stations_global, dtype=np.int32)))
+    
+    return chunk_results
+
+
+def _process_time_chunk_pred_worker(chunk_times):
+    """
+    Worker function for processing time chunks for predicted arrivals.
+    This needs to be at module level to be pickleable by multiprocessing.
+    """
+    global _df_pd_global, _station_to_idx_global, _n_stations_global, _delta_t_global
+    
+    chunk_results = []
+    
+    for current_time in chunk_times:
+        window_start = current_time
+        window_end = current_time + pd.Timedelta(seconds=_delta_t_global)
+        
+        # Find predicted arrivals in this window
+        pred_arrivals_mask = (
+            (_df_pd_global['predicted_arrival_time'] >= window_start) & 
+            (_df_pd_global['predicted_arrival_time'] < window_end)
+        )
+        
+        if pred_arrivals_mask.sum() > 0:
+            pred_arrivals_in_window = _df_pd_global.loc[pred_arrivals_mask, 'dest_pred']
+            # Filter out predictions not in our station list
+            valid_preds = pred_arrivals_in_window[pred_arrivals_in_window.isin(list(_station_to_idx_global.keys()))]
+            
+            if len(valid_preds) > 0:
+                pred_counts = valid_preds.value_counts()
+                
+                # Convert to station array
+                station_array = np.zeros(_n_stations_global, dtype=np.float32)
+                for station, count in pred_counts.items():
+                    if station in _station_to_idx_global:
+                        station_array[_station_to_idx_global[station]] = count
+                
+                chunk_results.append((current_time, station_array))
+            else:
+                chunk_results.append((current_time, np.zeros(_n_stations_global, dtype=np.float32)))
+        else:
+            chunk_results.append((current_time, np.zeros(_n_stations_global, dtype=np.float32)))
+    
+    return chunk_results
+
 
 def evaluate_eta_prediction(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     """
@@ -583,6 +668,9 @@ def create_station_arrival_targets_parallel(
     import multiprocessing as mp
     import time
     
+    # Set global variables for worker functions
+    global _df_pd_global, _station_to_idx_global, _n_stations_global, _destination_col_global, _delta_t_global
+    
     if n_processes is None:
         n_processes = mp.cpu_count()
     
@@ -596,10 +684,18 @@ def create_station_arrival_targets_parallel(
     df_pd = df_pd.sort_values(timestamp_col)
     df_pd['arrival_time'] = df_pd[timestamp_col] + pd.to_timedelta(df_pd[duration_col], unit='s')
     
+    # Set global variables
+    _df_pd_global = df_pd
+    _destination_col_global = destination_col
+    _delta_t_global = delta_t
+    
     # Get stations and time points
     unique_stations = sorted(df_pd[destination_col].unique())
     n_stations = len(unique_stations)
     station_to_idx = {station: idx for idx, station in enumerate(unique_stations)}
+    
+    _station_to_idx_global = station_to_idx
+    _n_stations_global = n_stations
     
     trip_times = df_pd[timestamp_col].unique()
     n_times = len(trip_times)
@@ -612,45 +708,15 @@ def create_station_arrival_targets_parallel(
     
     print(f"📦 Split into {len(time_chunks)} chunks of ~{chunk_size:,} time points each")
     
-    def process_time_chunk_true(chunk_times):
-        """Process a chunk of time points for true arrivals."""
-        chunk_results = []
-        
-        for current_time in chunk_times:
-            window_start = current_time
-            window_end = current_time + pd.Timedelta(seconds=delta_t)
-            
-            # Find arrivals in this window
-            arrivals_mask = (
-                (df_pd['arrival_time'] >= window_start) & 
-                (df_pd['arrival_time'] < window_end)
-            )
-            
-            if arrivals_mask.sum() > 0:
-                arrivals_in_window = df_pd.loc[arrivals_mask, destination_col]
-                station_counts = arrivals_in_window.value_counts()
-                
-                # Convert to station array
-                station_array = np.zeros(n_stations, dtype=np.int32)
-                for station, count in station_counts.items():
-                    if station in station_to_idx:
-                        station_array[station_to_idx[station]] = count
-                
-                chunk_results.append((current_time, station_array))
-            else:
-                chunk_results.append((current_time, np.zeros(n_stations, dtype=np.int32)))
-        
-        return chunk_results
-    
     # Process chunks in parallel
     print("🔥 Processing in parallel...")
     
     if len(time_chunks) == 1:
         # Single chunk - no multiprocessing overhead
-        results = [process_time_chunk_true(time_chunks[0])]
+        results = [_process_time_chunk_true_worker(time_chunks[0])]
     else:
         with mp.Pool(processes=n_processes) as pool:
-            results = pool.map(process_time_chunk_true, time_chunks)
+            results = pool.map(_process_time_chunk_true_worker, time_chunks)
     
     # Combine results
     print("🔗 Combining results...")
@@ -666,6 +732,13 @@ def create_station_arrival_targets_parallel(
     print(f"⚡ Parallel processing completed in {elapsed_time:.1f} seconds")
     print(f"📊 Average arrivals per time window: {arrival_targets.mean():.2f}")
     print(f"📊 Max arrivals per station per window: {arrival_targets.max()}")
+    
+    # Clean up global variables
+    _df_pd_global = None
+    _station_to_idx_global = None
+    _n_stations_global = None
+    _destination_col_global = None
+    _delta_t_global = None
     
     return arrival_targets, unique_stations
 
@@ -702,6 +775,9 @@ def create_predicted_station_arrivals_parallel(
     import multiprocessing as mp
     import time
     
+    # Set global variables for worker functions
+    global _df_pd_global, _station_to_idx_global, _n_stations_global, _delta_t_global
+    
     if n_processes is None:
         n_processes = mp.cpu_count()
     
@@ -719,10 +795,17 @@ def create_predicted_station_arrivals_parallel(
     # Calculate predicted arrival time
     df_pd['predicted_arrival_time'] = df_pd[timestamp_col] + pd.to_timedelta(df_pd['eta_pred'], unit='s')
     
+    # Set global variables
+    _df_pd_global = df_pd
+    _delta_t_global = delta_t
+    
     # Get stations and times (use actual destinations for consistency)
     unique_stations = sorted(df_pd[destination_col].unique())
     n_stations = len(unique_stations)
     station_to_idx = {station: idx for idx, station in enumerate(unique_stations)}
+    
+    _station_to_idx_global = station_to_idx
+    _n_stations_global = n_stations
     
     trip_times = df_pd[timestamp_col].unique()
     n_times = len(trip_times)
@@ -735,50 +818,14 @@ def create_predicted_station_arrivals_parallel(
     
     print(f"📦 Split into {len(time_chunks)} chunks of ~{chunk_size:,} time points each")
     
-    def process_time_chunk_pred(chunk_times):
-        """Process a chunk of time points for predicted arrivals."""
-        chunk_results = []
-        
-        for current_time in chunk_times:
-            window_start = current_time
-            window_end = current_time + pd.Timedelta(seconds=delta_t)
-            
-            # Find predicted arrivals in this window
-            pred_arrivals_mask = (
-                (df_pd['predicted_arrival_time'] >= window_start) & 
-                (df_pd['predicted_arrival_time'] < window_end)
-            )
-            
-            if pred_arrivals_mask.sum() > 0:
-                pred_arrivals_in_window = df_pd.loc[pred_arrivals_mask, 'dest_pred']
-                # Filter out predictions not in our station list
-                valid_preds = pred_arrivals_in_window[pred_arrivals_in_window.isin(unique_stations)]
-                
-                if len(valid_preds) > 0:
-                    pred_counts = valid_preds.value_counts()
-                    
-                    # Convert to station array
-                    station_array = np.zeros(n_stations, dtype=np.float32)
-                    for station, count in pred_counts.items():
-                        if station in station_to_idx:
-                            station_array[station_to_idx[station]] = count
-                    
-                    chunk_results.append((current_time, station_array))
-                else:
-                    chunk_results.append((current_time, np.zeros(n_stations, dtype=np.float32)))
-            else:
-                chunk_results.append((current_time, np.zeros(n_stations, dtype=np.float32)))
-        
-        return chunk_results
-    
     # Process in parallel
     print("🔥 Processing predictions in parallel...")
     
     if len(time_chunks) == 1:
-        results = [process_time_chunk_pred(time_chunks[0])]
+        results = [_process_time_chunk_pred_worker(time_chunks[0])]
     else:
         with mp.Pool(processes=n_processes) as pool:
-            results = pool.map(process_time_chunk_pred, time_chunks)
+            results = pool.map(_process_time_chunk_pred_worker, time_chunks)
     
     # Combine results
     print("🔗 Combining prediction results...")
@@ -794,5 +841,11 @@ def create_predicted_station_arrivals_parallel(
     print(f"⚡ Parallel processing completed in {elapsed_time:.1f} seconds")
     print(f"📊 Average predicted arrivals per time window: {predicted_arrivals.mean():.2f}")
     print(f"📊 Max predicted arrivals per station per window: {predicted_arrivals.max()}")
+    
+    # Clean up global variables
+    _df_pd_global = None
+    _station_to_idx_global = None
+    _n_stations_global = None
+    _delta_t_global = None
     
     return predicted_arrivals, unique_stations 
