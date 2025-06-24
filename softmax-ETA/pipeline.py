@@ -29,8 +29,8 @@ from evaluation import (
     evaluate_eta_prediction, 
     evaluate_destination_prediction,
     print_evaluation_results,
-    create_station_arrival_targets,
-    create_predicted_station_arrivals,
+    create_station_arrival_targets_parallel,
+    create_predicted_station_arrivals_parallel,
     evaluate_station_arrival_prediction,
     print_station_arrival_evaluation,
     load_and_prepare_data
@@ -239,7 +239,47 @@ def train_model(model_type: str, experiment_name: str = None) -> Tuple[Any, str]
     return model, model_name
 
 
-def evaluate_individual_trips(model, model_type: str, model_name: str) -> Tuple[Dict, Dict]:
+def save_predictions_immediately(
+    test_df: pl.DataFrame,
+    eta_pred: np.ndarray,
+    dest_pred: np.ndarray,
+    dest_proba: np.ndarray,
+    predictions_dir: str = "predictions"
+):
+    """
+    Save predictions immediately after calculation for use with fast analysis.
+    
+    Args:
+        test_df: Test dataframe
+        eta_pred: ETA predictions
+        dest_pred: Destination predictions  
+        dest_proba: Destination probabilities
+        predictions_dir: Directory to save predictions
+    """
+    pred_path = Path(predictions_dir)
+    pred_path.mkdir(exist_ok=True, parents=True)
+    
+    # Save predictions
+    eta_file = pred_path / "eta_predictions.npy"
+    dest_file = pred_path / "dest_predictions.npy" 
+    proba_file = pred_path / "dest_probabilities.npy"
+    test_file = pred_path / "trips_test.parquet"
+    
+    np.save(eta_file, eta_pred)
+    np.save(dest_file, dest_pred)
+    np.save(proba_file, dest_proba)
+    test_df.write_parquet(test_file)
+    
+    print(f"💾 Predictions saved immediately:")
+    print(f"   ETA: {eta_file}")
+    print(f"   Destinations: {dest_file}")
+    print(f"   Probabilities: {proba_file}")
+    print(f"   Test data: {test_file}")
+    
+    return str(test_file), str(eta_file), str(dest_file)
+
+
+def evaluate_individual_trips(model, model_type: str, model_name: str, predictions_dir: str = "predictions") -> Tuple[Dict, Dict, Tuple[str, str, str]]:
     """
     Evaluate model on individual trip prediction tasks.
     
@@ -247,9 +287,10 @@ def evaluate_individual_trips(model, model_type: str, model_name: str) -> Tuple[
         model: Trained model
         model_type: 'baseline', 'xgb', or 'lgb'
         model_name: Human-readable model name
+        predictions_dir: Directory to save predictions immediately
         
     Returns:
-        Tuple of (eta_metrics, dest_metrics)
+        Tuple of (eta_metrics, dest_metrics, prediction_files_paths)
     """
     print(f"\n🔍 INDIVIDUAL TRIP EVALUATION")
     print("="*60)
@@ -280,6 +321,12 @@ def evaluate_individual_trips(model, model_type: str, model_name: str) -> Tuple[
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
+    # 💾 SAVE PREDICTIONS IMMEDIATELY
+    print("💾 Saving predictions immediately for potential fast analysis...")
+    test_file, eta_file, dest_file = save_predictions_immediately(
+        test_df, test_eta_pred, test_dest_pred, test_dest_proba, predictions_dir
+    )
+    
     print("📊 Calculating evaluation metrics...")
     
     # Calculate metrics
@@ -291,60 +338,77 @@ def evaluate_individual_trips(model, model_type: str, model_name: str) -> Tuple[
     # Print results
     print_evaluation_results(eta_metrics, dest_metrics, model_name)
     
-    return eta_metrics, dest_metrics
+    return eta_metrics, dest_metrics, (test_file, eta_file, dest_file)
 
 
-def evaluate_station_arrivals(
+def evaluate_station_arrivals_fast(
     model, 
     model_type: str, 
     model_name: str, 
-    delta_t: int = 1800
+    delta_t: int = 1800,
+    prediction_files: Tuple[str, str, str] = None,
+    n_processes: int = None
 ) -> Dict[str, float]:
     """
-    Evaluate model on station arrival count prediction.
+    Evaluate model on station arrival count prediction using FAST parallel processing.
     
     Args:
         model: Trained model
         model_type: 'baseline', 'xgb', or 'lgb'
         model_name: Human-readable model name
         delta_t: Time window in seconds for arrival counting
+        prediction_files: Tuple of (test_file, eta_file, dest_file) if already saved
+        n_processes: Number of processes for parallel processing
         
     Returns:
         Dictionary with station arrival metrics
     """
-    print(f"\n🏢 STATION ARRIVAL EVALUATION")
+    import multiprocessing as mp
+    
+    if n_processes is None:
+        n_processes = mp.cpu_count()
+    
+    print(f"\n🏢 FAST STATION ARRIVAL EVALUATION")
     print("="*60)
+    print(f"🚀 Using {n_processes} processes for ultra-fast parallel processing")
     
     # Load test data
-    data_dir = Path("data/processed")
+    data_dir = Path("data/processed") 
     test_path = data_dir / "trips_test.parquet"
     test_df = pl.read_parquet(test_path)
     
     print(f"📊 Analyzing station arrivals with {delta_t/60:.1f}-minute windows...")
     print(f"📊 Processing {len(test_df):,} test trips")
     
-    # Create true station arrival targets
-    print("\n🎯 Creating true station arrival targets...")
-    arrival_targets_true, station_list = create_station_arrival_targets(
-        test_df, delta_t=delta_t
+    # Get model predictions (reuse if already saved, otherwise generate)
+    if prediction_files:
+        test_file, eta_file, dest_file = prediction_files
+        print(f"📂 Loading pre-saved predictions...")
+        eta_pred = np.load(eta_file)
+        dest_pred = np.load(dest_file)
+        print(f"✅ Loaded predictions from files")
+    else:
+        print(f"\n🤖 Getting model predictions...")
+        if model_type == "baseline":
+            eta_pred = model.predict_eta(test_df)
+            dest_pred, _ = model.predict_destination(test_df)
+            
+        elif model_type in ["xgb", "lgb"]:
+            eta_pred, dest_pred, _ = model.predict(test_df)
+            
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+    
+    # 🚀 Create true station arrival targets using FAST parallel processing
+    print("\n🎯 Creating true station arrival targets with parallel processing...")
+    arrival_targets_true, station_list = create_station_arrival_targets_parallel(
+        test_df, delta_t=delta_t, n_processes=n_processes
     )
     
-    # Get model predictions
-    print(f"\n🤖 Getting model predictions...")
-    if model_type == "baseline":
-        eta_pred = model.predict_eta(test_df)
-        dest_pred, _ = model.predict_destination(test_df)
-        
-    elif model_type in ["xgb", "lgb"]:
-        eta_pred, dest_pred, _ = model.predict(test_df)
-        
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-    
-    # Create predicted station arrivals
-    print(f"\n📈 Creating predicted station arrivals...")
-    arrival_targets_pred, _ = create_predicted_station_arrivals(
-        test_df, eta_pred, dest_pred, delta_t=delta_t
+    # 🚀 Create predicted station arrivals using FAST parallel processing
+    print(f"\n📈 Creating predicted station arrivals with parallel processing...")
+    arrival_targets_pred, _ = create_predicted_station_arrivals_parallel(
+        test_df, eta_pred, dest_pred, delta_t=delta_t, n_processes=n_processes
     )
     
     # Evaluate station arrival predictions
@@ -437,6 +501,10 @@ Examples:
                        help='Time window for arrival analysis in seconds (default: 1800 = 30 minutes)')
     parser.add_argument('--output-dir', type=str, default='results',
                        help='Directory to save results (default: results)')
+    parser.add_argument('--predictions-dir', type=str, default='predictions',
+                       help='Directory to save predictions immediately (default: predictions)')
+    parser.add_argument('--n-processes', type=int, default=None,
+                       help='Number of processes for parallel station analysis (default: all cores)')
     parser.add_argument('--force-rebuild', action='store_true',
                        help='Force rebuilding of train/val/test splits even if they exist')
     parser.add_argument('--experiment-name', type=str, default=None,
@@ -451,16 +519,18 @@ Examples:
     
     # Log start time and arguments
     start_time = datetime.datetime.now()
-    print("🚀 BIKE TRIP PREDICTION PIPELINE")
+    print("🚀 BIKE TRIP PREDICTION PIPELINE (OPTIMIZED)")
     print("="*80)
     print(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📂 Trips Path:       {args.trips_path}")
     print(f"👥 Users Path:       {args.users_path}")
     print(f"🤖 Model:            {args.model}")
-    print(f"🏢 Station Arrivals: {'Enabled' if args.arrivals else 'Disabled'}")
+    print(f"🏢 Station Arrivals: {'Enabled (FAST)' if args.arrivals else 'Disabled'}")
     if args.arrivals:
         print(f"⏰ Delta T:          {args.delta_t} seconds ({args.delta_t/60:.1f} minutes)")
+        print(f"🚀 Processes:        {args.n_processes or 'All available cores'}")
     print(f"📁 Output Dir:       {args.output_dir}")
+    print(f"💾 Predictions Dir:  {args.predictions_dir}")
     if args.log_file:
         print(f"📝 Log File:         {args.log_file}")
     print("="*80)
@@ -481,22 +551,24 @@ Examples:
             logging.exception("Model training failed with exception:")
             return 1
         
-        # Step 3: Individual Trip Evaluation
+        # Step 3: Individual Trip Evaluation (with immediate prediction saving)
         print("\n🔄 STEP 3: INDIVIDUAL TRIP EVALUATION")
         try:
-            eta_metrics, dest_metrics = evaluate_individual_trips(model, args.model, model_name)
+            eta_metrics, dest_metrics, prediction_files = evaluate_individual_trips(
+                model, args.model, model_name, args.predictions_dir
+            )
         except Exception as e:
             print(f"❌ Pipeline failed at individual trip evaluation step: {e}")
             logging.exception("Individual trip evaluation failed with exception:")
             return 1
         
-        # Step 4: Station Arrival Evaluation (if enabled)
+        # Step 4: Station Arrival Evaluation (if enabled) - NOW WITH FAST PARALLEL PROCESSING
         station_metrics = {}
         if args.arrivals:
-            print("\n🔄 STEP 4: STATION ARRIVAL EVALUATION")
+            print("\n🔄 STEP 4: FAST STATION ARRIVAL EVALUATION")
             try:
-                station_metrics = evaluate_station_arrivals(
-                    model, args.model, model_name, args.delta_t
+                station_metrics = evaluate_station_arrivals_fast(
+                    model, args.model, model_name, args.delta_t, prediction_files, args.n_processes
                 )
             except Exception as e:
                 print(f"❌ Pipeline failed at station arrival evaluation step: {e}")
@@ -518,7 +590,7 @@ Examples:
         end_time = datetime.datetime.now()
         duration = end_time - start_time
         
-        print(f"\n🎉 PIPELINE COMPLETED SUCCESSFULLY!")
+        print(f"\n🎉 OPTIMIZED PIPELINE COMPLETED SUCCESSFULLY!")
         print("="*80)
         print(f"⏰ End time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"⏱️  Total duration: {duration}")
@@ -531,8 +603,18 @@ Examples:
             print(f"🏢 Station Correlation: {station_metrics['station_correlation']:.4f}")
         
         print(f"📁 Results saved in: {args.output_dir}")
+        print(f"💾 Predictions saved in: {args.predictions_dir}")
         if args.log_file:
             print(f"📝 Complete log saved to: {args.log_file}")
+        
+        # Show command to run standalone fast analysis
+        test_file, eta_file, dest_file = prediction_files
+        print(f"\n🚀 For future fast-only analysis, run:")
+        print(f"python fast_station_arrivals.py \\")
+        print(f"  --test-data {test_file} \\")
+        print(f"  --eta-pred {eta_file} \\")
+        print(f"  --dest-pred {dest_file} \\")
+        print(f"  --delta-t {args.delta_t}")
         
         return 0
         
