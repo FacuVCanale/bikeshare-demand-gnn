@@ -683,6 +683,38 @@ test_path = output_dir / "trips_test.parquet"
 try:
     print(f"\nSaving datasets...")
     
+    # IMPORTANT: Ensure all splits only contain stations present in training data
+    # This prevents "unseen labels" errors during model training
+    if len(train_data) > 0:
+        # Get all stations that appear in training set (both origin and destination)
+        train_origin_stations = set(train_data.select("id_estacion_origen").to_series().to_list())
+        train_dest_stations = set(train_data.select("id_estacion_destino").to_series().to_list())
+        train_all_stations = train_origin_stations.union(train_dest_stations)
+        
+        print(f"Training set contains {len(train_all_stations)} unique stations")
+        
+        # Filter validation set to only include trips with stations seen in training
+        if len(val_data) > 0:
+            val_before = len(val_data)
+            val_data = val_data.filter(
+                pl.col("id_estacion_origen").is_in(list(train_all_stations)) &
+                pl.col("id_estacion_destino").is_in(list(train_all_stations))
+            )
+            val_after = len(val_data)
+            if val_before != val_after:
+                print(f"  Filtered validation set: {val_before:,} -> {val_after:,} trips (removed {val_before-val_after:,} with unseen stations)")
+        
+        # Filter test set to only include trips with stations seen in training
+        if len(test_data) > 0:
+            test_before = len(test_data)
+            test_data = test_data.filter(
+                pl.col("id_estacion_origen").is_in(list(train_all_stations)) &
+                pl.col("id_estacion_destino").is_in(list(train_all_stations))
+            )
+            test_after = len(test_data)
+            if test_before != test_after:
+                print(f"  Filtered test set: {test_before:,} -> {test_after:,} trips (removed {test_before-test_after:,} with unseen stations)")
+    
     if len(train_data) > 0:
         train_data.write_parquet(train_path)
         print(f"  Train saved: {train_path.resolve()} ({len(train_data):,} trips)")

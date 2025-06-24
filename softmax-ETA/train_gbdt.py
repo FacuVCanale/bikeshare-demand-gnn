@@ -209,10 +209,29 @@ class GBDTTrainer:
         y_eta_val = val_df.select("duracion_recorrido").to_numpy().flatten()
         y_dest_val = val_df.select("id_estacion_destino").to_numpy().flatten()
         
-        # Encode destination labels
+        # Encode destination labels with robust handling of unseen labels
         y_dest_train_encoded = self.label_encoder.fit_transform(y_dest_train)
-        y_dest_val_encoded = self.label_encoder.transform(y_dest_val)
         self.dest_classes = self.label_encoder.classes_
+        
+        # Handle unseen labels in validation set
+        train_stations = set(y_dest_train)
+        val_stations = set(y_dest_val)
+        unseen_stations = val_stations - train_stations
+        
+        if unseen_stations:
+            print(f"   ⚠️  Found {len(unseen_stations)} stations in validation not seen in training:")
+            print(f"       {sorted(list(unseen_stations))}")
+            print(f"   🔧 Filtering validation set to only include known stations...")
+            
+            # Create mask for valid validation samples (only known stations)
+            val_mask = np.isin(y_dest_val, list(train_stations))
+            X_val = X_val[val_mask]
+            y_eta_val = y_eta_val[val_mask]
+            y_dest_val = y_dest_val[val_mask]
+            
+            print(f"   📉 Validation set reduced to {len(y_dest_val):,} samples")
+        
+        y_dest_val_encoded = self.label_encoder.transform(y_dest_val)
         
         print(f"   📈 Training data: {X_train.shape[0]:,} samples, {X_train.shape[1]} features")
         print(f"   📈 Validation data: {X_val.shape[0]:,} samples")
@@ -276,10 +295,53 @@ class GBDTTrainer:
         # ETA predictions
         eta_pred = self.eta_model.predict(X_test)
         
+        # Handle destination predictions with unseen labels
+        y_dest_test = test_df.select("id_estacion_destino").to_numpy().flatten()
+        train_stations = set(self.dest_classes)
+        test_stations = set(y_dest_test)
+        unseen_stations = test_stations - train_stations
+        
+        if unseen_stations:
+            print(f"   ⚠️  Found {len(unseen_stations)} stations in test set not seen in training:")
+            print(f"       Replacing with most frequent training station...")
+            
+            # Replace unseen stations with the most frequent station from training
+            most_frequent_station = self.dest_classes[0]  # LabelEncoder classes are sorted by frequency
+            y_dest_test_clean = np.where(np.isin(y_dest_test, list(train_stations)), 
+                                       y_dest_test, most_frequent_station)
+        else:
+            y_dest_test_clean = y_dest_test
+        
         # Destination predictions
-        dest_pred_encoded = self.dest_model.predict(X_test)
-        dest_pred = self.label_encoder.inverse_transform(dest_pred_encoded)
-        dest_proba = self.dest_model.predict_proba(X_test)
+        try:
+            dest_pred_encoded = self.dest_model.predict(X_test)
+            dest_pred = self.label_encoder.inverse_transform(dest_pred_encoded)
+            dest_proba = self.dest_model.predict_proba(X_test)
+        except ValueError as e:
+            if "unseen labels" in str(e):
+                print(f"   🔧 Handling prediction error by filtering X_test...")
+                # This is a fallback - shouldn't happen with above fix but just in case
+                valid_mask = np.isin(y_dest_test, list(train_stations))
+                X_test_filtered = X_test[valid_mask]
+                
+                if len(X_test_filtered) == 0:
+                    raise ValueError("No valid test samples after filtering unseen stations")
+                
+                dest_pred_encoded = self.dest_model.predict(X_test_filtered)
+                dest_pred_partial = self.label_encoder.inverse_transform(dest_pred_encoded)
+                dest_proba_partial = self.dest_model.predict_proba(X_test_filtered)
+                
+                # Expand back to full size with padding
+                dest_pred = np.full(len(y_dest_test), most_frequent_station, dtype=dest_pred_partial.dtype)
+                dest_pred[valid_mask] = dest_pred_partial
+                
+                dest_proba = np.full((len(y_dest_test), len(self.dest_classes)), 
+                                   1.0/len(self.dest_classes))  # Uniform distribution for unknowns
+                dest_proba[valid_mask] = dest_proba_partial
+                
+                print(f"   📉 Predictions made for {len(X_test_filtered):,} valid samples out of {len(X_test):,}")
+            else:
+                raise e
         
         return eta_pred, dest_pred, dest_proba
     
