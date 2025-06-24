@@ -47,7 +47,7 @@ class GBDTTrainer:
     Handles both ETA regression and destination classification.
     """
     
-    def __init__(self, model_type: str = "lgb", eta_params: dict = None, dest_params: dict = None):
+    def __init__(self, model_type: str = "lgb", eta_params: dict = None, dest_params: dict = None, use_gpu: bool = True):
         """
         Initialize GBDT trainer.
         
@@ -55,13 +55,19 @@ class GBDTTrainer:
             model_type: Either 'xgb' or 'lgb'
             eta_params: Hyperparameters for ETA regression model
             dest_params: Hyperparameters for destination classification model
+            use_gpu: Whether to use GPU for training (default: True)
         """
         self.model_type = model_type.lower()
+        self.use_gpu = use_gpu
         self.eta_model = None
         self.dest_model = None
         self.label_encoder = LabelEncoder()
         self.feature_columns = None
         self.dest_classes = None
+        
+        # Check GPU availability if requested
+        if self.use_gpu:
+            self._check_gpu_availability()
         
         # Default hyperparameters
         self.default_eta_params = self._get_default_eta_params()
@@ -79,10 +85,35 @@ class GBDTTrainer:
         elif self.model_type not in ['xgb', 'lgb']:
             raise ValueError("model_type must be 'xgb' or 'lgb'")
     
+    def _check_gpu_availability(self):
+        """Check if GPU is available for the selected model type."""
+        try:
+            if self.model_type == 'xgb':
+                import xgboost as xgb
+                # Test XGBoost GPU availability
+                try:
+                    test_model = xgb.XGBRegressor(tree_method='gpu_hist', gpu_id=0)
+                    print(f"   🚀 GPU acceleration enabled for XGBoost")
+                except Exception as e:
+                    print(f"   ⚠️  XGBoost GPU not available, falling back to CPU: {e}")
+                    self.use_gpu = False
+            elif self.model_type == 'lgb':
+                import lightgbm as lgb
+                # Test LightGBM GPU availability
+                try:
+                    test_model = lgb.LGBMRegressor(device='gpu')
+                    print(f"   🚀 GPU acceleration enabled for LightGBM")
+                except Exception as e:
+                    print(f"   ⚠️  LightGBM GPU not available, falling back to CPU: {e}")
+                    self.use_gpu = False
+        except Exception as e:
+            print(f"   ⚠️  GPU check failed, falling back to CPU: {e}")
+            self.use_gpu = False
+    
     def _get_default_eta_params(self):
         """Get default hyperparameters for ETA regression."""
         if self.model_type == 'xgb':
-            return {
+            params = {
                 'objective': 'reg:squarederror',
                 'max_depth': 6,
                 'learning_rate': 0.1,
@@ -92,8 +123,16 @@ class GBDTTrainer:
                 'random_state': 42,
                 'n_jobs': -1
             }
+            # Add GPU-specific parameters for XGBoost
+            if self.use_gpu:
+                params.update({
+                    'tree_method': 'gpu_hist',
+                    'gpu_id': 0,
+                    'predictor': 'gpu_predictor'
+                })
+            return params
         else:  # lgb
-            return {
+            params = {
                 'objective': 'regression',
                 'metric': 'rmse',
                 'boosting_type': 'gbdt',
@@ -106,11 +145,19 @@ class GBDTTrainer:
                 'n_jobs': -1,
                 'verbose': -1
             }
+            # Add GPU-specific parameters for LightGBM
+            if self.use_gpu:
+                params.update({
+                    'device': 'gpu',
+                    'gpu_platform_id': 0,
+                    'gpu_device_id': 0
+                })
+            return params
     
     def _get_default_dest_params(self):
         """Get default hyperparameters for destination classification."""
         if self.model_type == 'xgb':
-            return {
+            params = {
                 'objective': 'multi:softprob',
                 'max_depth': 6,
                 'learning_rate': 0.1,
@@ -120,8 +167,16 @@ class GBDTTrainer:
                 'random_state': 42,
                 'n_jobs': -1
             }
+            # Add GPU-specific parameters for XGBoost
+            if self.use_gpu:
+                params.update({
+                    'tree_method': 'gpu_hist',
+                    'gpu_id': 0,
+                    'predictor': 'gpu_predictor'
+                })
+            return params
         else:  # lgb
-            return {
+            params = {
                 'objective': 'multiclass',
                 'metric': 'multi_logloss',
                 'boosting_type': 'gbdt',
@@ -134,6 +189,14 @@ class GBDTTrainer:
                 'n_jobs': -1,
                 'verbose': -1
             }
+            # Add GPU-specific parameters for LightGBM
+            if self.use_gpu:
+                params.update({
+                    'device': 'gpu',
+                    'gpu_platform_id': 0,
+                    'gpu_device_id': 0
+                })
+            return params
     
     def _prepare_features(self, df: pl.DataFrame):
         """
@@ -197,7 +260,8 @@ class GBDTTrainer:
             train_df: Training dataset
             val_df: Validation dataset
         """
-        print(f"🏗️  Training {self.model_type.upper()} models...")
+        gpu_status = "GPU" if self.use_gpu else "CPU"
+        print(f"🏗️  Training {self.model_type.upper()} models on {gpu_status}...")
         
         # Prepare training features
         X_train = self._prepare_features(train_df)
@@ -361,6 +425,7 @@ class GBDTTrainer:
         # Save feature columns and hyperparameters
         metadata = {
             'model_type': self.model_type,
+            'use_gpu': self.use_gpu,
             'feature_columns': self.feature_columns,
             'dest_classes': self.dest_classes.tolist(),
             'eta_params': self.eta_params,
@@ -438,6 +503,12 @@ def main():
     parser.add_argument('--experiment-name', type=str, default='',
                        help='Name for this experiment (will be added to output files)')
     
+    parser.add_argument('--gpu', action='store_true', default=True,
+                       help='Use GPU acceleration if available (default: True)')
+    
+    parser.add_argument('--no-gpu', dest='gpu', action='store_false',
+                       help='Disable GPU acceleration, use CPU only')
+    
     args = parser.parse_args()
     
     # Parse hyperparameters
@@ -451,6 +522,7 @@ def main():
     print("="*60)
     print(f"Model Type: {args.model.upper()}")
     print(f"Experiment: {experiment_name}")
+    print(f"GPU Enabled: {'Yes' if args.gpu else 'No'}")
     if eta_params:
         print(f"ETA Params: {eta_params}")
     if dest_params:
@@ -479,7 +551,8 @@ def main():
     trainer = GBDTTrainer(
         model_type=args.model,
         eta_params=eta_params,
-        dest_params=dest_params
+        dest_params=dest_params,
+        use_gpu=args.gpu
     )
     
     trainer.fit(train_df, val_df)
