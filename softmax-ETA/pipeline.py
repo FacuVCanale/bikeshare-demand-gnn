@@ -20,6 +20,9 @@ from pathlib import Path
 import polars as pl
 import numpy as np
 from typing import Dict, Any, Tuple
+import logging
+import datetime
+import os
 
 # Import our modules
 from evaluation import (
@@ -34,6 +37,64 @@ from evaluation import (
 )
 from train_baseline import HistoricalBaseline
 from train_gbdt import GBDTTrainer
+
+
+def setup_logging(log_file: str = None):
+    """
+    Set up logging to write to both console and file.
+    
+    Args:
+        log_file: Path to log file. If None, only logs to console.
+    """
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Clear any existing handlers
+    logger.handlers.clear()
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler if log_file is specified
+    if log_file:
+        # Ensure directory exists
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        logging.info(f"📝 Logging to file: {log_file}")
+    
+    return logger
+
+
+def log_print(*args, **kwargs):
+    """
+    Custom print function that logs to both console and file.
+    This replaces regular print statements to ensure all output is captured.
+    """
+    # Convert all arguments to strings and join them
+    message = ' '.join(str(arg) for arg in args)
+    
+    # Use logging instead of print
+    logging.info(message)
+
+
+# Replace print with our logging version globally
+print = log_print
 
 
 def run_feature_engineering(trips_path: str, users_path: str, force_rebuild: bool = False) -> bool:
@@ -102,15 +163,30 @@ def run_feature_engineering(trips_path: str, users_path: str, force_rebuild: boo
         with open(temp_script, 'w') as f:
             f.write(content)
         
-        # Run the modified script
-        result = subprocess.run([sys.executable, temp_script], capture_output=True, text=True)
+        # Run the modified script and capture output
+        print("   📊 Running feature engineering script...")
+        result = subprocess.run(
+            [sys.executable, temp_script], 
+            capture_output=True, 
+            text=True
+        )
+        
+        # Log the output from the subprocess
+        if result.stdout:
+            print("   📋 Feature engineering output:")
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    print(f"   {line}")
         
         # Clean up
         Path(temp_script).unlink()
         
         if result.returncode != 0:
             print(f"❌ Feature engineering failed:")
-            print(result.stderr)
+            if result.stderr:
+                for line in result.stderr.split('\n'):
+                    if line.strip():
+                        print(f"   ERROR: {line}")
             return False
         
         print("✅ Feature engineering completed successfully!")
@@ -183,22 +259,28 @@ def evaluate_individual_trips(model, model_type: str, model_name: str) -> Tuple[
     test_path = data_dir / "trips_test.parquet"
     test_df = pl.read_parquet(test_path)
     
+    print(f"📊 Loaded test data: {len(test_df):,} trips")
+    
     # Get true values
     test_eta_true = test_df.select("duracion_recorrido").to_numpy().flatten()
     test_dest_true = test_df.select("id_estacion_destino").to_numpy().flatten()
     
     # Get predictions based on model type
     if model_type == "baseline":
+        print("🔮 Getting baseline predictions...")
         test_eta_pred = model.predict_eta(test_df)
         test_dest_pred, test_dest_proba = model.predict_destination(test_df)
         class_labels = sorted(model.overall_dest_frequencies.keys())
         
     elif model_type in ["xgb", "lgb"]:
+        print("🔮 Getting GBDT predictions...")
         test_eta_pred, test_dest_pred, test_dest_proba = model.predict(test_df)
         class_labels = model.dest_classes
         
     else:
         raise ValueError(f"Unknown model type: {model_type}")
+    
+    print("📊 Calculating evaluation metrics...")
     
     # Calculate metrics
     eta_metrics = evaluate_eta_prediction(test_eta_true, test_eta_pred)
@@ -239,6 +321,7 @@ def evaluate_station_arrivals(
     test_df = pl.read_parquet(test_path)
     
     print(f"📊 Analyzing station arrivals with {delta_t/60:.1f}-minute windows...")
+    print(f"📊 Processing {len(test_df):,} test trips")
     
     # Create true station arrival targets
     print("\n🎯 Creating true station arrival targets...")
@@ -300,6 +383,7 @@ def save_results(
     # Add station metrics if available
     if station_metrics:
         all_metrics.update({f"station_{k}": v for k, v in station_metrics.items()})
+        print(f"📊 Including station arrival metrics in results")
     
     # Save to CSV
     import pandas as pd
@@ -311,6 +395,13 @@ def save_results(
     
     df.to_csv(output_file, index=False)
     print(f"📊 Results saved to: {output_file}")
+    
+    # Log summary of saved metrics
+    print(f"📋 Saved metrics summary:")
+    print(f"   ETA metrics: {len([k for k in all_metrics.keys() if k.startswith('eta_')])}")
+    print(f"   Destination metrics: {len([k for k in all_metrics.keys() if k.startswith('dest_')])}")
+    if station_metrics:
+        print(f"   Station metrics: {len([k for k in all_metrics.keys() if k.startswith('station_')])}")
 
 
 def main():
@@ -326,8 +417,8 @@ Examples:
   # Baseline model with station arrival analysis
   python pipeline.py --trips-path data/processed/trips_with_weather.parquet --users-path data/raw/combined/users.csv --model baseline --arrivals
   
-  # XGBoost with custom time window for arrivals
-  python pipeline.py --trips-path data/processed/trips_with_weather.parquet --users-path data/raw/combined/users.csv --model xgb --arrivals --delta-t 3600
+  # XGBoost with custom time window for arrivals and logging
+  python pipeline.py --trips-path data/processed/trips_with_weather.parquet --users-path data/raw/combined/users.csv --model xgb --arrivals --delta-t 3600 --log-file logs/pipeline_run.log
         """
     )
     
@@ -350,11 +441,19 @@ Examples:
                        help='Force rebuilding of train/val/test splits even if they exist')
     parser.add_argument('--experiment-name', type=str, default=None,
                        help='Optional experiment name for this run')
+    parser.add_argument('--log-file', type=str, default=None,
+                       help='Path to save complete log of the pipeline run (optional)')
     
     args = parser.parse_args()
     
+    # Set up logging before any output
+    logger = setup_logging(args.log_file)
+    
+    # Log start time and arguments
+    start_time = datetime.datetime.now()
     print("🚀 BIKE TRIP PREDICTION PIPELINE")
     print("="*80)
+    print(f"⏰ Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📂 Trips Path:       {args.trips_path}")
     print(f"👥 Users Path:       {args.users_path}")
     print(f"🤖 Model:            {args.model}")
@@ -362,58 +461,85 @@ Examples:
     if args.arrivals:
         print(f"⏰ Delta T:          {args.delta_t} seconds ({args.delta_t/60:.1f} minutes)")
     print(f"📁 Output Dir:       {args.output_dir}")
+    if args.log_file:
+        print(f"📝 Log File:         {args.log_file}")
     print("="*80)
     
-    # Step 1: Feature Engineering
-    if not run_feature_engineering(args.trips_path, args.users_path, args.force_rebuild):
-        print("❌ Pipeline failed at feature engineering step")
-        return 1
-    
-    # Step 2: Model Training
     try:
-        model, model_name = train_model(args.model, args.experiment_name)
-    except Exception as e:
-        print(f"❌ Pipeline failed at model training step: {e}")
-        return 1
-    
-    # Step 3: Individual Trip Evaluation
-    try:
-        eta_metrics, dest_metrics = evaluate_individual_trips(model, args.model, model_name)
-    except Exception as e:
-        print(f"❌ Pipeline failed at individual trip evaluation step: {e}")
-        return 1
-    
-    # Step 4: Station Arrival Evaluation (if enabled)
-    station_metrics = {}
-    if args.arrivals:
-        try:
-            station_metrics = evaluate_station_arrivals(
-                model, args.model, model_name, args.delta_t
-            )
-        except Exception as e:
-            print(f"❌ Pipeline failed at station arrival evaluation step: {e}")
+        # Step 1: Feature Engineering
+        print("\n🔄 STEP 1: FEATURE ENGINEERING")
+        if not run_feature_engineering(args.trips_path, args.users_path, args.force_rebuild):
+            print("❌ Pipeline failed at feature engineering step")
             return 1
-    
-    # Step 5: Save Results
-    try:
-        save_results(eta_metrics, dest_metrics, station_metrics, model_name, args.output_dir)
+        
+        # Step 2: Model Training
+        print("\n🔄 STEP 2: MODEL TRAINING")
+        try:
+            model, model_name = train_model(args.model, args.experiment_name)
+        except Exception as e:
+            print(f"❌ Pipeline failed at model training step: {e}")
+            logging.exception("Model training failed with exception:")
+            return 1
+        
+        # Step 3: Individual Trip Evaluation
+        print("\n🔄 STEP 3: INDIVIDUAL TRIP EVALUATION")
+        try:
+            eta_metrics, dest_metrics = evaluate_individual_trips(model, args.model, model_name)
+        except Exception as e:
+            print(f"❌ Pipeline failed at individual trip evaluation step: {e}")
+            logging.exception("Individual trip evaluation failed with exception:")
+            return 1
+        
+        # Step 4: Station Arrival Evaluation (if enabled)
+        station_metrics = {}
+        if args.arrivals:
+            print("\n🔄 STEP 4: STATION ARRIVAL EVALUATION")
+            try:
+                station_metrics = evaluate_station_arrivals(
+                    model, args.model, model_name, args.delta_t
+                )
+            except Exception as e:
+                print(f"❌ Pipeline failed at station arrival evaluation step: {e}")
+                logging.exception("Station arrival evaluation failed with exception:")
+                return 1
+        else:
+            print("\n🔄 STEP 4: STATION ARRIVAL EVALUATION (SKIPPED)")
+            print("   Station arrival analysis disabled (use --arrivals to enable)")
+        
+        # Step 5: Save Results
+        print("\n🔄 STEP 5: SAVING RESULTS")
+        try:
+            save_results(eta_metrics, dest_metrics, station_metrics, model_name, args.output_dir)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not save results: {e}")
+            logging.exception("Results saving failed with exception:")
+        
+        # Final Summary
+        end_time = datetime.datetime.now()
+        duration = end_time - start_time
+        
+        print(f"\n🎉 PIPELINE COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print(f"⏰ End time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"⏱️  Total duration: {duration}")
+        print(f"📊 Model: {model_name}")
+        print(f"📈 ETA R²: {eta_metrics['r2']:.4f}")
+        print(f"🎯 Destination Accuracy: {dest_metrics['accuracy']:.4f}")
+        
+        if station_metrics:
+            print(f"🏢 Station Arrival R²: {station_metrics['overall_r2']:.4f}")
+            print(f"🏢 Station Correlation: {station_metrics['station_correlation']:.4f}")
+        
+        print(f"📁 Results saved in: {args.output_dir}")
+        if args.log_file:
+            print(f"📝 Complete log saved to: {args.log_file}")
+        
+        return 0
+        
     except Exception as e:
-        print(f"⚠️  Warning: Could not save results: {e}")
-    
-    # Final Summary
-    print(f"\n🎉 PIPELINE COMPLETED SUCCESSFULLY!")
-    print("="*80)
-    print(f"📊 Model: {model_name}")
-    print(f"📈 ETA R²: {eta_metrics['r2']:.4f}")
-    print(f"🎯 Destination Accuracy: {dest_metrics['accuracy']:.4f}")
-    
-    if station_metrics:
-        print(f"🏢 Station Arrival R²: {station_metrics['overall_r2']:.4f}")
-        print(f"🏢 Station Correlation: {station_metrics['station_correlation']:.4f}")
-    
-    print(f"📁 Results saved in: {args.output_dir}")
-    
-    return 0
+        print(f"❌ Pipeline failed with unexpected error: {e}")
+        logging.exception("Pipeline failed with unexpected exception:")
+        return 1
 
 
 if __name__ == "__main__":
