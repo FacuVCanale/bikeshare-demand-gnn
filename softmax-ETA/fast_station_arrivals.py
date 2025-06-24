@@ -59,7 +59,8 @@ def calculate_station_arrivals_skeleton(
     dest_predictions: np.ndarray,
     dest_probabilities: np.ndarray = None,
     delta_t: int = 1800,
-    use_probabilities: bool = False
+    use_probabilities: bool = False,
+    not_leak: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
     """
     Calculate station arrivals using simple skeleton approach.
@@ -71,6 +72,7 @@ def calculate_station_arrivals_skeleton(
         dest_probabilities: Array of destination probabilities (for soft predictions)
         delta_t: Time window in seconds
         use_probabilities: Whether to use probability distributions
+        not_leak: Whether to prevent predictions when departure and arrival are in same time window
         
     Returns:
         Tuple of (true_arrivals, pred_arrivals, station_list)
@@ -92,11 +94,16 @@ def calculate_station_arrivals_skeleton(
     df_pd['arrival_time'] = df_pd['fecha_origen_recorrido'] + pd.to_timedelta(df_pd['duracion_recorrido'], unit='s')
     df_pd['predicted_arrival_time'] = df_pd['fecha_origen_recorrido'] + pd.to_timedelta(df_pd['eta_pred'], unit='s')
     
-    # Create time windows for arrivals
+    # Create time windows for arrivals and departures
     df_pd['true_arrival_window'] = (df_pd['arrival_time'].astype('int64') // (delta_t * 1_000_000_000)) * (delta_t * 1_000_000_000)
     df_pd['pred_arrival_window'] = (df_pd['predicted_arrival_time'].astype('int64') // (delta_t * 1_000_000_000)) * (delta_t * 1_000_000_000)
     df_pd['true_arrival_window'] = pd.to_datetime(df_pd['true_arrival_window'])
     df_pd['pred_arrival_window'] = pd.to_datetime(df_pd['pred_arrival_window'])
+    
+    # Calculate departure windows for leak prevention
+    if not_leak:
+        df_pd['departure_window'] = (df_pd['fecha_origen_recorrido'].astype('int64') // (delta_t * 1_000_000_000)) * (delta_t * 1_000_000_000)
+        df_pd['departure_window'] = pd.to_datetime(df_pd['departure_window'])
     
     # Get unique windows and stations
     all_windows = sorted(set(df_pd['true_arrival_window'].unique()) | set(df_pd['pred_arrival_window'].unique()))
@@ -118,39 +125,59 @@ def calculate_station_arrivals_skeleton(
     print("🔥 Filling arrival slots...")
     start_time = time.time()
     
-    # Fill true arrivals - simple slot filling
-    print("   📊 Processing true arrivals...")
-    for _, row in df_pd.iterrows():
-        time_idx = time_to_idx.get(row['true_arrival_window'])
-        station_idx = station_to_idx.get(row['id_estacion_destino'])
-        
-        if time_idx is not None and station_idx is not None:
-            true_arrivals[time_idx, station_idx] += 1
+    # Single loop to fill both true and predicted arrivals
+    print("   📊 Processing both true and predicted arrivals in single pass...")
     
-    # Fill predicted arrivals
-    print("   🎯 Processing predicted arrivals...")
     if use_probabilities and dest_probabilities is not None:
-        # Probability-weighted approach
         print("   🎲 Using probability distributions...")
         for i, row in df_pd.iterrows():
-            time_idx = time_to_idx.get(row['pred_arrival_window'])
+            # Fill true arrivals
+            true_time_idx = time_to_idx.get(row['true_arrival_window'])
+            true_station_idx = station_to_idx.get(row['id_estacion_destino'])
             
-            if time_idx is not None and i < len(dest_probabilities):
+            if true_time_idx is not None and true_station_idx is not None:
+                true_arrivals[true_time_idx, true_station_idx] += 1
+            
+            # Fill predicted arrivals (probability-weighted)
+            pred_time_idx = time_to_idx.get(row['pred_arrival_window'])
+            
+            # Check for leak prevention
+            skip_prediction = False
+            if not_leak and pred_time_idx is not None:
+                departure_time_idx = time_to_idx.get(row['departure_window'])
+                if departure_time_idx == pred_time_idx:
+                    skip_prediction = True
+            
+            if pred_time_idx is not None and i < len(dest_probabilities) and not skip_prediction:
                 trip_probs = dest_probabilities[i]
                 
                 # Distribute probability across stations
                 for station_idx, prob in enumerate(trip_probs):
                     if station_idx < n_stations and prob > 0:
-                        pred_arrivals[time_idx, station_idx] += prob
+                        pred_arrivals[pred_time_idx, station_idx] += prob
     else:
-        # Hard predictions approach
         print("   🎯 Using hard predictions...")
         for _, row in df_pd.iterrows():
-            time_idx = time_to_idx.get(row['pred_arrival_window'])
-            station_idx = station_to_idx.get(row['dest_pred'])
+            # Fill true arrivals
+            true_time_idx = time_to_idx.get(row['true_arrival_window'])
+            true_station_idx = station_to_idx.get(row['id_estacion_destino'])
             
-            if time_idx is not None and station_idx is not None:
-                pred_arrivals[time_idx, station_idx] += 1
+            if true_time_idx is not None and true_station_idx is not None:
+                true_arrivals[true_time_idx, true_station_idx] += 1
+            
+            # Fill predicted arrivals (hard predictions)
+            pred_time_idx = time_to_idx.get(row['pred_arrival_window'])
+            pred_station_idx = station_to_idx.get(row['dest_pred'])
+            
+            # Check for leak prevention
+            skip_prediction = False
+            if not_leak and pred_time_idx is not None:
+                departure_time_idx = time_to_idx.get(row['departure_window'])
+                if departure_time_idx == pred_time_idx:
+                    skip_prediction = True
+            
+            if pred_time_idx is not None and pred_station_idx is not None and not skip_prediction:
+                pred_arrivals[pred_time_idx, pred_station_idx] += 1
     
     elapsed_time = time.time() - start_time
     print(f"⚡ Skeleton filling completed in {elapsed_time:.1f} seconds")
@@ -262,6 +289,8 @@ def main():
                        help='Output directory for results')
     parser.add_argument('--use-probabilities', action='store_true',
                        help='Use destination probabilities instead of hard predictions (requires --dest-proba)')
+    parser.add_argument('--not-leak', action='store_true',
+                       help='Prevent predictions when departure and arrival are in same time window')
     
     args = parser.parse_args()
     
@@ -274,6 +303,7 @@ def main():
         print(f"🎯 Dest probabilities: {args.dest_proba}")
     print(f"⏰ Delta T: {args.delta_t} seconds ({args.delta_t/60:.1f} minutes)")
     print(f"🎲 Use probabilities: {'Yes' if args.use_probabilities else 'No'}")
+    print(f"🚫 Prevent leak: {'Yes' if args.not_leak else 'No'}")
     print("="*80)
     
     start_total = time.time()
@@ -313,7 +343,7 @@ def main():
     # Calculate arrivals using skeleton method
     print("\n🔥 Starting skeleton-based station arrival calculation...")
     true_arrivals, pred_arrivals, station_list = calculate_station_arrivals_skeleton(
-        df, eta_pred, dest_pred, dest_proba, args.delta_t, args.use_probabilities
+        df, eta_pred, dest_pred, dest_proba, args.delta_t, args.use_probabilities, args.not_leak
     )
     
     # Evaluate
