@@ -1,268 +1,239 @@
-# EcoBici-AI
+# EcoBici-AI: Bike Trip Prediction Pipeline
 
-![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)
-![Linting: Ruff](https://img.shields.io/badge/linting-ruff-red.svg)
+A comprehensive machine learning pipeline for predicting bike trip durations, destinations, and station arrival patterns using Buenos Aires EcoBici public bike sharing data.
 
-Proyecto para predecir la demanda de estaciones de bicicletas en la Ciudad de Buenos Aires utilizando historiales de viajes de EcoBici.
+## 🚀 Features
 
-Este repositorio provee un pipeline de procesamiento de datos y modelos de machine learning avanzados para pronosticar la cantidad de arribos y partidas por estación en intervalos de tiempo discretos.
+- **Trip Duration Prediction (ETA)**: Predict how long a bike trip will take
+- **Destination Prediction**: Predict which station a user will return the bike to
+- **Station Arrival Analysis**: Predict arrival counts at each station over time windows
+- **Multiple Models**: Baseline, XGBoost, and LightGBM implementations
+- **Ultra-Fast Processing**: Optimized skeleton-based approach for station arrival analysis
+- **Leak Prevention**: Optional temporal leak prevention for more realistic predictions
 
-## 🚀 Características
+## 📋 Requirements
 
-- ⚡ **Pipeline de datos moderno** con Pandas y Polars
-- 🤖 **Múltiples algoritmos ML**: XGBoost, LightGBM, CatBoost, PyTorch, TensorFlow
-- 🔍 **Optimización de hiperparámetros** con Optuna
-- 📊 **Visualizaciones interactivas** con Plotly y Seaborn
-- 🧪 **Testing automatizado** con pytest y coverage
-- 🎯 **Linting y formateo** con Ruff, Black, e isort
-- 📝 **Type checking** con MyPy
-- 🛠️ **Comandos CLI** integrados
-
-## 📁 Estructura del Proyecto
-
-```
-EcoBici-AI/
-├── data/
-│   ├── raw/                 <- CSV originales de EcoBici
-│   ├── processed/           <- Parquets con conteos y features
-│   │   ├── dispatch_counts.parquet
-│   │   └── arrival_counts.parquet
-│   └── datasets/            <- Conjuntos train/val/test
-├── models/                  <- Modelos entrenados (.json, .pkl)
-├── reports/                 <- Informes y análisis
-├── notebooks/               <- Jupyter notebooks para EDA
-├── src/                     <- Código fuente
-│   ├── data_pipeline.py     <- Pipeline de procesamiento
-│   ├── build_datasets.py    <- Construcción de datasets
-│   ├── train_baselines.py   <- Modelos baseline
-│   └── train_xgboost.py     <- Modelo XGBoost avanzado
-├── tests/                   <- Tests unitarios e integración
-├── pyproject.toml          <- Configuración del proyecto
-└── README.md               <- Este archivo
+Install dependencies:
+```bash
+pip install -r requirements.txt
 ```
 
-## 🛠️ Instalación y Configuración
+## 🔧 Data Setup
 
-### Requisitos Previos
+Ensure you have the following data files:
+- `data/processed/trips_with_weather.parquet` - Trip data with weather features
+- `data/raw/combined/users.csv` - User data
 
-- Python >= 3.10
-- Git
+## 🏃‍♂️ Quick Start
 
-### Instalación para Desarrollo
+### Basic Training (Individual Trip Prediction Only)
 
 ```bash
-# Clonar el repositorio
-git clone https://github.com/tu-usuario/EcoBici-AI.git
-cd EcoBici-AI
+# Train LightGBM model for trip prediction
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb
 
-# Crear entorno virtual
-python -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
+# Train XGBoost model
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model xgb
 
-# Instalación completa para desarrollo
-pip install -e .[dev]
-
-# Configurar pre-commit hooks (opcional pero recomendado)
-pre-commit install
+# Train baseline model
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model baseline
 ```
 
-### Instalación Solo para Uso
+### Full Pipeline with Station Arrival Analysis
 
 ```bash
-pip install -e .
+# LightGBM with station arrivals (ultra-fast)
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb \
+  --arrivals
+
+# With leak prevention (recommended for realistic evaluation)
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb \
+  --arrivals \
+  --not-leak
 ```
 
-### Opciones de Instalación Específicas
+### Advanced Options
 
 ```bash
-# Solo testing
-pip install -e .[test]
+# Custom time window and logging
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model xgb \
+  --arrivals \
+  --not-leak \
+  --delta-t 3600 \
+  --output-dir custom_results \
+  --log-file logs/pipeline_run.log
 
-# Solo linting
-pip install -e .[lint]
-
-# Solo documentación
-pip install -e .[docs]
-
-# Solo notebooks
-pip install -e .[notebook]
+# Force rebuild of train/test splits
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb \
+  --arrivals \
+  --force-rebuild
 ```
 
-## 🚀 Uso Rápido
+## 📊 Command Line Arguments
 
-### 1. Preparar los Datos
+### Required Arguments
+- `--trips-path`: Path to trips_with_weather.parquet file
+- `--users-path`: Path to users.csv file  
+- `--model`: Model type (`baseline`, `xgb`, or `lgb`)
 
-Coloca los CSV descargados de EcoBici en `data/raw/`.
+### Optional Arguments
+- `--arrivals`: Enable station arrival analysis (default: disabled)
+- `--not-leak`: **🚫 Prevent temporal leakage** - Skip predictions when departure and arrival are in same time window (recommended)
+- `--delta-t`: Time window for arrival analysis in seconds (default: 1800 = 30 minutes)
+- `--output-dir`: Directory to save results (default: `results`)
+- `--predictions-dir`: Directory to save predictions (default: `predictions`)
+- `--force-rebuild`: Force rebuilding of train/val/test splits
+- `--experiment-name`: Optional experiment name for this run
+- `--log-file`: Path to save complete log of the pipeline run
 
-### 2. Ejecutar Pipeline Completo
+## 🎯 What is Leak Prevention (`--not-leak`)?
+
+**Temporal leakage** occurs when a model makes predictions using information that wouldn't be available at prediction time. In our case:
+
+- **Without `--not-leak`**: If a trip starts at 2:00 PM and is predicted to end at 2:15 PM, both fall in the same 30-minute window (2:00-2:30 PM), creating unrealistic "instant arrival" predictions.
+
+- **With `--not-leak`**: These same-window predictions are excluded, creating more realistic evaluation conditions.
+
+**Recommendation**: Always use `--not-leak` for realistic model evaluation.
+
+## 📈 Pipeline Stages
+
+1. **🔧 Feature Engineering**: Creates train/validation/test splits with engineered features
+2. **🏗️ Model Training**: Trains the specified model (baseline/XGBoost/LightGBM)
+3. **🔍 Individual Trip Evaluation**: Evaluates ETA and destination predictions
+4. **🏢 Station Arrival Analysis**: Ultra-fast analysis of station arrival patterns (if `--arrivals` enabled)
+5. **💾 Results Saving**: Saves all metrics and predictions
+
+## 📊 Output Files
+
+### Results Directory (`results/`)
+- `{model_name}_pipeline_results.csv` - Complete evaluation metrics
+- `fast_station_arrivals_metrics.csv` - Station arrival specific metrics (if `--arrivals` used)
+- `station_arrivals_data.npz` - Raw arrival matrices (if `--arrivals` used)
+
+### Predictions Directory (`predictions/`)
+- `trips_test.parquet` - Test dataset
+- `eta_predictions.npy` - Predicted trip durations
+- `dest_predictions.npy` - Predicted destinations
+- `dest_probabilities.npy` - Destination probability distributions
+
+## ⚡ Standalone Fast Analysis
+
+After running the pipeline, you can run station arrival analysis independently:
 
 ```bash
-# Procesar datos crudos
-ecobici-pipeline --input_dir data/raw --output_dir data/processed
-
-# Construir datasets de entrenamiento
-ecobici-build-datasets --processed_dir data/processed --output_dir data/datasets
-
-# Entrenar modelos baseline
-ecobici-train-baselines --data_dir data/datasets --models_dir models
-
-# Entrenar modelo XGBoost optimizado
-ecobici-train-xgboost --data_dir data/datasets --models_dir models
+python softmax-ETA/fast_station_arrivals.py \
+  --test-data predictions/trips_test.parquet \
+  --eta-pred predictions/eta_predictions.npy \
+  --dest-pred predictions/dest_predictions.npy \
+  --delta-t 1800 \
+  --not-leak
 ```
 
-### 3. Uso Alternativo (Comandos Python Directos)
+## 📋 Example Workflows
 
+### Research & Development
 ```bash
-# Pipeline de procesamiento
-python -m src.data_pipeline --input_dir data/raw --output_dir data/processed
+# Quick baseline evaluation with leak prevention
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model baseline \
+  --arrivals \
+  --not-leak
 
-# Construcción de datasets
-python -m src.build_datasets --processed_dir data/processed --output_dir data/datasets
-
-# Entrenamiento de modelos
-python -m src.train_baselines --data_dir data/datasets
-python -m src.train_xgboost --data_dir data/datasets --models_dir models
+# Full XGBoost evaluation with logging
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model xgb \
+  --arrivals \
+  --not-leak \
+  --log-file logs/xgb_experiment.log
 ```
 
-## 🧪 Desarrollo y Testing
-
-### Linting y Formateo
-
+### Production Evaluation
 ```bash
-# Formatear código automáticamente
-black .
-isort .
-
-# Linting con Ruff (muy rápido)
-ruff check . --fix
-
-# Type checking
-mypy .
-
-# Ejecutar todo junto
-ruff check . --fix && black . && isort . && mypy .
+# Best performing model with all features
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb \
+  --arrivals \
+  --not-leak \
+  --experiment-name "production_model_v1" \
+  --output-dir production_results
 ```
 
-### Testing
+## 🔍 Interpreting Results
 
+The pipeline outputs comprehensive metrics:
+
+### Individual Trip Metrics
+- **ETA R²**: How well trip durations are predicted (higher = better)
+- **Destination Accuracy**: Percentage of correctly predicted destinations
+- **Destination Top-K Accuracy**: Percentage where true destination is in top K predictions
+
+### Station Arrival Metrics  
+- **Overall RMSE**: Root mean square error for arrival counts
+- **Station Correlation**: How well station-level patterns are captured
+- **Total Arrivals**: Comparison of predicted vs actual total arrivals
+
+## 🚀 Performance Notes
+
+- **Ultra-Fast Processing**: Station arrival analysis uses optimized skeleton method
+- **Memory Efficient**: Processes large datasets without excessive memory usage
+- **Parallel Ready**: Automatically uses available CPU cores
+- **Incremental**: Skips feature engineering if splits already exist
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+1. **Missing data files**: Ensure `trips_with_weather.parquet` and `users.csv` exist
+2. **Memory errors**: Try reducing dataset size or using `--delta-t` with larger time windows
+3. **Slow performance**: Ensure you're using `--arrivals` (ultra-fast) vs old parallel methods
+
+### Debug Mode
 ```bash
-# Ejecutar todos los tests
-pytest
-
-# Tests con coverage
-pytest --cov=src --cov-report=html
-
-# Tests paralelos (más rápido)
-pytest -n auto
-
-# Solo tests rápidos
-pytest -m "not slow"
+# Run with detailed logging
+python softmax-ETA/pipeline.py \
+  --trips-path data/processed/trips_with_weather.parquet \
+  --users-path data/raw/combined/users.csv \
+  --model lgb \
+  --arrivals \
+  --not-leak \
+  --log-file debug.log
 ```
 
-### Pre-commit Hooks
+## 📞 Support
 
-```bash
-# Instalar hooks (ejecuta linting automáticamente en cada commit)
-pre-commit install
-
-# Ejecutar manualmente en todos los archivos
-pre-commit run --all-files
-```
-
-## 📊 Modelos Disponibles
-
-### Modelos Baseline
-- **Persistencia**: Usa el último valor conocido
-- **Media por hora**: Promedio histórico por hora del día y día de la semana
-
-### Modelos Avanzados
-- **XGBoost**: Gradient boosting optimizado
-- **LightGBM**: Gradient boosting eficiente
-- **CatBoost**: Manejo automático de features categóricas
-- **PyTorch**: Redes neuronales deep learning
-- **TensorFlow/Keras**: Modelos de deep learning
-
-### Optimización
-- **Optuna**: Optimización automática de hiperparámetros
-- **Cross-validation**: Validación cruzada temporal
-- **Feature engineering**: Construcción automática de características
-
-## 📈 Análisis y Visualizaciones
-
-### Notebooks Jupyter
-
-```bash
-# Iniciar Jupyter Lab
-jupyter lab
-
-# Iniciar Jupyter Notebook clásico
-jupyter notebook
-```
-
-### Visualizaciones Disponibles
-
-- **Plotly**: Gráficos interactivos de demanda por estación
-- **Seaborn**: Análisis estadísticos y correlaciones
-- **Matplotlib**: Visualizaciones estáticas de alta calidad
-
-## 🔧 Configuración Avanzada
-
-### Variables de Entorno
-
-```bash
-# Configurar para producción
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-
-# Configurar logging
-export LOG_LEVEL=INFO
-```
-
-### Configuración de Herramientas
-
-Todas las herramientas están configuradas en `pyproject.toml`:
-
-- **Ruff**: Linting ultra-rápido
-- **Black**: Formateo de código
-- **isort**: Ordenamiento de imports
-- **MyPy**: Type checking
-- **pytest**: Testing framework
-- **Coverage**: Análisis de cobertura de tests
-
-## 📝 Contribuir
-
-1. Fork el proyecto
-2. Crea una rama para tu feature (`git checkout -b feature/nueva-funcionalidad`)
-3. Instala dependencias de desarrollo (`pip install -e .[dev]`)
-4. Ejecuta tests y linting
-5. Commit tus cambios (`git commit -am 'Agrega nueva funcionalidad'`)
-6. Push a la rama (`git push origin feature/nueva-funcionalidad`)
-7. Abre un Pull Request
-
-### Estándares de Código
-
-- **Type hints**: Usar anotaciones de tipo en todas las funciones
-- **Docstrings**: Documentar funciones con formato Google
-- **Tests**: Escribir tests para nueva funcionalidad
-- **Linting**: El código debe pasar todas las verificaciones de Ruff y MyPy
-
-## 📄 Licencia
-
-Este proyecto está bajo la Licencia MIT. Ver el archivo [LICENSE](LICENSE) para más detalles.
-
-## 🔗 Referencias
-
-- [Documentación de EcoBici](https://www.buenosaires.gob.ar/ecobici)
-- [Datos Abiertos GCBA](https://data.buenosaires.gob.ar/)
-- [Propuesta Original del Proyecto](https://chatgpt.com/share/683f51dc-ae58-8008-b59f-2aaf9ac1d3d7)
-
-## 👨‍💻 Autor
-
-**Juan Francisco Lebrero**
-- Email: lebrerojuanfrancisco@gmail.com
-- GitHub: [@tu-usuario](https://github.com/tu-usuario)
+For issues or questions:
+1. Check the log files for detailed error messages
+2. Ensure all dependencies are correctly installed
+3. Verify input data paths and formats
 
 ---
 
-⭐ ¡Si este proyecto te resulta útil, no olvides darle una estrella!
+**Happy modeling! 🚴‍♀️🚴‍♂️**

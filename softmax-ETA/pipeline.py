@@ -347,80 +347,85 @@ def evaluate_station_arrivals_fast(
     model_name: str, 
     delta_t: int = 1800,
     prediction_files: Tuple[str, str, str] = None,
-    n_processes: int = None
+    not_leak: bool = False,
+    output_dir: str = "results"
 ) -> Dict[str, float]:
     """
-    Evaluate model on station arrival count prediction using FAST parallel processing.
+    Evaluate model on station arrival count prediction using ultra-fast skeleton method.
     
     Args:
-        model: Trained model
-        model_type: 'baseline', 'xgb', or 'lgb'
+        model: Trained model (not used, predictions are from files)
+        model_type: 'baseline', 'xgb', or 'lgb' (not used, predictions are from files)
         model_name: Human-readable model name
         delta_t: Time window in seconds for arrival counting
-        prediction_files: Tuple of (test_file, eta_file, dest_file) if already saved
-        n_processes: Number of processes for parallel processing
+        prediction_files: Tuple of (test_file, eta_file, dest_file) - required
+        not_leak: Whether to prevent temporal leakage
+        output_dir: Directory for results output
         
     Returns:
         Dictionary with station arrival metrics
     """
-    import multiprocessing as mp
-    
-    if n_processes is None:
-        n_processes = mp.cpu_count()
-    
-    print(f"\n🏢 FAST STATION ARRIVAL EVALUATION")
+    print(f"\n🏢 ULTRA-FAST STATION ARRIVAL EVALUATION (SKELETON METHOD)")
     print("="*60)
-    print(f"🚀 Using {n_processes} processes for ultra-fast parallel processing")
     
-    # Load test data
-    data_dir = Path("data/processed") 
-    test_path = data_dir / "trips_test.parquet"
-    test_df = pl.read_parquet(test_path)
+    if not prediction_files:
+        raise ValueError("prediction_files required for fast station arrival evaluation")
     
-    print(f"📊 Analyzing station arrivals with {delta_t/60:.1f}-minute windows...")
-    print(f"📊 Processing {len(test_df):,} test trips")
+    test_file, eta_file, dest_file = prediction_files
     
-    # Get model predictions (reuse if already saved, otherwise generate)
-    if prediction_files:
-        test_file, eta_file, dest_file = prediction_files
-        print(f"📂 Loading pre-saved predictions...")
-        eta_pred = np.load(eta_file)
-        dest_pred = np.load(dest_file)
-        print(f"✅ Loaded predictions from files")
-    else:
-        print(f"\n🤖 Getting model predictions...")
-        if model_type == "baseline":
-            eta_pred = model.predict_eta(test_df)
-            dest_pred, _ = model.predict_destination(test_df)
+    # Build command for fast_station_arrivals.py
+    cmd = [
+        sys.executable, "fast_station_arrivals.py",
+        "--test-data", test_file,
+        "--eta-pred", eta_file,
+        "--dest-pred", dest_file,
+        "--delta-t", str(delta_t),
+        "--output-dir", output_dir
+    ]
+    
+    # Add not-leak flag if specified
+    if not_leak:
+        cmd.append("--not-leak")
+    
+    print(f"🚀 Running ultra-fast skeleton-based analysis...")
+    print(f"   Command: {' '.join(cmd)}")
+    
+    # Run the fast analysis
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        # Log the output
+        if result.stdout:
+            print("📋 Fast analysis output:")
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    print(f"   {line}")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Fast station arrivals analysis failed:")
+        if e.stderr:
+            for line in e.stderr.split('\n'):
+                if line.strip():
+                    print(f"   ERROR: {line}")
+        raise e
+    
+    # Load results from the saved metrics file
+    metrics_file = Path(output_dir) / "fast_station_arrivals_metrics.csv"
+    if metrics_file.exists():
+        import pandas as pd
+        metrics_df = pd.read_csv(metrics_file)
+        if len(metrics_df) > 0:
+            # Convert first row to dictionary and return
+            station_metrics = metrics_df.iloc[0].to_dict()
             
-        elif model_type in ["xgb", "lgb"]:
-            eta_pred, dest_pred, _ = model.predict(test_df)
+            print(f"✅ Station arrival analysis completed using skeleton method!")
+            print(f"📊 Results loaded from: {metrics_file}")
             
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
+            return station_metrics
     
-    # 🚀 Create true station arrival targets using FAST parallel processing
-    print("\n🎯 Creating true station arrival targets with parallel processing...")
-    arrival_targets_true, station_list = create_station_arrival_targets_parallel(
-        test_df, delta_t=delta_t, n_processes=n_processes
-    )
-    
-    # 🚀 Create predicted station arrivals using FAST parallel processing
-    print(f"\n📈 Creating predicted station arrivals with parallel processing...")
-    arrival_targets_pred, _ = create_predicted_station_arrivals_parallel(
-        test_df, eta_pred, dest_pred, delta_t=delta_t, n_processes=n_processes
-    )
-    
-    # Evaluate station arrival predictions
-    print(f"\n📊 Evaluating station arrival predictions...")
-    station_metrics = evaluate_station_arrival_prediction(
-        arrival_targets_true, arrival_targets_pred, station_list
-    )
-    
-    # Print results
-    print_station_arrival_evaluation(station_metrics, delta_t, model_name)
-    
-    return station_metrics
+    # Fallback - return empty dict if we can't load results
+    print(f"⚠️  Warning: Could not load station arrival metrics from {metrics_file}")
+    return {}
 
 
 def save_results(
@@ -483,6 +488,9 @@ Examples:
   
   # XGBoost with custom time window for arrivals and logging
   python pipeline.py --trips-path data/processed/trips_with_weather.parquet --users-path data/raw/combined/users.csv --model xgb --arrivals --delta-t 3600 --log-file logs/pipeline_run.log
+  
+  # LightGBM with leak prevention and station arrivals
+  python pipeline.py --trips-path data/processed/trips_with_weather.parquet --users-path data/raw/combined/users.csv --model lgb --arrivals --not-leak
         """
     )
     
@@ -503,14 +511,15 @@ Examples:
                        help='Directory to save results (default: results)')
     parser.add_argument('--predictions-dir', type=str, default='predictions',
                        help='Directory to save predictions immediately (default: predictions)')
-    parser.add_argument('--n-processes', type=int, default=None,
-                       help='Number of processes for parallel station analysis (default: all cores)')
+
     parser.add_argument('--force-rebuild', action='store_true',
                        help='Force rebuilding of train/val/test splits even if they exist')
     parser.add_argument('--experiment-name', type=str, default=None,
                        help='Optional experiment name for this run')
     parser.add_argument('--log-file', type=str, default=None,
                        help='Path to save complete log of the pipeline run (optional)')
+    parser.add_argument('--not-leak', action='store_true',
+                       help='Prevent temporal leakage in station arrival predictions (skip predictions when departure and arrival are in same time window)')
     
     args = parser.parse_args()
     
@@ -525,10 +534,10 @@ Examples:
     print(f"📂 Trips Path:       {args.trips_path}")
     print(f"👥 Users Path:       {args.users_path}")
     print(f"🤖 Model:            {args.model}")
-    print(f"🏢 Station Arrivals: {'Enabled (FAST)' if args.arrivals else 'Disabled'}")
+    print(f"🏢 Station Arrivals: {'Enabled (ULTRA-FAST)' if args.arrivals else 'Disabled'}")
     if args.arrivals:
         print(f"⏰ Delta T:          {args.delta_t} seconds ({args.delta_t/60:.1f} minutes)")
-        print(f"🚀 Processes:        {args.n_processes or 'All available cores'}")
+        print(f"🚫 Prevent Leak:     {'Yes' if args.not_leak else 'No'}")
     print(f"📁 Output Dir:       {args.output_dir}")
     print(f"💾 Predictions Dir:  {args.predictions_dir}")
     if args.log_file:
@@ -562,13 +571,13 @@ Examples:
             logging.exception("Individual trip evaluation failed with exception:")
             return 1
         
-        # Step 4: Station Arrival Evaluation (if enabled) - NOW WITH FAST PARALLEL PROCESSING
+        # Step 4: Station Arrival Evaluation (if enabled) - NOW WITH ULTRA-FAST SKELETON METHOD
         station_metrics = {}
         if args.arrivals:
-            print("\n🔄 STEP 4: FAST STATION ARRIVAL EVALUATION")
+            print("\n🔄 STEP 4: ULTRA-FAST STATION ARRIVAL EVALUATION")
             try:
                 station_metrics = evaluate_station_arrivals_fast(
-                    model, args.model, model_name, args.delta_t, prediction_files, args.n_processes
+                    model, args.model, model_name, args.delta_t, prediction_files, args.not_leak, args.output_dir
                 )
             except Exception as e:
                 print(f"❌ Pipeline failed at station arrival evaluation step: {e}")
@@ -590,7 +599,7 @@ Examples:
         end_time = datetime.datetime.now()
         duration = end_time - start_time
         
-        print(f"\n🎉 OPTIMIZED PIPELINE COMPLETED SUCCESSFULLY!")
+        print(f"\n🎉 ULTRA-FAST OPTIMIZED PIPELINE COMPLETED SUCCESSFULLY!")
         print("="*80)
         print(f"⏰ End time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"⏱️  Total duration: {duration}")
@@ -614,7 +623,9 @@ Examples:
         print(f"  --test-data {test_file} \\")
         print(f"  --eta-pred {eta_file} \\")
         print(f"  --dest-pred {dest_file} \\")
-        print(f"  --delta-t {args.delta_t}")
+        print(f"  --delta-t {args.delta_t}{' \\' if args.not_leak else ''}")
+        if args.not_leak:
+            print(f"  --not-leak")
         
         return 0
         
