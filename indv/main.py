@@ -338,6 +338,11 @@ def create_config_from_args():
                        help='Use random split instead of time-based split')
     parser.add_argument('--random_state', type=int, default=42,
                        help='Random state for reproducibility (default: 42)')
+    parser.add_argument('--no_fill_nulls', action='store_true',
+                       help='Do not fill null values with zeros (keep nulls for model to handle)')
+    parser.add_argument('--fill_strategy', type=str, default='zero',
+                       choices=['zero', 'mean', 'median', 'forward_fill'],
+                       help='Strategy for filling null values (default: zero)')
     
     args = parser.parse_args()
     

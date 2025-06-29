@@ -14,13 +14,13 @@ This folder contains a complete pipeline for predicting bike arrivals and depart
 Based on the approach document, the pipeline creates:
 
 ### Climate Features
-- Temperature, humidity, and apparent temperature
-- 1-week lagged weather features
+- **Only 3 key weather features**: temperature, relative humidity, and apparent temperature
+- 1-week lagged weather features for each
 
 ### Station-wise Features
 - Last delta T arrivals/departures
 - 1-week lag predictions (same time last week)
-- Moving averages (4-period and 12-period)
+- Weekly moving averages (4-week and 12-week for same time slots)
 
 ### Time-wise Features
 - Cyclical encoding for hour, day of week, month
@@ -28,7 +28,7 @@ Based on the approach document, the pipeline creates:
 - Year normalization
 
 ### User-wise Features
-- Station popularity scores (basic implementation)
+- **Disabled**: User features are not included in the current implementation
 
 ## Quick Start
 
@@ -88,10 +88,11 @@ The pipeline expects a CSV file with the following columns:
 - `direccion_estacion_destino`, `long_estacion_destino`, `lat_estacion_destino`
 - `id_usuario`, `modelo_bicicleta`, `genero`
 
-### Weather Data Columns
-- `weather_temperature_2m`, `weather_relative_humidity_2m`
-- `weather_apparent_temperature`, `weather_precipitation`
-- And other weather features as specified in the approach document
+### Weather Data Columns (Only 3 Required)
+- `weather_temperature_2m` - Air temperature at 2 meters
+- `weather_relative_humidity_2m` - Relative humidity at 2 meters  
+- `weather_apparent_temperature` - Apparent/feels-like temperature
+- **Note**: Only these 3 weather features are used, other weather columns are ignored
 
 ## Output Structure
 
@@ -172,5 +173,6 @@ All required dependencies are already listed in the main `requirements.txt` file
 - The pipeline automatically handles missing values and data cleaning
 - Results are saved in organized directory structure for easy analysis
 - Feature importance analysis provides insights into which features are most predictive
+- **Focused approach**: Uses only 3 key weather features and excludes user features to avoid overwhelming the GBDT models
 
-This implementation follows the "stations individual" approach mentioned in the document as the best performing method so far, with comprehensive feature engineering to optimize GBDT performance without overwhelming the models. 
+This implementation follows the "stations individual" approach mentioned in the document as the best performing method so far, with streamlined feature engineering optimized for GBDT performance. 

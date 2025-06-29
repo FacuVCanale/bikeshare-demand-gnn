@@ -45,6 +45,11 @@ class FeatureEngineer:
             pd.DataFrame: Processed DataFrame with delta T format and features
         """
         print("Starting feature engineering...")
+        print("Feature types to be created:")
+        print("  ✓ Climate: temperature, humidity, apparent temperature + 1w lags")
+        print("  ✓ Station: last delta T, 1w lag, weekly moving averages")  
+        print("  ✓ Time: cyclical encoding for hour/day/month/year")
+        print("  ✗ User: excluded as requested")
         
         # Filter for specific station if provided
         if station_id is not None:
@@ -70,11 +75,11 @@ class FeatureEngineer:
         delta_df = self._convert_to_delta_t(df, station_id)
         print(f"Created delta T format: {len(delta_df)} time intervals")
         
-        # Add all feature types
+        # Add all feature types (user features disabled as requested)
         delta_df = self._add_climate_features(delta_df)
         delta_df = self._add_station_features(delta_df)
         delta_df = self._add_time_features(delta_df)
-        delta_df = self._add_user_features(delta_df)
+        delta_df = self._add_user_features(delta_df)  # Currently disabled but included for completeness
         
         # Clean and finalize
         delta_df = self._clean_features(delta_df)
@@ -94,7 +99,7 @@ class FeatureEngineer:
         
         # Group features by type for better readability
         climate_features = [f for f in self.feature_columns if 'weather_' in f]
-        station_features = [f for f in self.feature_columns if any(x in f for x in ['arrivals_', 'departures_', 'popularity'])]
+        station_features = [f for f in self.feature_columns if any(x in f for x in ['arrivals_', 'departures_'])]
         time_features = [f for f in self.feature_columns if any(x in f for x in ['hour', 'day_', 'month', 'year', 'weekend'])]
         other_features = [f for f in self.feature_columns if f not in climate_features + station_features + time_features]
         
@@ -196,65 +201,81 @@ class FeatureEngineer:
         
         print(f"  Final delta_df shape: {delta_df.shape}")
         
-        # Add weather data (assuming it's already in the input df)
-        weather_cols = [col for col in df.columns if col.startswith('weather_')]
-        if weather_cols:
-            print(f"  Found {len(weather_cols)} weather columns, merging weather data...")
-            # Get weather data by taking the mean for each time interval
-            weather_df = df[['fecha_origen_recorrido'] + weather_cols].copy()
-            weather_df['datetime'] = weather_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            weather_agg = weather_df.groupby('datetime')[weather_cols].mean().reset_index()
-            delta_df = delta_df.merge(weather_agg, on='datetime', how='left')
-            
-            # Check for nulls after weather merge
-            for col in weather_cols:
-                null_count = delta_df[col].isnull().sum()
-                if null_count > 0:
-                    print(f"    {col}: {null_count} nulls after merge ({null_count/len(delta_df)*100:.1f}%)")
-            
-            # Forward fill weather data
-            print("  Forward filling weather data...")
-            delta_df[weather_cols] = delta_df[weather_cols].fillna(method='ffill')
-            
-            # Check remaining nulls after forward fill
-            remaining_nulls = delta_df[weather_cols].isnull().sum().sum()
-            if remaining_nulls > 0:
-                print(f"    {remaining_nulls} weather nulls remain after forward fill")
-            else:
-                print("    All weather nulls filled by forward fill")
-        else:
-            print("  No weather columns found in input data")
-        
-        return delta_df
-    
-    def _add_climate_features(self, df):
-        """
-        Add climate-related features.
-        Focus on temperature, humidity, and apparent temperature as specified.
-        """
-        print("Adding climate features...")
-        
-        # Use key weather features as specified in the approach
+        # Add only the three key weather features mentioned in approach document
         key_weather_features = [
             'weather_temperature_2m',
             'weather_relative_humidity_2m', 
             'weather_apparent_temperature'
         ]
         
-        # Ensure these features exist
-        for feature in key_weather_features:
-            if feature not in df.columns:
-                df[feature] = 0  # Default value if missing
+        # Check which of the key weather features are available
+        available_weather_cols = [col for col in key_weather_features if col in df.columns]
         
-        # Add lagged weather features (1 week lag)
-        for feature in key_weather_features:
-            lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
-            lag_feature_name = f'{feature}_1w_lag'
-            df[lag_feature_name] = df.groupby('station_id')[feature].shift(lag_periods)
+        if available_weather_cols:
+            print(f"  Found {len(available_weather_cols)} key weather columns: {available_weather_cols}")
+            # Get weather data by taking the mean for each time interval
+            weather_df = df[['fecha_origen_recorrido'] + available_weather_cols].copy()
+            weather_df['datetime'] = weather_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
+            weather_agg = weather_df.groupby('datetime')[available_weather_cols].mean().reset_index()
+            delta_df = delta_df.merge(weather_agg, on='datetime', how='left')
             
-            # Print null count for lagged weather features
-            null_count = df[lag_feature_name].isnull().sum()
-            print(f"  {lag_feature_name}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+            # Check for nulls after weather merge
+            for col in available_weather_cols:
+                null_count = delta_df[col].isnull().sum()
+                if null_count > 0:
+                    print(f"    {col}: {null_count} nulls after merge ({null_count/len(delta_df)*100:.1f}%)")
+            
+            # Forward fill weather data
+            print("  Forward filling weather data...")
+            delta_df[available_weather_cols] = delta_df[available_weather_cols].fillna(method='ffill')
+            
+            # Check remaining nulls after forward fill
+            remaining_nulls = delta_df[available_weather_cols].isnull().sum().sum()
+            if remaining_nulls > 0:
+                print(f"    {remaining_nulls} weather nulls remain after forward fill")
+            else:
+                print("    All weather nulls filled by forward fill")
+        else:
+            print(f"  None of the key weather features found in data: {key_weather_features}")
+            print("  Available columns:", [col for col in df.columns if 'weather' in col.lower()])
+        
+        return delta_df
+    
+    def _add_climate_features(self, df):
+        """
+        Add climate-related features.
+        Focus on only the three key weather features as specified in approach.
+        """
+        print("Adding climate features...")
+        
+        # Use only the three key weather features as specified in the approach
+        key_weather_features = [
+            'weather_temperature_2m',
+            'weather_relative_humidity_2m', 
+            'weather_apparent_temperature'
+        ]
+        
+        # Check which features are actually available
+        available_features = [f for f in key_weather_features if f in df.columns]
+        missing_features = [f for f in key_weather_features if f not in df.columns]
+        
+        if missing_features:
+            print(f"  Warning: Missing weather features: {missing_features}")
+        
+        if available_features:
+            print(f"  Using available weather features: {available_features}")
+            
+            # Add lagged weather features (1 week lag)
+            for feature in available_features:
+                lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
+                lag_feature_name = f'{feature}_1w_lag'
+                df[lag_feature_name] = df.groupby('station_id')[feature].shift(lag_periods)
+                
+                # Print null count for lagged weather features
+                null_count = df[lag_feature_name].isnull().sum()
+                print(f"    {lag_feature_name}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+        else:
+            print("  No key weather features available - skipping climate features")
         
         return df
     
@@ -388,39 +409,28 @@ class FeatureEngineer:
         df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
         df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
         
-        # Year (relative to start year for trend)
-        start_year = df['year'].min()
-        df['year_normalized'] = (df['year'] - start_year) / 10  # Scale by decade
-        
+
         return df
     
     def _add_user_features(self, df):
         """
         Add user-wise features (simplified version for now).
-        Note: This requires joining back with original trip data.
+        Note: This method is currently disabled per user request.
         """
-        print("Adding user features (placeholder)...")
+        print("User features disabled - skipping...")
         
-        # Placeholder features - these would require more complex joins with trip data
-        # For now, adding basic aggregated features that can be computed from the delta_t format
+        # DISABLED: User features removed per user request
+        # Keeping method for potential future use
         
-        # Station popularity (total trips per station)
-        station_popularity = df.groupby('station_id')[['arrivals', 'departures']].sum()
-        station_popularity['total_trips'] = station_popularity['arrivals'] + station_popularity['departures']
-        station_popularity['popularity_score'] = (station_popularity['total_trips'] / 
-                                                 station_popularity['total_trips'].max())
-        
-        # Merge back to main dataframe
-        df = df.merge(station_popularity[['popularity_score']].reset_index(), 
-                     on='station_id', how='left')
-        
-        # Print null counts for user features
-        print(f"  popularity_score: {df['popularity_score'].isnull().sum()} nulls ({df['popularity_score'].isnull().sum()/len(df)*100:.1f}%)")
-        
-        # Fill any nulls in popularity score
-        if df['popularity_score'].isnull().sum() > 0:
-            print("  Filling popularity_score nulls with 0...")
-            df['popularity_score'] = df['popularity_score'].fillna(0)
+        # # Station popularity (total trips per station)  
+        # station_popularity = df.groupby('station_id')[['arrivals', 'departures']].sum()
+        # station_popularity['total_trips'] = station_popularity['arrivals'] + station_popularity['departures']
+        # station_popularity['popularity_score'] = (station_popularity['total_trips'] / 
+        #                                          station_popularity['total_trips'].max())
+        # 
+        # # Merge back to main dataframe
+        # df = df.merge(station_popularity[['popularity_score']].reset_index(), 
+        #              on='station_id', how='left')
         
         return df
     
