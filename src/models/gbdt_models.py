@@ -30,9 +30,13 @@ def create_lgb_tqdm_callback(total_rounds, desc="LightGBM Training"):
         
         # Show current metrics in description
         if len(env.evaluation_result_list) > 0:
-            # Get the validation metric (usually the last one)
-            metric_name, metric_value, _ = env.evaluation_result_list[-1]
-            pbar.set_postfix_str(f"{metric_name}: {metric_value:.4f}")
+            last_result = env.evaluation_result_list[-1]
+            # LightGBM <=3: (dataset, metric, value)
+            # LightGBM >=4: (dataset, metric, value, is_higher_better)
+            if len(last_result) >= 3:
+                metric_name = last_result[1]
+                metric_value = last_result[2]
+                pbar.set_postfix_str(f"{metric_name}: {metric_value:.4f}")
         
         # Close progress bar when training is done
         if env.iteration == env.end_iteration - 1:
