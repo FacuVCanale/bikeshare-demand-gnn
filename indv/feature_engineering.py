@@ -135,11 +135,21 @@ class FeatureEngineer:
         start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
         end_time = df.select(pl.col('fecha_destino_recorrido').max()).item()
         
-        # Round to nearest delta_t interval
-        start_time = start_time.replace(minute=start_time.minute - (start_time.minute % self.delta_t_minutes), 
-                                       second=0, microsecond=0)
-        end_time = end_time.replace(minute=end_time.minute - (end_time.minute % self.delta_t_minutes) + self.delta_t_minutes,
-                                   second=0, microsecond=0)
+        # Round to nearest delta_t interval using proper datetime arithmetic
+        from datetime import datetime, timedelta
+        
+        # Convert to total minutes since epoch for easier calculation
+        epoch = datetime(1970, 1, 1)
+        start_minutes = int((start_time - epoch).total_seconds() / 60)
+        end_minutes = int((end_time - epoch).total_seconds() / 60)
+        
+        # Floor start_time to nearest delta_t interval
+        start_minutes_floored = (start_minutes // self.delta_t_minutes) * self.delta_t_minutes
+        start_time = epoch + timedelta(minutes=start_minutes_floored)
+        
+        # Ceiling end_time to nearest delta_t interval  
+        end_minutes_ceiled = ((end_minutes + self.delta_t_minutes - 1) // self.delta_t_minutes) * self.delta_t_minutes
+        end_time = epoch + timedelta(minutes=end_minutes_ceiled)
         
         # Create time index as polars DataFrame
         time_index = pl.datetime_range(start_time, end_time, f'{self.delta_t_minutes}m', eager=True)
