@@ -10,7 +10,7 @@ Converts trip-level data to 30-minute delta T format and creates features for:
 Based on the approach document requirements.
 """
 
-import pandas as pd
+import polars as pl
 import numpy as np
 from datetime import datetime, timedelta
 import warnings

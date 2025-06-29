@@ -53,6 +53,9 @@ python main.py --data_path /path/to/your/data.parquet --no_fill_nulls
 python main.py --data_path /path/to/your/data.parquet --fill_strategy mean
 python main.py --data_path /path/to/your/data.parquet --fill_strategy median
 
+# GPU control
+python main.py --data_path /path/to/your/data.parquet --no_gpu
+
 # Help
 python main.py --help
 ```
@@ -70,7 +73,8 @@ config = {
     'model_types': ['xgboost', 'lightgbm'],
     'output_dir': 'results',
     'fill_nulls': True,  # Set to False to keep nulls
-    'fill_strategy': 'zero'  # 'zero', 'mean', 'median', 'forward_fill'
+    'fill_strategy': 'zero',  # 'zero', 'mean', 'median', 'forward_fill'
+    'use_gpu': True  # Set to False for CPU-only training
 }
 
 # Run complete pipeline
@@ -165,6 +169,14 @@ results/
 - **Keep nulls**: `--no_fill_nulls` preserves nulls for models that can handle them
 - **Detailed reporting**: Shows null counts before and after processing
 
+### 6. GPU Acceleration
+- **Auto-detection**: Automatically detects and uses GPU if available
+- **Intelligent fallback**: Falls back to CPU if GPU training fails
+- **XGBoost GPU**: Uses `gpu_hist` tree method for faster training
+- **LightGBM GPU**: Uses GPU device with double precision
+- **Control**: Use `--no_gpu` flag to disable GPU and force CPU training
+- **Status reporting**: Shows GPU availability and usage during training
+
 ## Model Performance
 
 The pipeline automatically identifies the best performing models for each target (arrivals/departures) based on validation RMSE and provides comprehensive performance analysis including:
@@ -187,6 +199,7 @@ All required dependencies are already listed in the main `requirements.txt` file
 - The pipeline uses time-based splitting by default to avoid data leakage
 - Feature scaling is applied by default but can be disabled
 - **Configurable null handling**: Choose whether and how to fill missing values
+- **GPU acceleration**: Automatic GPU detection with intelligent CPU fallback
 - Results are saved in organized directory structure for easy analysis
 - Feature importance analysis provides insights into which features are most predictive
 - **Focused approach**: Uses only 3 key weather features and excludes user features to avoid overwhelming the GBDT models

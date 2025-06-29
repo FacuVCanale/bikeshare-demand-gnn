@@ -27,14 +27,16 @@ class ModelTrainer:
     Training class for XGBoost and LightGBM models on bike sharing data.
     """
     
-    def __init__(self, random_state=42):
+    def __init__(self, random_state=42, use_gpu=True):
         """
         Initialize the trainer.
         
         Args:
             random_state (int): Random state for reproducibility
+            use_gpu (bool): Whether to enable GPU acceleration (default: True)
         """
         self.random_state = random_state
+        self.use_gpu = use_gpu
         self.models = {}
         self.scalers = {}
         self.training_history = {}
@@ -147,19 +149,20 @@ class ModelTrainer:
         
         return data_splits
     
-    def get_model_hyperparameters(self, model_type, target_type='arrivals'):
+    def get_model_hyperparameters(self, model_type, target_type='arrivals', use_gpu=True):
         """
         Get optimized hyperparameters for different models.
         
         Args:
             model_type (str): 'xgboost' or 'lightgbm'
             target_type (str): 'arrivals' or 'departures'
+            use_gpu (bool): Whether to enable GPU acceleration (default: True)
             
         Returns:
             dict: Hyperparameters
         """
         if model_type == 'xgboost':
-            return {
+            base_params = {
                 'n_estimators': 1000,
                 'max_depth': 6,
                 'learning_rate': 0.1,
@@ -169,8 +172,16 @@ class ModelTrainer:
                 'early_stopping_rounds': 100,
                 'n_jobs': -1
             }
+            # GPU-specific parameters for XGBoost
+            if use_gpu:
+                base_params.update({
+                    'tree_method': 'gpu_hist',  # Enable GPU histogram algorithm
+                    'gpu_id': 0,  # Use first GPU
+                })
+            return base_params
+            
         elif model_type == 'lightgbm':
-            return {
+            base_params = {
                 'n_estimators': 1000,
                 'max_depth': 6,
                 'learning_rate': 0.1,
@@ -181,6 +192,14 @@ class ModelTrainer:
                 'n_jobs': -1,
                 'verbosity': -1
             }
+            # GPU-specific parameters for LightGBM
+            if use_gpu:
+                base_params.update({
+                    'device': 'gpu',  # Enable GPU device
+                    'gpu_use_dp': True,  # Use double precision on GPU
+                })
+            return base_params
+            
         else:
             raise ValueError(f"Unknown model type: {model_type}")
     
@@ -221,9 +240,14 @@ class ModelTrainer:
                 print(f"    Unknown model type: {model_type}, skipping...")
                 continue
             
-            # Set hyperparameters
-            hps = self.get_model_hyperparameters(model_type, target_col)
+            # Set hyperparameters (with GPU configuration)
+            hps = self.get_model_hyperparameters(model_type, target_col, self.use_gpu)
             model.set_hps(hps)
+            
+            # Print GPU status
+            if self.use_gpu:
+                gpu_status = "GPU enabled" if hasattr(model, '_gpu_available') and model._gpu_available else "GPU requested but not available"
+                print(f"    {gpu_status}")
             
             # Train model
             start_time = datetime.now()
@@ -433,7 +457,7 @@ class ModelTrainer:
 
 def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'], 
                   model_types=['xgboost', 'lightgbm'], save_models=True, 
-                  save_dir='models'):
+                  save_dir='models', use_gpu=True):
     """
     Complete training pipeline function.
     
@@ -445,14 +469,17 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
         model_types (list): Model types to train
         save_models (bool): Whether to save trained models
         save_dir (str): Directory to save models
+        use_gpu (bool): Whether to enable GPU acceleration (default: True)
         
     Returns:
         tuple: (trainer, results, best_models)
     """
     print("=== STARTING TRAINING PIPELINE ===")
+    gpu_status = "with GPU acceleration" if use_gpu else "CPU only"
+    print(f"Training models {gpu_status}")
     
     # Initialize trainer
-    trainer = ModelTrainer()
+    trainer = ModelTrainer(use_gpu=use_gpu)
     
     # Prepare data
     data_splits = trainer.prepare_data(X, y, metadata)

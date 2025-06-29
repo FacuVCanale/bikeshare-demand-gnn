@@ -75,6 +75,9 @@ class BikePrediictionPipeline:
             # Null handling parameters
             'fill_nulls': True,
             'fill_strategy': 'zero',
+            
+            # GPU parameters
+            'use_gpu': True,
         }
     
     def validate_config(self):
@@ -168,7 +171,8 @@ class BikePrediictionPipeline:
             target_cols=self.config['target_cols'],
             model_types=self.config['model_types'],
             save_models=self.config['save_models'],
-            save_dir=models_dir
+            save_dir=models_dir,
+            use_gpu=self.config['use_gpu']
         )
         
         # Store results
@@ -250,6 +254,8 @@ class BikePrediictionPipeline:
                 print(f"  {key}: {value} {'✓' if value else '✗'}")
             elif key == 'fill_strategy' and self.config['fill_nulls']:
                 print(f"  {key}: {value}")
+            elif key == 'use_gpu':
+                print(f"  {key}: {value} {'🚀 GPU enabled' if value else '🖥️  CPU only'}")
             elif key != 'fill_strategy':
                 print(f"  {key}: {value}")
         
@@ -354,6 +360,8 @@ def create_config_from_args():
     parser.add_argument('--fill_strategy', type=str, default='zero',
                        choices=['zero', 'mean', 'median', 'forward_fill'],
                        help='Strategy for filling null values (default: zero)')
+    parser.add_argument('--no_gpu', action='store_true',
+                       help='Disable GPU acceleration (use CPU only)')
     
     args = parser.parse_args()
     
@@ -376,6 +384,7 @@ def create_config_from_args():
         'feature_importance_top_n': 20,
         'fill_nulls': not args.no_fill_nulls,
         'fill_strategy': args.fill_strategy,
+        'use_gpu': not args.no_gpu,
     }
     
     return config
@@ -412,6 +421,7 @@ if __name__ == "__main__":
         print("python main.py --data_path data/trips_with_weather.parquet --output_dir my_results")
         print("python main.py --data_path data/trips_with_weather.parquet --no_fill_nulls")
         print("python main.py --data_path data/trips_with_weather.parquet --fill_strategy mean")
+        print("python main.py --data_path data/trips_with_weather.parquet --no_gpu")
         print("\nFor full help: python main.py --help")
         
         # Show example programmatic usage
@@ -425,7 +435,8 @@ config = {
     'station_id': None,  # All stations
     'output_dir': 'results',
     'fill_nulls': True,  # Set to False to keep nulls
-    'fill_strategy': 'zero'  # 'zero', 'mean', 'median', 'forward_fill'
+    'fill_strategy': 'zero',  # 'zero', 'mean', 'median', 'forward_fill'
+    'use_gpu': True  # Set to False for CPU-only training
 }
 
 # Run pipeline
