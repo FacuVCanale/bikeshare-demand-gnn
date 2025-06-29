@@ -48,11 +48,23 @@ class FeatureEngineer:
         
         # Filter for specific station if provided
         if station_id is not None:
+            # First check if station exists in the data
+            origin_stations = set(df['id_estacion_origen'].unique())
+            dest_stations = set(df['id_estacion_destino'].unique())
+            all_stations = origin_stations | dest_stations
+            
+            if station_id not in all_stations:
+                available_stations = sorted(list(all_stations))[:10]  # Show first 10
+                raise ValueError(f"Station {station_id} not found in data. "
+                               f"Available stations include: {available_stations}...")
+            
+            # Filter data for the specific station
+            orig_len = len(df)
             df = df[
                 (df['id_estacion_origen'] == station_id) | 
                 (df['id_estacion_destino'] == station_id)
             ].copy()
-            print(f"Filtered data for station {station_id}: {len(df)} trips")
+            print(f"Filtered data for station {station_id}: {len(df)} trips (from {orig_len} total trips)")
         
         # Convert to delta T format
         delta_df = self._convert_to_delta_t(df, station_id)
@@ -119,17 +131,27 @@ class FeatureEngineer:
         
         if station_id is not None:
             # Single station case
+            print(f"  Processing single station: {station_id}")
             delta_df = pd.DataFrame({'datetime': time_index, 'station_id': station_id})
+            print(f"  Created base time grid: {len(delta_df)} intervals")
             
             # Count departures (trips starting from this station)
             departures_df = df[df['id_estacion_origen'] == station_id].copy()
+            print(f"  Found {len(departures_df)} departure trips for station {station_id}")
             departures_df['datetime'] = departures_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
             departures_count = departures_df.groupby('datetime').size().reset_index(name='departures')
+            # Add station_id to match delta_df structure
+            departures_count['station_id'] = station_id
+            print(f"  Aggregated departures into {len(departures_count)} time intervals")
             
             # Count arrivals (trips ending at this station)
             arrivals_df = df[df['id_estacion_destino'] == station_id].copy()
+            print(f"  Found {len(arrivals_df)} arrival trips for station {station_id}")
             arrivals_df['datetime'] = arrivals_df['fecha_destino_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
             arrivals_count = arrivals_df.groupby('datetime').size().reset_index(name='arrivals')
+            # Add station_id to match delta_df structure
+            arrivals_count['station_id'] = station_id
+            print(f"  Aggregated arrivals into {len(arrivals_count)} time intervals")
             
         else:
             # Multi-station case - get all unique stations
@@ -156,13 +178,23 @@ class FeatureEngineer:
                             .size().reset_index(name='arrivals'))
             arrivals_count.rename(columns={'id_estacion_destino': 'station_id'}, inplace=True)
         
-        # Merge counts
+        # Merge counts (now both single and multi-station cases have station_id column)
+        print(f"  Merging departure counts...")
         delta_df = delta_df.merge(departures_count, on=['datetime', 'station_id'], how='left')
+        print(f"  Merging arrival counts...")
         delta_df = delta_df.merge(arrivals_count, on=['datetime', 'station_id'], how='left')
         
+        print(f"  After merging: {len(delta_df)} rows, columns: {list(delta_df.columns)}")
+        
         # Fill missing values
+        departures_nulls = delta_df['departures'].isnull().sum()
+        arrivals_nulls = delta_df['arrivals'].isnull().sum()
+        print(f"  Nulls before filling: departures={departures_nulls}, arrivals={arrivals_nulls}")
+        
         delta_df['departures'] = delta_df['departures'].fillna(0)
         delta_df['arrivals'] = delta_df['arrivals'].fillna(0)
+        
+        print(f"  Final delta_df shape: {delta_df.shape}")
         
         # Add weather data (assuming it's already in the input df)
         weather_cols = [col for col in df.columns if col.startswith('weather_')]
