@@ -269,13 +269,13 @@ class XGBoostModel(GBDTModel):
             X_valid, y_valid = valid_data
             eval_set = [(X_valid, y_valid)]
 
-        early_stopping_rounds = self.hps.get('early_stopping_rounds', 100)
+        # early_stopping_rounds is already set via set_params() in set_hps()
+        # No need to pass it to fit() method
         
         try:
             self.model.fit(
                 X_train, y_train,
                 eval_set=eval_set,
-                early_stopping_rounds=early_stopping_rounds,
                 verbose=False
             )
         except Exception as e:
@@ -287,7 +287,6 @@ class XGBoostModel(GBDTModel):
                 self.model.fit(
                     X_train, y_train,
                     eval_set=eval_set,
-                    early_stopping_rounds=early_stopping_rounds,
                     verbose=False
                 )
             else:
