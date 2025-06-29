@@ -55,7 +55,13 @@ class ModelEvaluator:
             target = model_key.split('_')[-1]  # Extract target from model key
             model_type = model_key.replace(f'_{target}', '')
             
+            # Check which splits are available (skip empty test set in no_test mode)
+            available_splits = []
             for split in ['train', 'val', 'test']:
+                if len(self.data_splits[split]['X']) > 0:
+                    available_splits.append(split)
+            
+            for split in available_splits:
                 X = self.data_splits[split]['X']
                 y_true = self.data_splits[split]['y'][target]
                 
@@ -116,34 +122,64 @@ class ModelEvaluator:
         # Best models by target and metric
         for target in self.target_cols:
             print(f"\n--- {target.upper()} PREDICTIONS ---")
-            target_metrics = self.metrics_df[
+            
+            # Use test metrics if available, otherwise use validation metrics
+            test_metrics_available = len(self.metrics_df[
                 (self.metrics_df['target'] == target) & 
                 (self.metrics_df['split'] == 'test')
+            ]) > 0
+            
+            if test_metrics_available:
+                eval_split = 'test'
+                print("Ranking by Test RMSE:")
+            else:
+                eval_split = 'val'
+                print("Ranking by Validation RMSE (no test set):")
+            
+            target_metrics = self.metrics_df[
+                (self.metrics_df['target'] == target) & 
+                (self.metrics_df['split'] == eval_split)
             ].copy()
             
             if len(target_metrics) > 0:
                 # Sort by RMSE (best performance)
                 target_metrics = target_metrics.sort_values('rmse')
                 
-                print("\nTop Models (by Test RMSE):")
+                print(f"\nTop Models (by {eval_split.title()} RMSE):")
                 for _, row in target_metrics.head(3).iterrows():
                     print(f"  {row['model_type']:10} | RMSE: {row['rmse']:.4f} | "
                           f"MAE: {row['mae']:.4f} | R²: {row['r2']:.4f}")
                 
-                # Show validation vs test comparison for best model
-                best_model = target_metrics.iloc[0]['model']
-                val_metrics = self.metrics_df[
-                    (self.metrics_df['model'] == best_model) & 
-                    (self.metrics_df['split'] == 'val')
-                ].iloc[0]
-                test_metrics = target_metrics.iloc[0]
-                
-                print(f"\nBest Model ({best_model}) - Val vs Test:")
-                print(f"  Validation | RMSE: {val_metrics['rmse']:.4f} | R²: {val_metrics['r2']:.4f}")
-                print(f"  Test       | RMSE: {test_metrics['rmse']:.4f} | R²: {test_metrics['r2']:.4f}")
-                
-                overfitting = (test_metrics['rmse'] - val_metrics['rmse']) / val_metrics['rmse'] * 100
-                print(f"  Overfitting: {overfitting:+.2f}%")
+                if test_metrics_available:
+                    # Show validation vs test comparison for best model
+                    best_model = target_metrics.iloc[0]['model']
+                    val_metrics = self.metrics_df[
+                        (self.metrics_df['model'] == best_model) & 
+                        (self.metrics_df['split'] == 'val')
+                    ].iloc[0]
+                    test_metrics = target_metrics.iloc[0]
+                    
+                    print(f"\nBest Model ({best_model}) - Val vs Test:")
+                    print(f"  Validation | RMSE: {val_metrics['rmse']:.4f} | R²: {val_metrics['r2']:.4f}")
+                    print(f"  Test       | RMSE: {test_metrics['rmse']:.4f} | R²: {test_metrics['r2']:.4f}")
+                    
+                    overfitting = (test_metrics['rmse'] - val_metrics['rmse']) / val_metrics['rmse'] * 100
+                    print(f"  Overfitting: {overfitting:+.2f}%")
+                else:
+                    # Show train vs validation comparison for best model
+                    best_model = target_metrics.iloc[0]['model']
+                    train_metrics = self.metrics_df[
+                        (self.metrics_df['model'] == best_model) & 
+                        (self.metrics_df['split'] == 'train')
+                    ].iloc[0]
+                    val_metrics = target_metrics.iloc[0]
+                    
+                    print(f"\nBest Model ({best_model}) - Train vs Val:")
+                    print(f"  Training   | RMSE: {train_metrics['rmse']:.4f} | R²: {train_metrics['r2']:.4f}")
+                    print(f"  Validation | RMSE: {val_metrics['rmse']:.4f} | R²: {val_metrics['r2']:.4f}")
+                    
+                    overfitting = (val_metrics['rmse'] - train_metrics['rmse']) / train_metrics['rmse'] * 100
+                    print(f"  Overfitting: {overfitting:+.2f}%")
     
     def plot_predictions_vs_actual(self, save_dir='plots'):
         """
@@ -167,7 +203,13 @@ class ModelEvaluator:
             for i, model_key in enumerate(target_models[:2]):  # Show top 2 models
                 model_type = model_key.replace(f'_{target}', '')
                 
-                for j, split in enumerate(['val', 'test']):
+                # Choose splits based on data availability
+                if f"{model_key}_test" in self.predictions:
+                    splits_to_plot = ['val', 'test']
+                else:
+                    splits_to_plot = ['train', 'val']
+                
+                for j, split in enumerate(splits_to_plot):
                     ax = axes[i, j]
                     
                     pred_key = f"{model_key}_{split}"
@@ -219,7 +261,14 @@ class ModelEvaluator:
             for i, model_key in enumerate(target_models[:2]):
                 model_type = model_key.replace(f'_{target}', '')
                 
-                pred_key = f"{model_key}_test"
+                # Use test predictions if available, otherwise validation
+                if f"{model_key}_test" in self.predictions:
+                    pred_key = f"{model_key}_test"
+                    split_label = "Test"
+                else:
+                    pred_key = f"{model_key}_val"
+                    split_label = "Validation"
+                
                 if pred_key in self.predictions:
                     y_true = self.predictions[pred_key]['y_true']
                     y_pred = self.predictions[pred_key]['y_pred']
@@ -230,7 +279,7 @@ class ModelEvaluator:
                     axes[i, 0].axhline(y=0, color='r', linestyle='--')
                     axes[i, 0].set_xlabel('Predicted Values')
                     axes[i, 0].set_ylabel('Residuals')
-                    axes[i, 0].set_title(f'{model_type} - Residuals vs Predicted')
+                    axes[i, 0].set_title(f'{model_type} - Residuals vs Predicted ({split_label})')
                     axes[i, 0].grid(True, alpha=0.3)
                     
                     # Residuals histogram
@@ -238,7 +287,7 @@ class ModelEvaluator:
                     axes[i, 1].axvline(x=0, color='r', linestyle='--')
                     axes[i, 1].set_xlabel('Residuals')
                     axes[i, 1].set_ylabel('Frequency')
-                    axes[i, 1].set_title(f'{model_type} - Residuals Distribution')
+                    axes[i, 1].set_title(f'{model_type} - Residuals Distribution ({split_label})')
                     axes[i, 1].grid(True, alpha=0.3)
             
             plt.tight_layout()
@@ -260,14 +309,19 @@ class ModelEvaluator:
         
         print("Creating time series prediction plots...")
         
-        # Get test data with metadata
-        test_metadata = self.data_splits['test']['metadata']
+        # Get test data with metadata (or validation if test is empty)
+        if len(self.data_splits['test']['metadata']) > 0:
+            plot_metadata = self.data_splits['test']['metadata']
+            plot_split = 'test'
+        else:
+            plot_metadata = self.data_splits['val']['metadata']
+            plot_split = 'val'
         
         for target in self.target_cols:
             target_models = [k for k in self.models.keys() if k.endswith(target)]
             best_model = target_models[0]  # Assume first is best
             
-            pred_key = f"{best_model}_test"
+            pred_key = f"{best_model}_{plot_split}"
             if pred_key in self.predictions:
                 # Prepare data
                 y_true = self.predictions[pred_key]['y_true']
@@ -275,8 +329,8 @@ class ModelEvaluator:
                 
                 # Create DataFrame for plotting
                 plot_df = pd.DataFrame({
-                    'datetime': test_metadata['datetime'].values,
-                    'station_id': test_metadata['station_id'].values,
+                    'datetime': plot_metadata['datetime'].values,
+                    'station_id': plot_metadata['station_id'].values,
                     'actual': y_true.values,
                     'predicted': y_pred
                 })
@@ -303,13 +357,13 @@ class ModelEvaluator:
                 
                 plt.xlabel('Time')
                 plt.ylabel(f'{target.title()} Count')
-                plt.title(f'Time Series Predictions - {target.title()} (Station {station_id})')
+                plt.title(f'Time Series Predictions - {target.title()} (Station {station_id}, {plot_split.title()} Set)')
                 plt.legend()
                 plt.grid(True, alpha=0.3)
                 plt.xticks(rotation=45)
                 
                 plt.tight_layout()
-                plot_path = os.path.join(save_dir, f'time_series_{target}_station_{station_id}.png')
+                plot_path = os.path.join(save_dir, f'time_series_{target}_station_{station_id}_{plot_split}.png')
                 plt.savefig(plot_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 print(f"Saved plot: {plot_path}")
@@ -418,11 +472,16 @@ class ModelEvaluator:
         
         print("Creating model comparison plots...")
         
-        # Model comparison by metric
-        test_metrics = self.metrics_df[self.metrics_df['split'] == 'test']
+        # Use test metrics if available, otherwise validation metrics
+        if len(self.metrics_df[self.metrics_df['split'] == 'test']) > 0:
+            comparison_metrics = self.metrics_df[self.metrics_df['split'] == 'test']
+            split_label = 'Test'
+        else:
+            comparison_metrics = self.metrics_df[self.metrics_df['split'] == 'val']
+            split_label = 'Validation'
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Model Performance Comparison', fontsize=16)
+        fig.suptitle(f'Model Performance Comparison ({split_label} Set)', fontsize=16)
         
         metrics_to_plot = ['rmse', 'mae', 'r2', 'mape']
         
@@ -430,7 +489,7 @@ class ModelEvaluator:
             ax = axes[i//2, i%2]
             
             # Create grouped bar plot
-            pivot_data = test_metrics.pivot(index='target', columns='model_type', values=metric)
+            pivot_data = comparison_metrics.pivot(index='target', columns='model_type', values=metric)
             pivot_data.plot(kind='bar', ax=ax)
             
             ax.set_title(f'{metric.upper()} Comparison')
