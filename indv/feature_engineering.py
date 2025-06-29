@@ -401,15 +401,16 @@ class FeatureEngineer:
         df = df.sort(['station_id', 'time_slot', 'datetime'])
         
         # 4-week and 12-week moving averages for same time slots
-        print("    Computing 4-week and 12-week moving averages...")
+        print("    Computing 4-week and 12-week moving averages (excluding current interval)...")
         df = df.with_columns([
-            pl.col('arrivals').rolling_mean(window_size=4, min_periods=1)
+            # Shift 1 interval back to avoid using value at t (prevents leakage)
+            pl.col('arrivals').shift(1).rolling_mean(window_size=4, min_periods=1)
               .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
-            pl.col('departures').rolling_mean(window_size=4, min_periods=1)
+            pl.col('departures').shift(1).rolling_mean(window_size=4, min_periods=1)
               .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
-            pl.col('arrivals').rolling_mean(window_size=12, min_periods=1)
+            pl.col('arrivals').shift(1).rolling_mean(window_size=12, min_periods=1)
               .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
-            pl.col('departures').rolling_mean(window_size=12, min_periods=1)
+            pl.col('departures').shift(1).rolling_mean(window_size=12, min_periods=1)
               .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
         ])
         
