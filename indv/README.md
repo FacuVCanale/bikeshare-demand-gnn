@@ -35,17 +35,18 @@ Based on the approach document, the pipeline creates:
 ### Command Line Usage
 
 ```bash
-# Basic usage with your data file
+# Basic usage with your data file (supports both CSV and Parquet)
+python main.py --data_path /path/to/your/trips_with_weather.parquet
 python main.py --data_path /path/to/your/trips_with_weather.csv
 
 # For a specific station
-python main.py --data_path /path/to/your/data.csv --station_id 123
+python main.py --data_path /path/to/your/data.parquet --station_id 123
 
 # Custom output directory
-python main.py --data_path /path/to/your/data.csv --output_dir my_results
+python main.py --data_path /path/to/your/data.parquet --output_dir my_results
 
 # Use only XGBoost
-python main.py --data_path /path/to/your/data.csv --models xgboost
+python main.py --data_path /path/to/your/data.parquet --models xgboost
 
 # Help
 python main.py --help
@@ -58,7 +59,7 @@ from main import BikePrediictionPipeline
 
 # Configure pipeline
 config = {
-    'data_path': 'data/trips_with_weather.csv',
+    'data_path': 'data/trips_with_weather.parquet',  # Supports .parquet or .csv
     'station_id': None,  # None for all stations, int for specific station
     'delta_t_minutes': 30,
     'model_types': ['xgboost', 'lightgbm'],

@@ -478,7 +478,7 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30):
     Convenience function to load and process data.
     
     Args:
-        data_path (str): Path to the input data CSV
+        data_path (str): Path to the input data file (CSV or Parquet)
         station_id (int, optional): Specific station ID to process
         delta_t_minutes (int): Time interval in minutes
         
@@ -486,8 +486,30 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30):
         tuple: (processed_df, feature_engineer)
     """
     print(f"Loading data from {data_path}...")
-    df = pd.read_csv(data_path)
+    
+    # Determine file format and load accordingly
+    if data_path.lower().endswith('.parquet'):
+        print("  Detected parquet format")
+        df = pd.read_parquet(data_path)
+    elif data_path.lower().endswith('.csv'):
+        print("  Detected CSV format")
+        df = pd.read_csv(data_path)
+    else:
+        # Try parquet first, then CSV as fallback
+        try:
+            print("  File extension not recognized, trying parquet format...")
+            df = pd.read_parquet(data_path)
+            print("  Successfully loaded as parquet")
+        except:
+            try:
+                print("  Parquet failed, trying CSV format...")
+                df = pd.read_csv(data_path)
+                print("  Successfully loaded as CSV")
+            except Exception as e:
+                raise ValueError(f"Could not load file {data_path}. Tried both parquet and CSV formats. Error: {str(e)}")
+    
     print(f"Loaded {len(df)} records")
+    print(f"Columns: {list(df.columns)}")
     
     # Initialize feature engineer
     fe = FeatureEngineer(delta_t_minutes=delta_t_minutes)

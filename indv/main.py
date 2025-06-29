@@ -316,7 +316,7 @@ def create_config_from_args():
     
     # Required arguments
     parser.add_argument('--data_path', type=str, required=True,
-                       help='Path to the input data CSV file')
+                       help='Path to the input data file (CSV or Parquet)')
     
     # Optional arguments
     parser.add_argument('--station_id', type=int, default=None,
@@ -389,9 +389,9 @@ if __name__ == "__main__":
         print("Individual Station Bike Prediction Pipeline")
         print("=" * 50)
         print("\nExample usage:")
-        print("python main.py --data_path data/trips_with_weather.csv")
-        print("python main.py --data_path data/trips_with_weather.csv --station_id 123")
-        print("python main.py --data_path data/trips_with_weather.csv --output_dir my_results")
+        print("python main.py --data_path data/trips_with_weather.parquet")
+        print("python main.py --data_path data/trips_with_weather.parquet --station_id 123")
+        print("python main.py --data_path data/trips_with_weather.parquet --output_dir my_results")
         print("\nFor full help: python main.py --help")
         
         # Show example programmatic usage
@@ -401,7 +401,7 @@ from main import BikePrediictionPipeline
 
 # Configure pipeline
 config = {
-    'data_path': 'data/trips_with_weather.csv',
+    'data_path': 'data/trips_with_weather.parquet',  # Supports .parquet or .csv
     'station_id': None,  # All stations
     'output_dir': 'results'
 }
