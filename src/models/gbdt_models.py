@@ -364,6 +364,17 @@ class XGBoostModel(GBDTModel):
                 verbose=False,
                 callbacks=[tqdm_callback]
             )
+        except TypeError as te:
+            # XGBoost versions <1.6 do not support 'callbacks' param
+            if 'callbacks' in str(te):
+                warnings.warn("Installed XGBoost version does not support 'callbacks'; training without progress bar.")
+                self.model.fit(
+                    X_train, y_train,
+                    eval_set=eval_set,
+                    verbose=False
+                )
+            else:
+                raise te
         except Exception as e:
             # fallback to CPU if GPU fails
             if 'gpu' in str(e).lower() and self.hps.get('tree_method') == 'gpu_hist':
@@ -375,12 +386,20 @@ class XGBoostModel(GBDTModel):
                     total_rounds=n_estimators,
                     desc="⚡ XGBoost (CPU - GPU Fallback)"
                 )
-                self.model.fit(
-                    X_train, y_train,
-                    eval_set=eval_set,
-                    verbose=False,
-                    callbacks=[tqdm_callback_cpu]
-                )
+                try:
+                    self.model.fit(
+                        X_train, y_train,
+                        eval_set=eval_set,
+                        verbose=False,
+                        callbacks=[tqdm_callback_cpu]
+                    )
+                except TypeError:
+                    # Again, no callbacks support
+                    self.model.fit(
+                        X_train, y_train,
+                        eval_set=eval_set,
+                        verbose=False
+                    )
             else:
                 raise e
         
