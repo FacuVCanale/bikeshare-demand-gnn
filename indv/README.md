@@ -48,6 +48,11 @@ python main.py --data_path /path/to/your/data.parquet --output_dir my_results
 # Use only XGBoost
 python main.py --data_path /path/to/your/data.parquet --models xgboost
 
+# Control null handling
+python main.py --data_path /path/to/your/data.parquet --no_fill_nulls
+python main.py --data_path /path/to/your/data.parquet --fill_strategy mean
+python main.py --data_path /path/to/your/data.parquet --fill_strategy median
+
 # Help
 python main.py --help
 ```
@@ -63,7 +68,9 @@ config = {
     'station_id': None,  # None for all stations, int for specific station
     'delta_t_minutes': 30,
     'model_types': ['xgboost', 'lightgbm'],
-    'output_dir': 'results'
+    'output_dir': 'results',
+    'fill_nulls': True,  # Set to False to keep nulls
+    'fill_strategy': 'zero'  # 'zero', 'mean', 'median', 'forward_fill'
 }
 
 # Run complete pipeline
@@ -149,6 +156,15 @@ results/
 - Configurable parameters for all pipeline steps
 - Support for different time intervals and station filtering
 
+### 5. Configurable Null Handling
+- **Fill nulls** (default): Multiple strategies available
+  - `zero`: Fill with zeros (default, safe for GBDT models)
+  - `mean`: Fill with column means
+  - `median`: Fill with column medians  
+  - `forward_fill`: Forward fill within each station's time series
+- **Keep nulls**: `--no_fill_nulls` preserves nulls for models that can handle them
+- **Detailed reporting**: Shows null counts before and after processing
+
 ## Model Performance
 
 The pipeline automatically identifies the best performing models for each target (arrivals/departures) based on validation RMSE and provides comprehensive performance analysis including:
@@ -170,9 +186,10 @@ All required dependencies are already listed in the main `requirements.txt` file
 
 - The pipeline uses time-based splitting by default to avoid data leakage
 - Feature scaling is applied by default but can be disabled
-- The pipeline automatically handles missing values and data cleaning
+- **Configurable null handling**: Choose whether and how to fill missing values
 - Results are saved in organized directory structure for easy analysis
 - Feature importance analysis provides insights into which features are most predictive
 - **Focused approach**: Uses only 3 key weather features and excludes user features to avoid overwhelming the GBDT models
+- **Experimentation-friendly**: Easy to test different preprocessing strategies
 
 This implementation follows the "stations individual" approach mentioned in the document as the best performing method so far, with streamlined feature engineering optimized for GBDT performance. 

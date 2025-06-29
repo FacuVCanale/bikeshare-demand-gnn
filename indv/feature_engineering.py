@@ -23,14 +23,18 @@ class FeatureEngineer:
     and creating station-level features for bike prediction.
     """
     
-    def __init__(self, delta_t_minutes=30):
+    def __init__(self, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero'):
         """
         Initialize the feature engineer.
         
         Args:
             delta_t_minutes (int): Time interval in minutes (default: 30)
+            fill_nulls (bool): Whether to fill null values (default: True)
+            fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
         """
         self.delta_t_minutes = delta_t_minutes
+        self.fill_nulls = fill_nulls
+        self.fill_strategy = fill_strategy
         self.feature_columns = []
         
     def process_data(self, df, station_id=None):
@@ -50,6 +54,8 @@ class FeatureEngineer:
         print("  ✓ Station: last delta T, 1w lag, weekly moving averages")  
         print("  ✓ Time: cyclical encoding for hour/day/month/year")
         print("  ✗ User: excluded as requested")
+        print(f"Null handling: {'Enabled' if self.fill_nulls else 'Disabled'} " +
+              f"(strategy: {self.fill_strategy})" if self.fill_nulls else "")
         
         # Filter for specific station if provided
         if station_id is not None:
@@ -355,7 +361,7 @@ class FeatureEngineer:
         print(f"  arrivals_ma12_weekly: {df['arrivals_ma12_weekly'].isnull().sum()} nulls ({df['arrivals_ma12_weekly'].isnull().sum()/len(df)*100:.1f}%)")
         print(f"  departures_ma12_weekly: {df['departures_ma12_weekly'].isnull().sum()} nulls ({df['departures_ma12_weekly'].isnull().sum()/len(df)*100:.1f}%)")
         
-        # Fill missing values with 0 (after printing null counts)
+        # Conditionally fill missing values in station features
         station_features = [
             'arrivals_last_dt', 'departures_last_dt',
             'arrivals_1w_lag', 'departures_1w_lag',
@@ -363,11 +369,29 @@ class FeatureEngineer:
             'arrivals_ma12_weekly', 'departures_ma12_weekly'
         ]
         
-        print("  Filling null values with 0...")
-        for feature in station_features:
-            null_count_before = df[feature].isnull().sum()
-            df[feature] = df[feature].fillna(0)
-            print(f"    {feature}: filled {null_count_before} nulls")
+        if self.fill_nulls:
+            print(f"  Filling station feature nulls with strategy: {self.fill_strategy}...")
+            for feature in station_features:
+                null_count_before = df[feature].isnull().sum()
+                if null_count_before > 0:
+                    if self.fill_strategy == 'zero':
+                        df[feature] = df[feature].fillna(0)
+                    elif self.fill_strategy == 'mean':
+                        mean_val = df[feature].mean()
+                        df[feature] = df[feature].fillna(mean_val)
+                    elif self.fill_strategy == 'median':
+                        median_val = df[feature].median()
+                        df[feature] = df[feature].fillna(median_val)
+                    elif self.fill_strategy == 'forward_fill':
+                        df[feature] = df.groupby('station_id')[feature].fillna(method='ffill').fillna(0)
+                    
+                    print(f"    {feature}: filled {null_count_before} nulls")
+        else:
+            print("  Keeping station feature nulls as requested...")
+            for feature in station_features:
+                null_count = df[feature].isnull().sum()
+                if null_count > 0:
+                    print(f"    {feature}: {null_count} nulls preserved")
         
         # Drop temporary columns
         df = df.drop(['time_slot'], axis=1)
@@ -466,9 +490,43 @@ class FeatureEngineer:
         
         if total_nulls > 0:
             print(f"  Total nulls found: {total_nulls}")
-            print("  Filling remaining NaN values with 0...")
-            df[numeric_columns] = df[numeric_columns].fillna(0)
-            print("  All nulls filled")
+            
+            if self.fill_nulls:
+                print(f"  Filling remaining NaN values using strategy: {self.fill_strategy}")
+                
+                if self.fill_strategy == 'zero':
+                    df[numeric_columns] = df[numeric_columns].fillna(0)
+                elif self.fill_strategy == 'mean':
+                    for col in numeric_columns:
+                        if df[col].isnull().sum() > 0:
+                            mean_val = df[col].mean()
+                            df[col] = df[col].fillna(mean_val)
+                            print(f"    {col}: filled with mean={mean_val:.3f}")
+                elif self.fill_strategy == 'median':
+                    for col in numeric_columns:
+                        if df[col].isnull().sum() > 0:
+                            median_val = df[col].median()
+                            df[col] = df[col].fillna(median_val)
+                            print(f"    {col}: filled with median={median_val:.3f}")
+                elif self.fill_strategy == 'forward_fill':
+                    # Sort by station_id and datetime first for proper forward fill
+                    df_sorted = df.sort_values(['station_id', 'datetime'])
+                    for col in numeric_columns:
+                        if df[col].isnull().sum() > 0:
+                            df_sorted[col] = df_sorted.groupby('station_id')[col].fillna(method='ffill')
+                            # Fill any remaining nulls with 0 (start of each station's time series)
+                            remaining_nulls = df_sorted[col].isnull().sum()
+                            if remaining_nulls > 0:
+                                df_sorted[col] = df_sorted[col].fillna(0)
+                                print(f"    {col}: forward filled + {remaining_nulls} remaining filled with 0")
+                            else:
+                                print(f"    {col}: forward filled successfully")
+                    df = df_sorted.reindex(df.index)  # Restore original order
+                
+                print("  All nulls filled")
+            else:
+                print("  Null filling disabled - keeping null values for model to handle")
+                print("  WARNING: Some models may not handle null values well!")
         else:
             print("  No remaining null values found")
         
@@ -479,7 +537,10 @@ class FeatureEngineer:
         # Final validation - check for any remaining nulls
         final_nulls = df.isnull().sum().sum()
         if final_nulls > 0:
-            print(f"  WARNING: {final_nulls} null values remain after cleaning!")
+            if self.fill_nulls:
+                print(f"  WARNING: {final_nulls} null values remain after cleaning!")
+            else:
+                print(f"  ✓ {final_nulls} null values preserved as requested")
         else:
             print("  ✓ No null values remain - dataset clean")
         
@@ -515,7 +576,8 @@ class FeatureEngineer:
         return X, y, metadata
 
 
-def load_and_process_data(data_path, station_id=None, delta_t_minutes=30):
+def load_and_process_data(data_path, station_id=None, delta_t_minutes=30, 
+                         fill_nulls=True, fill_strategy='zero'):
     """
     Convenience function to load and process data.
     
@@ -523,6 +585,8 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30):
         data_path (str): Path to the input data file (CSV or Parquet)
         station_id (int, optional): Specific station ID to process
         delta_t_minutes (int): Time interval in minutes
+        fill_nulls (bool): Whether to fill null values (default: True)
+        fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
         
     Returns:
         tuple: (processed_df, feature_engineer)
@@ -554,7 +618,9 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30):
     print(f"Columns: {list(df.columns)}")
     
     # Initialize feature engineer
-    fe = FeatureEngineer(delta_t_minutes=delta_t_minutes)
+    fe = FeatureEngineer(delta_t_minutes=delta_t_minutes, 
+                        fill_nulls=fill_nulls, 
+                        fill_strategy=fill_strategy)
     
     # Process data
     processed_df = fe.process_data(df, station_id=station_id)

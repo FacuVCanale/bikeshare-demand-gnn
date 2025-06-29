@@ -71,6 +71,10 @@ class BikePrediictionPipeline:
             # Evaluation parameters
             'generate_plots': True,
             'feature_importance_top_n': 20,
+            
+            # Null handling parameters
+            'fill_nulls': True,
+            'fill_strategy': 'zero',
         }
     
     def validate_config(self):
@@ -103,7 +107,9 @@ class BikePrediictionPipeline:
         processed_df, feature_engineer = load_and_process_data(
             data_path=self.config['data_path'],
             station_id=self.config['station_id'],
-            delta_t_minutes=self.config['delta_t_minutes']
+            delta_t_minutes=self.config['delta_t_minutes'],
+            fill_nulls=self.config['fill_nulls'],
+            fill_strategy=self.config['fill_strategy']
         )
         
         # Prepare for training
@@ -240,7 +246,12 @@ class BikePrediictionPipeline:
         print(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Configuration:")
         for key, value in self.config.items():
-            print(f"  {key}: {value}")
+            if key == 'fill_nulls':
+                print(f"  {key}: {value} {'✓' if value else '✗'}")
+            elif key == 'fill_strategy' and self.config['fill_nulls']:
+                print(f"  {key}: {value}")
+            elif key != 'fill_strategy':
+                print(f"  {key}: {value}")
         
         try:
             # Validate configuration
@@ -363,6 +374,8 @@ def create_config_from_args():
         'save_plots': True,
         'generate_plots': True,
         'feature_importance_top_n': 20,
+        'fill_nulls': not args.no_fill_nulls,
+        'fill_strategy': args.fill_strategy,
     }
     
     return config
@@ -397,6 +410,8 @@ if __name__ == "__main__":
         print("python main.py --data_path data/trips_with_weather.parquet")
         print("python main.py --data_path data/trips_with_weather.parquet --station_id 123")
         print("python main.py --data_path data/trips_with_weather.parquet --output_dir my_results")
+        print("python main.py --data_path data/trips_with_weather.parquet --no_fill_nulls")
+        print("python main.py --data_path data/trips_with_weather.parquet --fill_strategy mean")
         print("\nFor full help: python main.py --help")
         
         # Show example programmatic usage
@@ -408,7 +423,9 @@ from main import BikePrediictionPipeline
 config = {
     'data_path': 'data/trips_with_weather.parquet',  # Supports .parquet or .csv
     'station_id': None,  # All stations
-    'output_dir': 'results'
+    'output_dir': 'results',
+    'fill_nulls': True,  # Set to False to keep nulls
+    'fill_strategy': 'zero'  # 'zero', 'mean', 'median', 'forward_fill'
 }
 
 # Run pipeline
