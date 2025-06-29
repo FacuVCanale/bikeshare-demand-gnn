@@ -10,6 +10,65 @@ import lightgbm as lgb
 import xgboost as xgb
 import gc
 import warnings
+from tqdm import tqdm
+
+
+def create_lgb_tqdm_callback(total_rounds, desc="LightGBM Training"):
+    """Create a tqdm callback for LightGBM training progress."""
+    pbar = None
+    
+    def callback(env):
+        nonlocal pbar
+        
+        # Initialize progress bar on first call
+        if pbar is None:
+            pbar = tqdm(total=total_rounds, desc=desc, 
+                       bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        
+        # Update progress
+        pbar.update(1)
+        
+        # Show current metrics in description
+        if len(env.evaluation_result_list) > 0:
+            # Get the validation metric (usually the last one)
+            metric_name, metric_value, _ = env.evaluation_result_list[-1]
+            pbar.set_postfix_str(f"{metric_name}: {metric_value:.4f}")
+        
+        # Close progress bar when training is done
+        if env.iteration == env.end_iteration - 1:
+            pbar.close()
+            
+    return callback
+
+
+class XGBoostTqdmCallback:
+    """Tqdm callback for XGBoost training progress."""
+    
+    def __init__(self, total_rounds, desc="XGBoost Training"):
+        self.total_rounds = total_rounds
+        self.desc = desc
+        self.pbar = None
+        
+    def __call__(self, env):
+        # Initialize progress bar on first call
+        if self.pbar is None:
+            self.pbar = tqdm(total=self.total_rounds, desc=self.desc,
+                           bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        
+        # Update progress
+        self.pbar.update(1)
+        
+        # Show current metric in description
+        if len(env.evaluation_result_list) > 0:
+            # Get validation metric (last dataset, last metric)
+            last_result = env.evaluation_result_list[-1]
+            if len(last_result) >= 2:
+                metric_value = last_result[1]
+                self.pbar.set_postfix_str(f"val_rmse: {metric_value:.4f}")
+        
+        # Close progress bar when training is done
+        if env.iteration == env.end_iteration - 1:
+            self.pbar.close()
 
 
 class GBDTModel(BaseModel):
@@ -152,10 +211,15 @@ class LightGBMModel(GBDTModel):
 
         # train with optimized callbacks
         early_stopping_rounds = self.hps.get('early_stopping_rounds', 100)
+        n_estimators = self.hps.get('n_estimators', 100)
         
         callbacks = [lgb.early_stopping(early_stopping_rounds)]
-        if self.hps.get('verbosity', -1) >= 0:
-            callbacks.append(lgb.log_evaluation(period=100))
+        
+        # Add tqdm progress bar instead of standard logging
+        callbacks.append(create_lgb_tqdm_callback(
+            total_rounds=n_estimators,
+            desc=f"🚀 LightGBM ({current_device})"
+        ))
 
         # Debug: Print actual device being used
         current_device = self.model.get_params().get('device', 'unknown')
@@ -315,11 +379,23 @@ class XGBoostModel(GBDTModel):
         # early_stopping_rounds is already set via set_params() in set_hps()
         # No need to pass it to fit() method
         
+        # Get model device info for progress bar
+        tree_method = self.hps.get('tree_method', 'hist')
+        device_info = "GPU" if tree_method == 'gpu_hist' else "CPU"
+        n_estimators = self.hps.get('n_estimators', 100)
+        
+        # Create tqdm callback
+        tqdm_callback = XGBoostTqdmCallback(
+            total_rounds=n_estimators,
+            desc=f"⚡ XGBoost ({device_info})"
+        )
+        
         try:
             self.model.fit(
                 X_train, y_train,
                 eval_set=eval_set,
-                verbose=False
+                verbose=False,
+                callbacks=[tqdm_callback]
             )
         except Exception as e:
             # fallback to CPU if GPU fails
@@ -327,10 +403,16 @@ class XGBoostModel(GBDTModel):
                 warnings.warn("GPU training failed, falling back to CPU")
                 self.hps['tree_method'] = 'hist'
                 self.model.set_params(**self.hps)
+                # Update callback for CPU fallback
+                tqdm_callback_cpu = XGBoostTqdmCallback(
+                    total_rounds=n_estimators,
+                    desc="⚡ XGBoost (CPU - GPU Fallback)"
+                )
                 self.model.fit(
                     X_train, y_train,
                     eval_set=eval_set,
-                    verbose=False
+                    verbose=False,
+                    callbacks=[tqdm_callback_cpu]
                 )
             else:
                 raise e
