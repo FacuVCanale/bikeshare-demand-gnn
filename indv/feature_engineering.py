@@ -149,7 +149,7 @@ class FeatureEngineer:
             print(f"  Processing single station: {station_id}")
             delta_df = pl.DataFrame({
                 'datetime': time_index,
-                'station_id': pl.repeat(station_id, len(time_index))
+                'station_id': [station_id] * len(time_index)
             })
             print(f"  Created base time grid: {len(delta_df)} intervals")
             
