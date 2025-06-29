@@ -46,7 +46,7 @@ class ModelTrainer:
         
     def prepare_data(self, X, y, metadata, test_size=0.2, validation_size=0.2,
                     scale_features=True, use_time_split=True,
-                    val_start_date=None, test_start_date=None):
+                    val_start_date=None, test_start_date=None, no_test=False):
         """
         Prepare data for training with proper time-aware splits.
         
@@ -60,6 +60,7 @@ class ModelTrainer:
             use_time_split (bool): Whether to use time-based splitting
             val_start_date (str): Start date for validation split
             test_start_date (str): Start date for test split
+            no_test (bool): Only use train/val splits, report train/val metrics
             
         Returns:
             dict: Dictionary with train/val/test splits
@@ -73,7 +74,34 @@ class ModelTrainer:
             y = y.to_pandas()
             metadata = metadata.to_pandas()
         
-        if use_time_split and (test_start_date is None):
+        if no_test:
+            # Special case: only train/val splits, use 2024 as validation
+            print("  Using no-test mode: 2024 as validation, everything else as training")
+            meta_dt = metadata['datetime']
+            
+            # Extract year from datetime
+            years = pd.to_datetime(meta_dt).dt.year
+            
+            # Split: 2024 -> validation, everything else -> training
+            val_idx = meta_dt[years == 2024].index
+            train_idx = meta_dt[years != 2024].index
+            
+            X_train = X.loc[train_idx].drop(['datetime'], axis=1, errors='ignore')
+            X_val = X.loc[val_idx].drop(['datetime'], axis=1, errors='ignore')
+            X_test = pd.DataFrame()  # Empty test set
+            
+            y_train = y.loc[train_idx]
+            y_val = y.loc[val_idx]
+            y_test = pd.DataFrame()  # Empty test set
+            
+            meta_train = metadata.loc[train_idx]
+            meta_val = metadata.loc[val_idx]
+            meta_test = pd.DataFrame()  # Empty test set
+            
+            print(f"  Train years: {sorted(pd.to_datetime(meta_train['datetime']).dt.year.unique())}")
+            print(f"  Val years: {sorted(pd.to_datetime(meta_val['datetime']).dt.year.unique())}")
+            
+        elif use_time_split and (test_start_date is None):
             # Time-based split to avoid data leakage
             X_with_time = X.copy()
             X_with_time['datetime'] = metadata['datetime']
@@ -161,11 +189,14 @@ class ModelTrainer:
                 columns=X_val.columns, 
                 index=X_val.index
             )
-            X_test_scaled = pd.DataFrame(
-                scaler.transform(X_test), 
-                columns=X_test.columns, 
-                index=X_test.index
-            )
+            if not no_test and len(X_test) > 0:
+                X_test_scaled = pd.DataFrame(
+                    scaler.transform(X_test), 
+                    columns=X_test.columns, 
+                    index=X_test.index
+                )
+            else:
+                X_test_scaled = X_test  # Keep empty
             
             self.scalers['feature_scaler'] = scaler
             X_train, X_val, X_test = X_train_scaled, X_val_scaled, X_test_scaled
@@ -192,7 +223,10 @@ class ModelTrainer:
         print(f"Data splits prepared:")
         print(f"  Train: {len(X_train)} samples")
         print(f"  Validation: {len(X_val)} samples") 
-        print(f"  Test: {len(X_test)} samples")
+        if not no_test:
+            print(f"  Test: {len(X_test)} samples")
+        else:
+            print(f"  Test: DISABLED (no_test mode)")
         print(f"  Features: {X_train.shape[1]}")
         
         # Persist splits to the trainer instance to avoid recomputation (and double scaling)
@@ -275,11 +309,16 @@ class ModelTrainer:
         # Extract single target
         y_train = data_splits['train']['y'][target_col]
         y_val = data_splits['val']['y'][target_col]
-        y_test = data_splits['test']['y'][target_col]
+        
+        # Check if test set exists (no_test mode)
+        has_test = len(data_splits['test']['y']) > 0
+        if has_test:
+            y_test = data_splits['test']['y'][target_col]
         
         X_train = data_splits['train']['X']
         X_val = data_splits['val']['X']
-        X_test = data_splits['test']['X']
+        if has_test:
+            X_test = data_splits['test']['X']
         
         for model_type in model_types:
             print(f"  Training {model_type}...")
@@ -311,10 +350,18 @@ class ModelTrainer:
                 )
                 training_time = (datetime.now() - start_time).total_seconds()
                 
-                # Evaluate on all splits
+                # Evaluate on available splits
                 train_metrics = model.get_metrics((X_train, y_train))
                 val_metrics = model.get_metrics((X_val, y_val))
-                test_metrics = model.get_metrics((X_test, y_test))
+                
+                metrics_dict = {
+                    'train': train_metrics,
+                    'val': val_metrics
+                }
+                
+                if has_test:
+                    test_metrics = model.get_metrics((X_test, y_test))
+                    metrics_dict['test'] = test_metrics
                 
                 # Store results
                 model_key = f"{model_type}_{target_col}"
@@ -322,11 +369,7 @@ class ModelTrainer:
                     'model': model,
                     'target': target_col,
                     'training_time': training_time,
-                    'metrics': {
-                        'train': train_metrics,
-                        'val': val_metrics,
-                        'test': test_metrics
-                    },
+                    'metrics': metrics_dict,
                     'hyperparameters': hps
                 }
                 
@@ -335,7 +378,8 @@ class ModelTrainer:
                 
                 print(f"    {model_type} completed in {training_time:.2f}s")
                 print(f"    Validation RMSE: {val_metrics['rmse']:.4f}")
-                print(f"    Test RMSE: {test_metrics['rmse']:.4f}")
+                if has_test:
+                    print(f"    Test RMSE: {test_metrics['rmse']:.4f}")
                 
             except Exception as e:
                 print(f"    Error training {model_type}: {str(e)}")
@@ -509,9 +553,9 @@ class ModelTrainer:
 
 
 def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'], 
-                  model_types=['xgboost', 'lightgbm'], save_models=True, 
+                  model_types=['xgboost', 'lightgbm'], save_models=True,
                   save_dir='models', use_gpu=True,
-                  val_start_date=None, test_start_date=None):
+                  val_start_date=None, test_start_date=None, no_test=False):
     """
     Complete training pipeline function.
     
@@ -526,13 +570,15 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
         use_gpu (bool): Whether to enable GPU acceleration (default: True)
         val_start_date (str): Start date for validation split
         test_start_date (str): Start date for test split
+        no_test (bool): Only use train/val splits, report train/val metrics
         
     Returns:
         tuple: (trainer, results, best_models)
     """
     print("=== STARTING TRAINING PIPELINE ===")
     gpu_status = "with GPU acceleration" if use_gpu else "CPU only"
-    print(f"Training models {gpu_status}")
+    test_status = "(no test set)" if no_test else ""
+    print(f"Training models {gpu_status} {test_status}")
     
     # Initialize trainer
     trainer = ModelTrainer(use_gpu=use_gpu)
@@ -541,7 +587,8 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
     data_splits = trainer.prepare_data(
         X, y, metadata,
         val_start_date=val_start_date,
-        test_start_date=test_start_date
+        test_start_date=test_start_date,
+        no_test=no_test
     )
     
     # Train models

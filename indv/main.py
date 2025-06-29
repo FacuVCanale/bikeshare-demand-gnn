@@ -66,6 +66,9 @@ class BikePredictionPipeline:
             'val_start_date': '2023-01-01',
             'test_start_date': '2023-08-01',
             
+            # No test mode
+            'no_test': False,
+            
             # Output parameters
             'output_dir': 'results',
             'save_models': True,
@@ -178,7 +181,8 @@ class BikePredictionPipeline:
             save_dir=models_dir,
             use_gpu=self.config['use_gpu'],
             val_start_date=self.config.get('val_start_date'),
-            test_start_date=self.config.get('test_start_date')
+            test_start_date=self.config.get('test_start_date'),
+            no_test=self.config['no_test']
         )
         
         # Store results
@@ -370,6 +374,8 @@ def create_config_from_args():
                        help='Start date (inclusive) for validation split, format YYYY-MM-DD')
     parser.add_argument('--test_start_date', type=str, default='2023-08-01',
                        help='Start date (inclusive) for test split, format YYYY-MM-DD')
+    parser.add_argument('--no_test', action='store_true',
+                       help='Only use train/val splits (2024 as validation), skip test set')
     
     args = parser.parse_args()
     
@@ -395,6 +401,7 @@ def create_config_from_args():
         'use_gpu': not args.no_gpu,
         'val_start_date': args.val_start_date,
         'test_start_date': args.test_start_date,
+        'no_test': args.no_test,
     }
     
     return config

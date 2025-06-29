@@ -52,7 +52,7 @@ class FeatureEngineer:
         print("Feature types to be created:")
         print("  ✓ Climate: temperature, humidity, apparent temperature + 1w lags")
         print("  ✓ Station: last delta T, 1w lag, weekly moving averages")  
-        print("  ✓ Time: cyclical encoding for hour/day/month/year")
+        print("  ✓ Time: cyclical encoding for day_of_week/day_of_month/weekend")
         print("  ✗ User: excluded as requested")
         print(f"Null handling: {'Enabled' if self.fill_nulls else 'Disabled'} " +
               f"(strategy: {self.fill_strategy})" if self.fill_nulls else "")
@@ -106,7 +106,7 @@ class FeatureEngineer:
         # Group features by type for better readability
         climate_features = [f for f in self.feature_columns if 'weather_' in f]
         station_features = [f for f in self.feature_columns if any(x in f for x in ['arrivals_', 'departures_'])]
-        time_features = [f for f in self.feature_columns if any(x in f for x in ['hour', 'day_', 'month', 'year', 'weekend'])]
+        time_features = [f for f in self.feature_columns if any(x in f for x in ['day_of_week', 'day_of_month', 'is_weekend'])]
         other_features = [f for f in self.feature_columns if f not in climate_features + station_features + time_features]
         
         if climate_features:
@@ -379,12 +379,11 @@ class FeatureEngineer:
         
         # Create time slot identifier for same-time-across-weeks moving averages
         # Combine hour and day_of_week to create unique time slots
-        hour_exists = 'hour' in df.columns
         dow_exists = 'day_of_week' in df.columns
         
         time_exprs = []
-        if not hour_exists:
-            time_exprs.append(pl.col('datetime').dt.hour().alias('hour'))
+        # Extract hour temporarily for time_slot calculation
+        time_exprs.append(pl.col('datetime').dt.hour().alias('hour_temp'))
         if not dow_exists:
             time_exprs.append(pl.col('datetime').dt.weekday().alias('day_of_week'))
         
@@ -392,7 +391,7 @@ class FeatureEngineer:
             df = df.with_columns(time_exprs)
         
         df = df.with_columns(
-            (pl.col('hour') * 7 + pl.col('day_of_week')).alias('time_slot')
+            (pl.col('hour_temp') * 7 + pl.col('day_of_week')).alias('time_slot')
         )
         
         print("  Computing moving averages for same time slots across weeks...")
@@ -465,7 +464,7 @@ class FeatureEngineer:
                     print(f"    {feature}: {null_count} nulls preserved")
         
         # Drop temporary columns
-        df = df.drop('time_slot')
+        df = df.drop(['time_slot', 'hour_temp'])
         
         return df
     
@@ -478,15 +477,11 @@ class FeatureEngineer:
         # Extract basic time components (check if already exist to avoid duplication)
         time_exprs = []
         
-        if 'hour' not in df.columns:
-            time_exprs.append(pl.col('datetime').dt.hour().alias('hour'))
         if 'day_of_week' not in df.columns:
             time_exprs.append(pl.col('datetime').dt.weekday().alias('day_of_week'))
         
         time_exprs.extend([
             pl.col('datetime').dt.day().alias('day_of_month'),
-            pl.col('datetime').dt.month().alias('month'),
-            pl.col('datetime').dt.year().alias('year')
         ])
         
         if time_exprs:
@@ -498,10 +493,6 @@ class FeatureEngineer:
             (pl.col('day_of_week') >= 5).cast(pl.Int32).alias('is_weekend'),
             
             # Cyclical encoding for periodic features
-            # Hour (24-hour cycle)
-            (2 * np.pi * pl.col('hour') / 24).sin().alias('hour_sin'),
-            (2 * np.pi * pl.col('hour') / 24).cos().alias('hour_cos'),
-            
             # Day of week (7-day cycle)
             (2 * np.pi * pl.col('day_of_week') / 7).sin().alias('dow_sin'),
             (2 * np.pi * pl.col('day_of_week') / 7).cos().alias('dow_cos'),
@@ -509,10 +500,6 @@ class FeatureEngineer:
             # Day of month (30-day cycle approximation)
             (2 * np.pi * pl.col('day_of_month') / 30).sin().alias('dom_sin'),
             (2 * np.pi * pl.col('day_of_month') / 30).cos().alias('dom_cos'),
-            
-            # Month (12-month cycle)
-            (2 * np.pi * pl.col('month') / 12).sin().alias('month_sin'),
-            (2 * np.pi * pl.col('month') / 12).cos().alias('month_cos')
         ])
 
         return df
