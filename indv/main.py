@@ -131,10 +131,11 @@ class BikePrediictionPipeline:
             'feature_names': feature_engineer.get_feature_names()
         }
         
-        # Save processed data
+        # Save processed data using streaming parquet (memory efficient)
         if self.config['save_models']:
-            data_path = os.path.join(self.config['output_dir'], 'processed_data.csv')
-            processed_df.to_csv(data_path, index=False)
+            data_path = os.path.join(self.config['output_dir'], 'processed_data.parquet')
+            # Use streaming write for large datasets to avoid memory issues
+            processed_df.write_parquet(data_path, compression='snappy')
             print(f"Saved processed data: {data_path}")
         
         print(f"Feature engineering completed successfully")

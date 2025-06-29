@@ -60,8 +60,8 @@ class FeatureEngineer:
         # Filter for specific station if provided
         if station_id is not None:
             # First check if station exists in the data
-            origin_stations = set(df['id_estacion_origen'].unique())
-            dest_stations = set(df['id_estacion_destino'].unique())
+            origin_stations = set(df.select(pl.col('id_estacion_origen').unique()).to_series().to_list())
+            dest_stations = set(df.select(pl.col('id_estacion_destino').unique()).to_series().to_list())
             all_stations = origin_stations | dest_stations
             
             if station_id not in all_stations:
@@ -71,10 +71,10 @@ class FeatureEngineer:
             
             # Filter data for the specific station
             orig_len = len(df)
-            df = df[
-                (df['id_estacion_origen'] == station_id) | 
-                (df['id_estacion_destino'] == station_id)
-            ].copy()
+            df = df.filter(
+                (pl.col('id_estacion_origen') == station_id) | 
+                (pl.col('id_estacion_destino') == station_id)
+            )
             print(f"Filtered data for station {station_id}: {len(df)} trips (from {orig_len} total trips)")
         
         # Convert to delta T format
@@ -126,84 +126,111 @@ class FeatureEngineer:
         Convert trip data to 30-minute time intervals with arrival/departure counts.
         """
         # Ensure datetime columns
-        df['fecha_origen_recorrido'] = pd.to_datetime(df['fecha_origen_recorrido'])
-        df['fecha_destino_recorrido'] = pd.to_datetime(df['fecha_destino_recorrido'])
+        df = df.with_columns([
+            pl.col('fecha_origen_recorrido').str.to_datetime(),
+            pl.col('fecha_destino_recorrido').str.to_datetime()
+        ])
         
         # Create time range
-        start_time = df['fecha_origen_recorrido'].min()
-        end_time = df['fecha_destino_recorrido'].max()
+        start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
+        end_time = df.select(pl.col('fecha_destino_recorrido').max()).item()
         
         # Round to nearest delta_t interval
-        start_time = start_time.floor(f'{self.delta_t_minutes}min')
-        end_time = end_time.ceil(f'{self.delta_t_minutes}min')
+        start_time = start_time.replace(minute=start_time.minute - (start_time.minute % self.delta_t_minutes), 
+                                       second=0, microsecond=0)
+        end_time = end_time.replace(minute=end_time.minute - (end_time.minute % self.delta_t_minutes) + self.delta_t_minutes,
+                                   second=0, microsecond=0)
         
-        # Create time index
-        time_index = pd.date_range(start_time, end_time, freq=f'{self.delta_t_minutes}min')
+        # Create time index as polars DataFrame
+        time_index = pl.datetime_range(start_time, end_time, f'{self.delta_t_minutes}m', eager=True)
         
         if station_id is not None:
             # Single station case
             print(f"  Processing single station: {station_id}")
-            delta_df = pd.DataFrame({'datetime': time_index, 'station_id': station_id})
+            delta_df = pl.DataFrame({
+                'datetime': time_index,
+                'station_id': pl.repeat(station_id, len(time_index))
+            })
             print(f"  Created base time grid: {len(delta_df)} intervals")
             
             # Count departures (trips starting from this station)
-            departures_df = df[df['id_estacion_origen'] == station_id].copy()
+            departures_df = df.filter(pl.col('id_estacion_origen') == station_id)
             print(f"  Found {len(departures_df)} departure trips for station {station_id}")
-            departures_df['datetime'] = departures_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            departures_count = departures_df.groupby('datetime').size().reset_index(name='departures')
-            # Add station_id to match delta_df structure
-            departures_count['station_id'] = station_id
+            departures_count = (departures_df
+                              .with_columns(
+                                  pl.col('fecha_origen_recorrido')
+                                  .dt.truncate(f'{self.delta_t_minutes}m')
+                                  .alias('datetime')
+                              )
+                              .group_by('datetime')
+                              .agg(pl.len().alias('departures'))
+                              .with_columns(pl.lit(station_id).alias('station_id')))
             print(f"  Aggregated departures into {len(departures_count)} time intervals")
             
             # Count arrivals (trips ending at this station)
-            arrivals_df = df[df['id_estacion_destino'] == station_id].copy()
+            arrivals_df = df.filter(pl.col('id_estacion_destino') == station_id)
             print(f"  Found {len(arrivals_df)} arrival trips for station {station_id}")
-            arrivals_df['datetime'] = arrivals_df['fecha_destino_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            arrivals_count = arrivals_df.groupby('datetime').size().reset_index(name='arrivals')
-            # Add station_id to match delta_df structure
-            arrivals_count['station_id'] = station_id
+            arrivals_count = (arrivals_df
+                            .with_columns(
+                                pl.col('fecha_destino_recorrido')
+                                .dt.truncate(f'{self.delta_t_minutes}m')
+                                .alias('datetime')
+                            )
+                            .group_by('datetime')
+                            .agg(pl.len().alias('arrivals'))
+                            .with_columns(pl.lit(station_id).alias('station_id')))
             print(f"  Aggregated arrivals into {len(arrivals_count)} time intervals")
             
         else:
             # Multi-station case - get all unique stations
-            stations = set(df['id_estacion_origen'].unique()) | set(df['id_estacion_destino'].unique())
+            origin_stations = df.select(pl.col('id_estacion_origen').unique()).to_series().to_list()
+            dest_stations = df.select(pl.col('id_estacion_destino').unique()).to_series().to_list()
+            stations = list(set(origin_stations + dest_stations))
             
-            # Create base DataFrame
-            delta_df = pd.DataFrame([
-                {'datetime': dt, 'station_id': station}
-                for dt in time_index
-                for station in stations
-            ])
+            # Create base DataFrame using cross join
+            time_df = pl.DataFrame({'datetime': time_index})
+            stations_df = pl.DataFrame({'station_id': stations})
+            delta_df = time_df.join(stations_df, how='cross')
             
             # Count departures for all stations
-            departures_df = df.copy()
-            departures_df['datetime'] = departures_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            departures_count = (departures_df.groupby(['datetime', 'id_estacion_origen'])
-                              .size().reset_index(name='departures'))
-            departures_count.rename(columns={'id_estacion_origen': 'station_id'}, inplace=True)
+            departures_count = (df
+                              .with_columns(
+                                  pl.col('fecha_origen_recorrido')
+                                  .dt.truncate(f'{self.delta_t_minutes}m')
+                                  .alias('datetime')
+                              )
+                              .group_by(['datetime', 'id_estacion_origen'])
+                              .agg(pl.len().alias('departures'))
+                              .rename({'id_estacion_origen': 'station_id'}))
             
             # Count arrivals for all stations
-            arrivals_df = df.copy()
-            arrivals_df['datetime'] = arrivals_df['fecha_destino_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            arrivals_count = (arrivals_df.groupby(['datetime', 'id_estacion_destino'])
-                            .size().reset_index(name='arrivals'))
-            arrivals_count.rename(columns={'id_estacion_destino': 'station_id'}, inplace=True)
+            arrivals_count = (df
+                            .with_columns(
+                                pl.col('fecha_destino_recorrido')
+                                .dt.truncate(f'{self.delta_t_minutes}m')
+                                .alias('datetime')
+                            )
+                            .group_by(['datetime', 'id_estacion_destino'])
+                            .agg(pl.len().alias('arrivals'))
+                            .rename({'id_estacion_destino': 'station_id'}))
         
         # Merge counts (now both single and multi-station cases have station_id column)
         print(f"  Merging departure counts...")
-        delta_df = delta_df.merge(departures_count, on=['datetime', 'station_id'], how='left')
+        delta_df = delta_df.join(departures_count, on=['datetime', 'station_id'], how='left')
         print(f"  Merging arrival counts...")
-        delta_df = delta_df.merge(arrivals_count, on=['datetime', 'station_id'], how='left')
+        delta_df = delta_df.join(arrivals_count, on=['datetime', 'station_id'], how='left')
         
-        print(f"  After merging: {len(delta_df)} rows, columns: {list(delta_df.columns)}")
+        print(f"  After merging: {len(delta_df)} rows, columns: {delta_df.columns}")
         
         # Fill missing values
-        departures_nulls = delta_df['departures'].isnull().sum()
-        arrivals_nulls = delta_df['arrivals'].isnull().sum()
+        departures_nulls = delta_df.select(pl.col('departures').is_null().sum()).item()
+        arrivals_nulls = delta_df.select(pl.col('arrivals').is_null().sum()).item()
         print(f"  Nulls before filling: departures={departures_nulls}, arrivals={arrivals_nulls}")
         
-        delta_df['departures'] = delta_df['departures'].fillna(0)
-        delta_df['arrivals'] = delta_df['arrivals'].fillna(0)
+        delta_df = delta_df.with_columns([
+            pl.col('departures').fill_null(0),
+            pl.col('arrivals').fill_null(0)
+        ])
         
         print(f"  Final delta_df shape: {delta_df.shape}")
         
@@ -220,30 +247,43 @@ class FeatureEngineer:
         if available_weather_cols:
             print(f"  Found {len(available_weather_cols)} key weather columns: {available_weather_cols}")
             # Get weather data by taking the mean for each time interval
-            weather_df = df[['fecha_origen_recorrido'] + available_weather_cols].copy()
-            weather_df['datetime'] = weather_df['fecha_origen_recorrido'].dt.floor(f'{self.delta_t_minutes}min')
-            weather_agg = weather_df.groupby('datetime')[available_weather_cols].mean().reset_index()
-            delta_df = delta_df.merge(weather_agg, on='datetime', how='left')
+            weather_agg = (df
+                          .select(['fecha_origen_recorrido'] + available_weather_cols)
+                          .with_columns(
+                              pl.col('fecha_origen_recorrido')
+                              .dt.truncate(f'{self.delta_t_minutes}m')
+                              .alias('datetime')
+                          )
+                          .group_by('datetime')
+                          .agg([pl.col(col).mean() for col in available_weather_cols]))
+            
+            delta_df = delta_df.join(weather_agg, on='datetime', how='left')
             
             # Check for nulls after weather merge
             for col in available_weather_cols:
-                null_count = delta_df[col].isnull().sum()
+                null_count = delta_df.select(pl.col(col).is_null().sum()).item()
                 if null_count > 0:
                     print(f"    {col}: {null_count} nulls after merge ({null_count/len(delta_df)*100:.1f}%)")
             
             # Forward fill weather data
             print("  Forward filling weather data...")
-            delta_df[available_weather_cols] = delta_df[available_weather_cols].fillna(method='ffill')
+            delta_df = delta_df.with_columns([
+                pl.col(col).fill_null(strategy='forward') for col in available_weather_cols
+            ])
             
             # Check remaining nulls after forward fill
-            remaining_nulls = delta_df[available_weather_cols].isnull().sum().sum()
+            remaining_nulls = sum([
+                delta_df.select(pl.col(col).is_null().sum()).item() 
+                for col in available_weather_cols
+            ])
             if remaining_nulls > 0:
                 print(f"    {remaining_nulls} weather nulls remain after forward fill")
             else:
                 print("    All weather nulls filled by forward fill")
         else:
             print(f"  None of the key weather features found in data: {key_weather_features}")
-            print("  Available columns:", [col for col in df.columns if 'weather' in col.lower()])
+            weather_cols = [col for col in df.columns if 'weather' in col.lower()]
+            print("  Available columns:", weather_cols)
         
         return delta_df
     
@@ -272,13 +312,21 @@ class FeatureEngineer:
             print(f"  Using available weather features: {available_features}")
             
             # Add lagged weather features (1 week lag)
+            lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
+            lag_expressions = []
+            
             for feature in available_features:
-                lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
                 lag_feature_name = f'{feature}_1w_lag'
-                df[lag_feature_name] = df.groupby('station_id')[feature].shift(lag_periods)
-                
-                # Print null count for lagged weather features
-                null_count = df[lag_feature_name].isnull().sum()
+                lag_expressions.append(
+                    pl.col(feature).shift(lag_periods).over('station_id').alias(lag_feature_name)
+                )
+            
+            df = df.with_columns(lag_expressions)
+            
+            # Print null counts for lagged weather features
+            for feature in available_features:
+                lag_feature_name = f'{feature}_1w_lag'
+                null_count = df.select(pl.col(lag_feature_name).is_null().sum()).item()
                 print(f"    {lag_feature_name}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
         else:
             print("  No key weather features available - skipping climate features")
@@ -291,75 +339,69 @@ class FeatureEngineer:
         """
         print("Adding station features...")
         
-        # Last delta T features
-        df['arrivals_last_dt'] = df.groupby('station_id')['arrivals'].shift(1)
-        df['departures_last_dt'] = df.groupby('station_id')['departures'].shift(1)
+        # Last delta T features and 1 week lag features
+        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
+        
+        df = df.with_columns([
+            pl.col('arrivals').shift(1).over('station_id').alias('arrivals_last_dt'),
+            pl.col('departures').shift(1).over('station_id').alias('departures_last_dt'),
+            pl.col('arrivals').shift(lag_periods).over('station_id').alias('arrivals_1w_lag'),
+            pl.col('departures').shift(lag_periods).over('station_id').alias('departures_1w_lag')
+        ])
         
         # Print null counts for last delta T features
-        print(f"  arrivals_last_dt: {df['arrivals_last_dt'].isnull().sum()} nulls ({df['arrivals_last_dt'].isnull().sum()/len(df)*100:.1f}%)")
-        print(f"  departures_last_dt: {df['departures_last_dt'].isnull().sum()} nulls ({df['departures_last_dt'].isnull().sum()/len(df)*100:.1f}%)")
-        
-        # 1 week lag predictions (same time last week)
-        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
-        df['arrivals_1w_lag'] = df.groupby('station_id')['arrivals'].shift(lag_periods)
-        df['departures_1w_lag'] = df.groupby('station_id')['departures'].shift(lag_periods)
+        arrivals_last_nulls = df.select(pl.col('arrivals_last_dt').is_null().sum()).item()
+        departures_last_nulls = df.select(pl.col('departures_last_dt').is_null().sum()).item()
+        print(f"  arrivals_last_dt: {arrivals_last_nulls} nulls ({arrivals_last_nulls/len(df)*100:.1f}%)")
+        print(f"  departures_last_dt: {departures_last_nulls} nulls ({departures_last_nulls/len(df)*100:.1f}%)")
         
         # Print null counts for 1 week lag features
-        print(f"  arrivals_1w_lag: {df['arrivals_1w_lag'].isnull().sum()} nulls ({df['arrivals_1w_lag'].isnull().sum()/len(df)*100:.1f}%)")
-        print(f"  departures_1w_lag: {df['departures_1w_lag'].isnull().sum()} nulls ({df['departures_1w_lag'].isnull().sum()/len(df)*100:.1f}%)")
+        arrivals_1w_nulls = df.select(pl.col('arrivals_1w_lag').is_null().sum()).item()
+        departures_1w_nulls = df.select(pl.col('departures_1w_lag').is_null().sum()).item()
+        print(f"  arrivals_1w_lag: {arrivals_1w_nulls} nulls ({arrivals_1w_nulls/len(df)*100:.1f}%)")
+        print(f"  departures_1w_lag: {departures_1w_nulls} nulls ({departures_1w_nulls/len(df)*100:.1f}%)")
         
         # Create time slot identifier for same-time-across-weeks moving averages
         # Combine hour and day_of_week to create unique time slots
-        if 'hour' not in df.columns:
-            df['hour'] = df['datetime'].dt.hour
-        if 'day_of_week' not in df.columns:
-            df['day_of_week'] = df['datetime'].dt.dayofweek
-        df['time_slot'] = df['hour'] * 7 + df['day_of_week']  # Unique identifier for each hour-day combination
+        hour_exists = 'hour' in df.columns
+        dow_exists = 'day_of_week' in df.columns
+        
+        time_exprs = []
+        if not hour_exists:
+            time_exprs.append(pl.col('datetime').dt.hour().alias('hour'))
+        if not dow_exists:
+            time_exprs.append(pl.col('datetime').dt.weekday().alias('day_of_week'))
+        
+        if time_exprs:
+            df = df.with_columns(time_exprs)
+        
+        df = df.with_columns(
+            (pl.col('hour') * 7 + pl.col('day_of_week')).alias('time_slot')
+        )
         
         print("  Computing moving averages for same time slots across weeks...")
         
-        # Moving averages computed over same time slots across different weeks
-        # For today 11am Tuesday, this will average [last Tuesday 11am, 2 weeks ago Tuesday 11am, ...]
+        # Sort by station_id, time_slot, and datetime for proper window operations
+        df = df.sort(['station_id', 'time_slot', 'datetime'])
         
-        def compute_weekly_moving_average(group, window, col_name):
-            """Compute moving average for same time slots across weeks"""
-            # Sort by datetime to ensure proper chronological order
-            group_sorted = group.sort_values('datetime')
-            # Compute rolling mean
-            ma = group_sorted[col_name].rolling(window=window, min_periods=1).mean()
-            return ma
-        
-        # 4-week moving average for same time slots
-        print("    Computing 4-week moving averages...")
-        ma4_arrivals = df.groupby(['station_id', 'time_slot']).apply(
-            lambda x: compute_weekly_moving_average(x, 4, 'arrivals')
-        ).reset_index(level=[0,1], drop=True)
-        ma4_departures = df.groupby(['station_id', 'time_slot']).apply(
-            lambda x: compute_weekly_moving_average(x, 4, 'departures')
-        ).reset_index(level=[0,1], drop=True)
-        
-        # Align indices and assign
-        df['arrivals_ma4_weekly'] = ma4_arrivals.reindex(df.index)
-        df['departures_ma4_weekly'] = ma4_departures.reindex(df.index)
-        
-        # 12-week moving average for same time slots
-        print("    Computing 12-week moving averages...")
-        ma12_arrivals = df.groupby(['station_id', 'time_slot']).apply(
-            lambda x: compute_weekly_moving_average(x, 12, 'arrivals')
-        ).reset_index(level=[0,1], drop=True)
-        ma12_departures = df.groupby(['station_id', 'time_slot']).apply(
-            lambda x: compute_weekly_moving_average(x, 12, 'departures')
-        ).reset_index(level=[0,1], drop=True)
-        
-        # Align indices and assign
-        df['arrivals_ma12_weekly'] = ma12_arrivals.reindex(df.index)
-        df['departures_ma12_weekly'] = ma12_departures.reindex(df.index)
+        # 4-week and 12-week moving averages for same time slots
+        print("    Computing 4-week and 12-week moving averages...")
+        df = df.with_columns([
+            pl.col('arrivals').rolling_mean(window_size=4, min_periods=1)
+              .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
+            pl.col('departures').rolling_mean(window_size=4, min_periods=1)
+              .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
+            pl.col('arrivals').rolling_mean(window_size=12, min_periods=1)
+              .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
+            pl.col('departures').rolling_mean(window_size=12, min_periods=1)
+              .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
+        ])
         
         # Print null counts for moving averages
-        print(f"  arrivals_ma4_weekly: {df['arrivals_ma4_weekly'].isnull().sum()} nulls ({df['arrivals_ma4_weekly'].isnull().sum()/len(df)*100:.1f}%)")
-        print(f"  departures_ma4_weekly: {df['departures_ma4_weekly'].isnull().sum()} nulls ({df['departures_ma4_weekly'].isnull().sum()/len(df)*100:.1f}%)")
-        print(f"  arrivals_ma12_weekly: {df['arrivals_ma12_weekly'].isnull().sum()} nulls ({df['arrivals_ma12_weekly'].isnull().sum()/len(df)*100:.1f}%)")
-        print(f"  departures_ma12_weekly: {df['departures_ma12_weekly'].isnull().sum()} nulls ({df['departures_ma12_weekly'].isnull().sum()/len(df)*100:.1f}%)")
+        ma_cols = ['arrivals_ma4_weekly', 'departures_ma4_weekly', 'arrivals_ma12_weekly', 'departures_ma12_weekly']
+        for col in ma_cols:
+            null_count = df.select(pl.col(col).is_null().sum()).item()
+            print(f"  {col}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
         
         # Conditionally fill missing values in station features
         station_features = [
@@ -371,30 +413,42 @@ class FeatureEngineer:
         
         if self.fill_nulls:
             print(f"  Filling station feature nulls with strategy: {self.fill_strategy}...")
+            fill_exprs = []
+            
             for feature in station_features:
-                null_count_before = df[feature].isnull().sum()
+                null_count_before = df.select(pl.col(feature).is_null().sum()).item()
                 if null_count_before > 0:
                     if self.fill_strategy == 'zero':
-                        df[feature] = df[feature].fillna(0)
+                        fill_exprs.append(pl.col(feature).fill_null(0))
                     elif self.fill_strategy == 'mean':
-                        mean_val = df[feature].mean()
-                        df[feature] = df[feature].fillna(mean_val)
+                        mean_val = df.select(pl.col(feature).mean()).item()
+                        fill_exprs.append(pl.col(feature).fill_null(mean_val))
                     elif self.fill_strategy == 'median':
-                        median_val = df[feature].median()
-                        df[feature] = df[feature].fillna(median_val)
+                        median_val = df.select(pl.col(feature).median()).item()
+                        fill_exprs.append(pl.col(feature).fill_null(median_val))
                     elif self.fill_strategy == 'forward_fill':
-                        df[feature] = df.groupby('station_id')[feature].fillna(method='ffill').fillna(0)
+                        fill_exprs.append(
+                            pl.col(feature).fill_null(strategy='forward').over('station_id').fill_null(0)
+                        )
+                    else:
+                        # Keep as is if no matching strategy
+                        fill_exprs.append(pl.col(feature))
                     
                     print(f"    {feature}: filled {null_count_before} nulls")
+                else:
+                    fill_exprs.append(pl.col(feature))
+            
+            if fill_exprs:
+                df = df.with_columns(fill_exprs)
         else:
             print("  Keeping station feature nulls as requested...")
             for feature in station_features:
-                null_count = df[feature].isnull().sum()
+                null_count = df.select(pl.col(feature).is_null().sum()).item()
                 if null_count > 0:
                     print(f"    {feature}: {null_count} nulls preserved")
         
         # Drop temporary columns
-        df = df.drop(['time_slot'], axis=1)
+        df = df.drop('time_slot')
         
         return df
     
@@ -405,34 +459,44 @@ class FeatureEngineer:
         print("Adding time features...")
         
         # Extract basic time components (check if already exist to avoid duplication)
+        time_exprs = []
+        
         if 'hour' not in df.columns:
-            df['hour'] = df['datetime'].dt.hour
+            time_exprs.append(pl.col('datetime').dt.hour().alias('hour'))
         if 'day_of_week' not in df.columns:
-            df['day_of_week'] = df['datetime'].dt.dayofweek
-        df['day_of_month'] = df['datetime'].dt.day
-        df['month'] = df['datetime'].dt.month
-        df['year'] = df['datetime'].dt.year
+            time_exprs.append(pl.col('datetime').dt.weekday().alias('day_of_week'))
         
-        # Boolean features
-        df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
+        time_exprs.extend([
+            pl.col('datetime').dt.day().alias('day_of_month'),
+            pl.col('datetime').dt.month().alias('month'),
+            pl.col('datetime').dt.year().alias('year')
+        ])
         
-        # Cyclical encoding for periodic features
-        # Hour (24-hour cycle)
-        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        if time_exprs:
+            df = df.with_columns(time_exprs)
         
-        # Day of week (7-day cycle)
-        df['dow_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-        df['dow_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
-        
-        # Day of month (30-day cycle approximation)
-        df['dom_sin'] = np.sin(2 * np.pi * df['day_of_month'] / 30)
-        df['dom_cos'] = np.cos(2 * np.pi * df['day_of_month'] / 30)
-        
-        # Month (12-month cycle)
-        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-        
+        # Boolean and cyclical features
+        df = df.with_columns([
+            # Boolean features
+            (pl.col('day_of_week') >= 5).cast(pl.Int32).alias('is_weekend'),
+            
+            # Cyclical encoding for periodic features
+            # Hour (24-hour cycle)
+            (2 * np.pi * pl.col('hour') / 24).sin().alias('hour_sin'),
+            (2 * np.pi * pl.col('hour') / 24).cos().alias('hour_cos'),
+            
+            # Day of week (7-day cycle)
+            (2 * np.pi * pl.col('day_of_week') / 7).sin().alias('dow_sin'),
+            (2 * np.pi * pl.col('day_of_week') / 7).cos().alias('dow_cos'),
+            
+            # Day of month (30-day cycle approximation)
+            (2 * np.pi * pl.col('day_of_month') / 30).sin().alias('dom_sin'),
+            (2 * np.pi * pl.col('day_of_month') / 30).cos().alias('dom_cos'),
+            
+            # Month (12-month cycle)
+            (2 * np.pi * pl.col('month') / 12).sin().alias('month_sin'),
+            (2 * np.pi * pl.col('month') / 12).cos().alias('month_cos')
+        ])
 
         return df
     
@@ -465,28 +529,39 @@ class FeatureEngineer:
         print("Cleaning features...")
         
         # Check for infinite values
-        numeric_columns = df.select_dtypes(include=[np.number]).columns
+        numeric_columns = [col for col in df.columns if df[col].dtype in [pl.Float32, pl.Float64, pl.Int32, pl.Int64]]
         inf_counts = {}
+        
         for col in numeric_columns:
-            inf_count = np.isinf(df[col]).sum()
+            inf_count = df.select(pl.col(col).is_infinite().sum()).item()
             if inf_count > 0:
                 inf_counts[col] = inf_count
         
         if inf_counts:
             print(f"  Found infinite values in columns: {inf_counts}")
             print("  Replacing infinite values with NaN...")
-            df = df.replace([np.inf, -np.inf], np.nan)
+            # Replace infinite values with null
+            for col in inf_counts.keys():
+                df = df.with_columns(
+                    pl.when(pl.col(col).is_infinite())
+                    .then(None)
+                    .otherwise(pl.col(col))
+                    .alias(col)
+                )
         else:
             print("  No infinite values found")
         
         # Check remaining NaN values before final fill
         print("  Checking remaining null values before final cleanup...")
         total_nulls = 0
+        null_cols = []
+        
         for col in numeric_columns:
-            null_count = df[col].isnull().sum()
+            null_count = df.select(pl.col(col).is_null().sum()).item()
             if null_count > 0:
                 print(f"    {col}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
                 total_nulls += null_count
+                null_cols.append(col)
         
         if total_nulls > 0:
             print(f"  Total nulls found: {total_nulls}")
@@ -495,33 +570,36 @@ class FeatureEngineer:
                 print(f"  Filling remaining NaN values using strategy: {self.fill_strategy}")
                 
                 if self.fill_strategy == 'zero':
-                    df[numeric_columns] = df[numeric_columns].fillna(0)
+                    fill_exprs = [pl.col(col).fill_null(0) for col in null_cols]
+                    df = df.with_columns(fill_exprs)
+                    
                 elif self.fill_strategy == 'mean':
-                    for col in numeric_columns:
-                        if df[col].isnull().sum() > 0:
-                            mean_val = df[col].mean()
-                            df[col] = df[col].fillna(mean_val)
-                            print(f"    {col}: filled with mean={mean_val:.3f}")
+                    for col in null_cols:
+                        mean_val = df.select(pl.col(col).mean()).item()
+                        df = df.with_columns(pl.col(col).fill_null(mean_val))
+                        print(f"    {col}: filled with mean={mean_val:.3f}")
+                        
                 elif self.fill_strategy == 'median':
-                    for col in numeric_columns:
-                        if df[col].isnull().sum() > 0:
-                            median_val = df[col].median()
-                            df[col] = df[col].fillna(median_val)
-                            print(f"    {col}: filled with median={median_val:.3f}")
+                    for col in null_cols:
+                        median_val = df.select(pl.col(col).median()).item()
+                        df = df.with_columns(pl.col(col).fill_null(median_val))
+                        print(f"    {col}: filled with median={median_val:.3f}")
+                        
                 elif self.fill_strategy == 'forward_fill':
                     # Sort by station_id and datetime first for proper forward fill
-                    df_sorted = df.sort_values(['station_id', 'datetime'])
-                    for col in numeric_columns:
-                        if df[col].isnull().sum() > 0:
-                            df_sorted[col] = df_sorted.groupby('station_id')[col].fillna(method='ffill')
-                            # Fill any remaining nulls with 0 (start of each station's time series)
-                            remaining_nulls = df_sorted[col].isnull().sum()
-                            if remaining_nulls > 0:
-                                df_sorted[col] = df_sorted[col].fillna(0)
-                                print(f"    {col}: forward filled + {remaining_nulls} remaining filled with 0")
-                            else:
-                                print(f"    {col}: forward filled successfully")
-                    df = df_sorted.reindex(df.index)  # Restore original order
+                    df = df.sort(['station_id', 'datetime'])
+                    
+                    fill_exprs = []
+                    for col in null_cols:
+                        # Forward fill within each station, then fill remaining with 0
+                        fill_exprs.append(
+                            pl.col(col).fill_null(strategy='forward').over('station_id').fill_null(0).alias(col)
+                        )
+                    
+                    df = df.with_columns(fill_exprs)
+                    
+                    for col in null_cols:
+                        print(f"    {col}: forward filled successfully")
                 
                 print("  All nulls filled")
             else:
@@ -532,10 +610,11 @@ class FeatureEngineer:
         
         # Sort by datetime and station
         print("  Sorting by station_id and datetime...")
-        df = df.sort_values(['station_id', 'datetime']).reset_index(drop=True)
+        df = df.sort(['station_id', 'datetime'])
         
         # Final validation - check for any remaining nulls
-        final_nulls = df.isnull().sum().sum()
+        null_counts = df.null_count()
+        final_nulls = null_counts.sum_horizontal().item()
         if final_nulls > 0:
             if self.fill_nulls:
                 print(f"  WARNING: {final_nulls} null values remain after cleaning!")
@@ -557,7 +636,7 @@ class FeatureEngineer:
         Prepare data for training by separating features and targets.
         
         Args:
-            df (pd.DataFrame): Processed DataFrame
+            df (pl.DataFrame): Processed DataFrame
             target_cols (list): Target column names
             
         Returns:
@@ -567,9 +646,9 @@ class FeatureEngineer:
         feature_cols = [col for col in df.columns if col not in 
                        ['datetime', 'station_id'] + target_cols]
         
-        X = df[feature_cols].copy()
-        y = df[target_cols].copy()
-        metadata = df[['datetime', 'station_id']].copy()
+        X = df.select(feature_cols)
+        y = df.select(target_cols)
+        metadata = df.select(['datetime', 'station_id'])
         
         print(f"Prepared for training: {X.shape[0]} samples, {X.shape[1]} features")
         
@@ -596,26 +675,26 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
     # Determine file format and load accordingly
     if data_path.lower().endswith('.parquet'):
         print("  Detected parquet format")
-        df = pd.read_parquet(data_path)
+        df = pl.read_parquet(data_path)
     elif data_path.lower().endswith('.csv'):
         print("  Detected CSV format")
-        df = pd.read_csv(data_path)
+        df = pl.read_csv(data_path, try_parse_dates=True)
     else:
         # Try parquet first, then CSV as fallback
         try:
             print("  File extension not recognized, trying parquet format...")
-            df = pd.read_parquet(data_path)
+            df = pl.read_parquet(data_path)
             print("  Successfully loaded as parquet")
         except:
             try:
                 print("  Parquet failed, trying CSV format...")
-                df = pd.read_csv(data_path)
+                df = pl.read_csv(data_path, try_parse_dates=True)
                 print("  Successfully loaded as CSV")
             except Exception as e:
                 raise ValueError(f"Could not load file {data_path}. Tried both parquet and CSV formats. Error: {str(e)}")
     
     print(f"Loaded {len(df)} records")
-    print(f"Columns: {list(df.columns)}")
+    print(f"Columns: {df.columns}")
     
     # Initialize feature engineer
     fe = FeatureEngineer(delta_t_minutes=delta_t_minutes, 

@@ -7,6 +7,7 @@ Handles both single and multi-target regression for arrivals and departures.
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -47,9 +48,9 @@ class ModelTrainer:
         Prepare data for training with proper time-aware splits.
         
         Args:
-            X (pd.DataFrame): Features
-            y (pd.DataFrame): Targets  
-            metadata (pd.DataFrame): Datetime and station info
+            X (pd.DataFrame or pl.DataFrame): Features
+            y (pd.DataFrame or pl.DataFrame): Targets  
+            metadata (pd.DataFrame or pl.DataFrame): Datetime and station info
             test_size (float): Test set proportion
             validation_size (float): Validation set proportion
             scale_features (bool): Whether to scale features
@@ -59,6 +60,13 @@ class ModelTrainer:
             dict: Dictionary with train/val/test splits
         """
         print("Preparing data for training...")
+        
+        # Convert polars to pandas if needed for scikit-learn compatibility
+        if isinstance(X, pl.DataFrame):
+            print("  Converting polars DataFrames to pandas for sklearn compatibility...")
+            X = X.to_pandas()
+            y = y.to_pandas()
+            metadata = metadata.to_pandas()
         
         if use_time_split:
             # Time-based split to avoid data leakage
