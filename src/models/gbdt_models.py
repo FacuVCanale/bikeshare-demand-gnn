@@ -133,48 +133,13 @@ class LightGBMModel(GBDTModel):
         self._gpu_available = self._check_gpu_availability()
 
     def _check_gpu_availability(self):
-        """Check if LightGBM GPU is available."""
+        """Simple check for GPU support in LightGBM without training a dummy model."""
+        import lightgbm as lgb
         try:
-            # Check if LightGBM was compiled with GPU support
-            import lightgbm as lgb
-            print(f"    LightGBM version: {lgb.__version__}")
-            
-            # More thorough GPU availability check
-            import numpy as np
-            
-            # Create small test dataset
-            X_test = np.random.random((100, 10))
-            y_test = np.random.randint(0, 2, 100)
-            
-            # Try to actually train a small model on GPU
-            test_model = lgb.LGBMClassifier(
-                device='gpu', 
-                verbosity=1,  # Temporarily enable verbose to see GPU messages
-                n_estimators=1,
-                num_leaves=3
-            )
-            
-            print("    Testing GPU training with small dataset...")
-            test_model.fit(X_test, y_test)
-            
-            print("    LightGBM GPU check: SUCCESS - GPU is available and working")
+            # Attempt to create booster with GPU parameters – will raise if GPU not compiled
+            _ = lgb.LGBMRegressor(device_type='gpu', n_estimators=1)
             return True
-            
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"    LightGBM GPU check: FAILED - {str(e)}")
-            
-            if 'opencl' in error_msg:
-                print("    ❌ Issue: Missing or incorrect OpenCL drivers")
-                print("    💡 Solution: Install proper GPU drivers (NVIDIA CUDA, AMD APP SDK, or Intel OpenCL)")
-            elif 'gpu' in error_msg and 'not' in error_msg:
-                print("    ❌ Issue: LightGBM not compiled with GPU support")  
-                print("    💡 Solution: Reinstall with: pip uninstall lightgbm && pip install lightgbm --config-settings=cmake.define.USE_GPU=ON")
-            else:
-                print("    ❌ Issue: Unknown GPU error")
-                print("    💡 Try running with --no_gpu flag to use CPU only")
-                
-            print("    ℹ️  Using CPU training instead")
+        except (TypeError, ValueError):
             return False
 
     def set_hps(self, hps: dict):
@@ -183,15 +148,15 @@ class LightGBMModel(GBDTModel):
         """
         self.hps = hps.copy()
         
-        # optimize GPU settings
-        if not hps.get('device') == 'cpu' and self._gpu_available:
+        if self._gpu_available and hps.get('device_type', 'cpu') == 'gpu':
             self.hps.update({
-                'device': 'gpu',
-                'gpu_use_dp': True,  # use double precision on GPU
+                'device_type': 'gpu',
+                'gpu_use_dp': True,
                 'verbosity': -1
             })
         else:
-            self.hps['device'] = 'cpu'
+            # Fallback gracefuly to CPU
+            self.hps['device_type'] = 'cpu'
             self.hps['verbosity'] = -1
         
         self.model.set_params(**self.hps)
@@ -214,7 +179,10 @@ class LightGBMModel(GBDTModel):
         n_estimators = self.hps.get('n_estimators', 100)
         
         callbacks = [lgb.early_stopping(early_stopping_rounds)]
-        
+
+        # Determine current device prior to creating callbacks
+        current_device = self.model.get_params().get('device_type', 'unknown')
+
         # Add tqdm progress bar instead of standard logging
         callbacks.append(create_lgb_tqdm_callback(
             total_rounds=n_estimators,
@@ -222,7 +190,6 @@ class LightGBMModel(GBDTModel):
         ))
 
         # Debug: Print actual device being used
-        current_device = self.model.get_params().get('device', 'unknown')
         print(f"    LightGBM training device: {current_device}")
 
         try:
@@ -234,13 +201,13 @@ class LightGBMModel(GBDTModel):
             )
         except Exception as e:
             # fallback to CPU if GPU fails
-            if 'gpu' in str(e).lower() and self.hps.get('device') == 'gpu':
+            if 'gpu' in str(e).lower() and self.hps.get('device_type') == 'gpu':
                 print(f"    GPU training failed: {str(e)}")
                 print("    Falling back to CPU training")
-                self.hps['device'] = 'cpu'
+                self.hps['device_type'] = 'cpu'
                 self.hps.pop('gpu_use_dp', None)  # Remove GPU-specific params
                 self.model.set_params(**self.hps)
-                print(f"    Retrying with device: {self.model.get_params().get('device')}")
+                print(f"    Retrying with device: {self.model.get_params().get('device_type')}")
                 self.model.fit(
                     X_train, y_train,
                     eval_set=eval_set,

@@ -41,9 +41,12 @@ class ModelTrainer:
         self.models = {}
         self.scalers = {}
         self.training_history = {}
+        # Store prepared data splits to avoid recomputation and double scaling
+        self.data_splits = None
         
-    def prepare_data(self, X, y, metadata, test_size=0.2, validation_size=0.2, 
-                    scale_features=True, use_time_split=True):
+    def prepare_data(self, X, y, metadata, test_size=0.2, validation_size=0.2,
+                    scale_features=True, use_time_split=True,
+                    val_start_date=None, test_start_date=None):
         """
         Prepare data for training with proper time-aware splits.
         
@@ -55,6 +58,8 @@ class ModelTrainer:
             validation_size (float): Validation set proportion
             scale_features (bool): Whether to scale features
             use_time_split (bool): Whether to use time-based splitting
+            val_start_date (str): Start date for validation split
+            test_start_date (str): Start date for test split
             
         Returns:
             dict: Dictionary with train/val/test splits
@@ -68,7 +73,7 @@ class ModelTrainer:
             y = y.to_pandas()
             metadata = metadata.to_pandas()
         
-        if use_time_split:
+        if use_time_split and (test_start_date is None):
             # Time-based split to avoid data leakage
             X_with_time = X.copy()
             X_with_time['datetime'] = metadata['datetime']
@@ -95,6 +100,41 @@ class ModelTrainer:
             meta_val = metadata.loc[val_idx]
             meta_test = metadata.loc[test_idx]
             
+        elif use_time_split and (test_start_date is not None):
+            # Explicit date-based splitting to avoid proportional leakage
+            test_start_dt = pd.to_datetime(test_start_date)
+            val_start_dt = pd.to_datetime(val_start_date) if val_start_date is not None else None
+
+            # Ensure datetime column exists
+            meta_dt = metadata['datetime']
+
+            test_idx = meta_dt[meta_dt >= test_start_dt].index
+
+            if val_start_dt is not None:
+                val_idx = meta_dt[(meta_dt >= val_start_dt) & (meta_dt < test_start_dt)].index
+                train_idx = meta_dt[meta_dt < val_start_dt].index
+            else:
+                # If validation start not specified, place all non-train/non-test into validation
+                val_idx = meta_dt[meta_dt < test_start_dt].index
+                train_idx = []
+
+            # Subset data accordingly
+            X_train = X.loc[train_idx].drop(['datetime'], axis=1, errors='ignore') if len(train_idx) > 0 else X.iloc[0:0]
+            X_val = X.loc[val_idx].drop(['datetime'], axis=1, errors='ignore')
+            X_test = X.loc[test_idx].drop(['datetime'], axis=1, errors='ignore')
+
+            y_train = y.loc[train_idx] if len(train_idx) > 0 else y.iloc[0:0]
+            y_val = y.loc[val_idx]
+            y_test = y.loc[test_idx]
+
+            meta_train = metadata.loc[train_idx] if len(train_idx) > 0 else metadata.iloc[0:0]
+            meta_val = metadata.loc[val_idx]
+            meta_test = metadata.loc[test_idx]
+
+            # Warn if train set ended up empty
+            if len(X_train) == 0:
+                print("WARNING: Training set is empty with the provided val/test cut-off dates. Consider adjusting val_start_date.")
+        
         else:
             # Random split
             X_temp, X_test, y_temp, y_test, meta_temp, meta_test = train_test_split(
@@ -108,7 +148,7 @@ class ModelTrainer:
             )
         
         # Feature scaling
-        if scale_features:
+        if scale_features and len(X_train) > 0:
             print("Scaling features...")
             scaler = StandardScaler()
             X_train_scaled = pd.DataFrame(
@@ -154,6 +194,9 @@ class ModelTrainer:
         print(f"  Validation: {len(X_val)} samples") 
         print(f"  Test: {len(X_test)} samples")
         print(f"  Features: {X_train.shape[1]}")
+        
+        # Persist splits to the trainer instance to avoid recomputation (and double scaling)
+        self.data_splits = data_splits
         
         return data_splits
     
@@ -203,9 +246,11 @@ class ModelTrainer:
             # GPU-specific parameters for LightGBM
             if use_gpu:
                 base_params.update({
-                    'device': 'gpu',  # Enable GPU device
-                    'gpu_use_dp': True,  # Use double precision on GPU
+                    'device_type': 'gpu',  # New param preferred by LightGBM >=4.0
+                    'gpu_use_dp': True,    # Use double precision on GPU
                 })
+            else:
+                base_params['device_type'] = 'cpu'
             return base_params
             
         else:
@@ -465,7 +510,8 @@ class ModelTrainer:
 
 def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'], 
                   model_types=['xgboost', 'lightgbm'], save_models=True, 
-                  save_dir='models', use_gpu=True):
+                  save_dir='models', use_gpu=True,
+                  val_start_date=None, test_start_date=None):
     """
     Complete training pipeline function.
     
@@ -478,6 +524,8 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
         save_models (bool): Whether to save trained models
         save_dir (str): Directory to save models
         use_gpu (bool): Whether to enable GPU acceleration (default: True)
+        val_start_date (str): Start date for validation split
+        test_start_date (str): Start date for test split
         
     Returns:
         tuple: (trainer, results, best_models)
@@ -490,7 +538,11 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
     trainer = ModelTrainer(use_gpu=use_gpu)
     
     # Prepare data
-    data_splits = trainer.prepare_data(X, y, metadata)
+    data_splits = trainer.prepare_data(
+        X, y, metadata,
+        val_start_date=val_start_date,
+        test_start_date=test_start_date
+    )
     
     # Train models
     results = trainer.train_multi_target(data_splits, target_cols, model_types)

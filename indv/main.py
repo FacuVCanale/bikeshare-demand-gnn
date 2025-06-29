@@ -24,7 +24,7 @@ from training import ModelTrainer, train_pipeline
 from evaluation import ModelEvaluator, evaluate_models
 
 
-class BikePrediictionPipeline:
+class BikePredictionPipeline:
     """
     Complete pipeline for bike station prediction.
     """
@@ -62,6 +62,9 @@ class BikePrediictionPipeline:
             'scale_features': True,
             'use_time_split': True,
             'random_state': 42,
+            # Explicit temporal split parameters
+            'val_start_date': '2023-01-01',
+            'test_start_date': '2023-08-01',
             
             # Output parameters
             'output_dir': 'results',
@@ -173,7 +176,9 @@ class BikePrediictionPipeline:
             model_types=self.config['model_types'],
             save_models=self.config['save_models'],
             save_dir=models_dir,
-            use_gpu=self.config['use_gpu']
+            use_gpu=self.config['use_gpu'],
+            val_start_date=self.config.get('val_start_date'),
+            test_start_date=self.config.get('test_start_date')
         )
         
         # Store results
@@ -181,11 +186,7 @@ class BikePrediictionPipeline:
             'trainer': trainer,
             'training_results': training_results,
             'best_models': best_models,
-            'data_splits': trainer.prepare_data(X, y, metadata,
-                                               test_size=self.config['test_size'],
-                                               validation_size=self.config['validation_size'],
-                                               scale_features=self.config['scale_features'],
-                                               use_time_split=self.config['use_time_split'])
+            'data_splits': trainer.data_splits  # Already prepared inside training pipeline
         }
         
         print(f"Training completed successfully")
@@ -364,6 +365,12 @@ def create_config_from_args():
     parser.add_argument('--no_gpu', action='store_true',
                        help='Disable GPU acceleration (use CPU only)')
     
+    # Temporal split arguments
+    parser.add_argument('--val_start_date', type=str, default='2023-01-01',
+                       help='Start date (inclusive) for validation split, format YYYY-MM-DD')
+    parser.add_argument('--test_start_date', type=str, default='2023-08-01',
+                       help='Start date (inclusive) for test split, format YYYY-MM-DD')
+    
     args = parser.parse_args()
     
     # Create configuration
@@ -386,6 +393,8 @@ def create_config_from_args():
         'fill_nulls': not args.no_fill_nulls,
         'fill_strategy': args.fill_strategy,
         'use_gpu': not args.no_gpu,
+        'val_start_date': args.val_start_date,
+        'test_start_date': args.test_start_date,
     }
     
     return config
@@ -400,7 +409,7 @@ def main():
         config = create_config_from_args()
         
         # Initialize and run pipeline
-        pipeline = BikePrediictionPipeline(config)
+        pipeline = BikePredictionPipeline(config)
         results = pipeline.run_complete_pipeline()
         
         print("\nPipeline execution completed successfully!")
@@ -428,7 +437,7 @@ if __name__ == "__main__":
         # Show example programmatic usage
         print("\nExample programmatic usage:")
         print("""
-from main import BikePrediictionPipeline
+from main import BikePredictionPipeline
 
 # Configure pipeline
 config = {
@@ -441,7 +450,7 @@ config = {
 }
 
 # Run pipeline
-pipeline = BikePrediictionPipeline(config)
+pipeline = BikePredictionPipeline(config)
 results = pipeline.run_complete_pipeline()
 """)
     else:
