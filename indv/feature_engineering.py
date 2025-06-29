@@ -98,8 +98,8 @@ class FeatureEngineer:
         print(f"{'='*50}")
         print(f"✓ Created {len(self.feature_columns)} features")
         print(f"✓ Dataset shape: {delta_df.shape}")
-        print(f"✓ Time range: {delta_df.select('datetime').min().item()} to {delta_df.select('datetime').max().item()}")
-        print(f"✓ Stations: {delta_df.select('station_id').n_unique().item()}")
+        print(f"✓ Time range: {delta_df.select(pl.col('datetime').min()).item()} to {delta_df.select(pl.col('datetime').max()).item()}")
+        print(f"✓ Stations: {delta_df.select(pl.col('station_id').n_unique()).item()}")
         print(f"✓ Total time intervals: {len(delta_df)}")
         print(f"✓ Features created:")
         
