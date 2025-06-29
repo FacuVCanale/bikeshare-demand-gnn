@@ -125,10 +125,12 @@ class FeatureEngineer:
         """
         Convert trip data to 30-minute time intervals with arrival/departure counts.
         """
-        # Ensure datetime columns
+        # Ensure datetime columns and station_id consistency
         df = df.with_columns([
             pl.col('fecha_origen_recorrido').str.to_datetime(),
-            pl.col('fecha_destino_recorrido').str.to_datetime()
+            pl.col('fecha_destino_recorrido').str.to_datetime(),
+            pl.col('id_estacion_origen').cast(pl.Int64),
+            pl.col('id_estacion_destino').cast(pl.Int64)
         ])
         
         # Create time range
@@ -159,8 +161,8 @@ class FeatureEngineer:
             print(f"  Processing single station: {station_id}")
             delta_df = pl.DataFrame({
                 'datetime': time_index,
-                'station_id': [station_id] * len(time_index)
-            })
+                'station_id': [int(station_id)] * len(time_index)
+            }).with_columns(pl.col('station_id').cast(pl.Int64))
             print(f"  Created base time grid: {len(delta_df)} intervals")
             
             # Count departures (trips starting from this station)
@@ -174,7 +176,7 @@ class FeatureEngineer:
                               )
                               .group_by('datetime')
                               .agg(pl.len().alias('departures'))
-                              .with_columns(pl.lit(station_id).alias('station_id')))
+                              .with_columns(pl.lit(int(station_id)).cast(pl.Int64).alias('station_id')))
             print(f"  Aggregated departures into {len(departures_count)} time intervals")
             
             # Count arrivals (trips ending at this station)
@@ -188,7 +190,7 @@ class FeatureEngineer:
                             )
                             .group_by('datetime')
                             .agg(pl.len().alias('arrivals'))
-                            .with_columns(pl.lit(station_id).alias('station_id')))
+                            .with_columns(pl.lit(int(station_id)).cast(pl.Int64).alias('station_id')))
             print(f"  Aggregated arrivals into {len(arrivals_count)} time intervals")
             
         else:
@@ -197,9 +199,11 @@ class FeatureEngineer:
             dest_stations = df.select(pl.col('id_estacion_destino').unique()).to_series().to_list()
             stations = list(set(origin_stations + dest_stations))
             
-            # Create base DataFrame using cross join
+            # Create base DataFrame using cross join with integer station_id
             time_df = pl.DataFrame({'datetime': time_index})
-            stations_df = pl.DataFrame({'station_id': stations})
+            stations_df = pl.DataFrame({'station_id': stations}).with_columns(
+                pl.col('station_id').cast(pl.Int64)
+            )
             delta_df = time_df.join(stations_df, how='cross')
             
             # Count departures for all stations
@@ -211,7 +215,8 @@ class FeatureEngineer:
                               )
                               .group_by(['datetime', 'id_estacion_origen'])
                               .agg(pl.len().alias('departures'))
-                              .rename({'id_estacion_origen': 'station_id'}))
+                              .rename({'id_estacion_origen': 'station_id'})
+                              .with_columns(pl.col('station_id').cast(pl.Int64)))
             
             # Count arrivals for all stations
             arrivals_count = (df
@@ -222,7 +227,8 @@ class FeatureEngineer:
                             )
                             .group_by(['datetime', 'id_estacion_destino'])
                             .agg(pl.len().alias('arrivals'))
-                            .rename({'id_estacion_destino': 'station_id'}))
+                            .rename({'id_estacion_destino': 'station_id'})
+                            .with_columns(pl.col('station_id').cast(pl.Int64)))
         
         # Merge counts (now both single and multi-station cases have station_id column)
         print(f"  Merging departure counts...")
