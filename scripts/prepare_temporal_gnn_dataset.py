@@ -196,6 +196,7 @@ def precompute_correlation_matrices(
         df_lazy
         .select(["ts_start", "cluster_id", correlation_col])
         .filter(pl.col(correlation_col).is_not_null())
+        .collect()  # collect first before pivot
         .pivot(
             values=correlation_col,
             index="ts_start", 
@@ -203,7 +204,6 @@ def precompute_correlation_matrices(
             aggregate_function="first"
         )
         .sort("ts_start")
-        .collect()
     )
     
     # Convert to numpy matrix
@@ -491,7 +491,7 @@ def create_vectorized_temporal_sequences(
         with get_context("spawn").Pool(processes=n_workers) as pool:
             batch_results = []
             
-            for i, result in enumerate(pool.imap(process_sequence_batch_optimized, batch_args)):
+            for i, result in enumerate(pool.imap(process_sequence_batch, batch_args)):
                 batch_results.append(result)
                 pbar.update(len(batch_args[i][0]))  # update by batch size
                 pbar.set_description(f"Processed batch {i+1}/{len(batch_args)}")
@@ -510,7 +510,7 @@ def create_vectorized_temporal_sequences(
             pbar.set_description(f"Processing batch {current_batch}/{total_batches}")
             
             # process this batch with optimizations
-            batch_data = process_sequence_batch_optimized((
+            batch_data = process_sequence_batch((
                 batch_sequences, timestamps, clusters, cluster_to_idx,
                 feature_cols, target_cols, sequence_length, prediction_horizon,
                 correlation_cache, graph_update_frequency, feature_pivot, target_pivot
@@ -597,6 +597,7 @@ def create_feature_pivot_table(df_lazy: pl.LazyFrame, feature_cols: List[str], c
                 df_lazy
                 .select(["ts_start", "cluster_id", col])
                 .filter(pl.col(col).is_not_null())
+                .collect()  # collect first before pivot
                 .pivot(
                     values=col,
                     index="ts_start",
@@ -604,7 +605,6 @@ def create_feature_pivot_table(df_lazy: pl.LazyFrame, feature_cols: List[str], c
                     aggregate_function="first"
                 )
                 .sort("ts_start")
-                .collect()
             )
             
             if pivot_data.height > 0:
@@ -631,6 +631,7 @@ def create_target_pivot_table(df_lazy: pl.LazyFrame, target_cols: List[str], clu
             df_lazy
             .select(["ts_start", "cluster_id", col])
             .filter(pl.col(col).is_not_null())
+            .collect()  # collect first before pivot
             .pivot(
                 values=col,
                 index="ts_start",
@@ -638,7 +639,6 @@ def create_target_pivot_table(df_lazy: pl.LazyFrame, target_cols: List[str], clu
                 aggregate_function="first"
             )
             .sort("ts_start")
-            .collect()
         )
         
         if pivot_data.height > 0:
@@ -654,7 +654,7 @@ def create_target_pivot_table(df_lazy: pl.LazyFrame, target_cols: List[str], clu
     return target_pivot
 
 
-def process_sequence_batch_optimized(args: Tuple) -> List[Dict]:
+def process_sequence_batch(args: Tuple) -> List[Dict]:
     """
     Optimized batch processing function designed for multiprocessing.
     
@@ -787,311 +787,7 @@ def create_optimized_correlation_graphs(
     return edge_seq
 
 
-def process_sequence_batch(
-    df_lazy: pl.LazyFrame,
-    batch_sequences: List[int],
-    timestamps: List,
-    clusters: List,
-    cluster_to_idx: Dict,
-    feature_cols: List[str],
-    target_cols: List[str],
-    safe_correlation_col: str,
-    sequence_length: int,
-    prediction_horizon: int,
-    correlation_window: int,
-    min_correlation: float
-) -> List[Dict]:
-    """Process a batch of sequences using vectorized operations."""
-    
-    batch_data = []
-    
-    # create progress bar for individual sequences within batch (only for large batches)
-    if len(batch_sequences) > 100:
-        seq_iterator = tqdm(
-            batch_sequences, 
-            desc="Processing batch sequences", 
-            leave=False,
-            unit="seq"
-        )
-    else:
-        seq_iterator = batch_sequences
-    
-    for seq_start_idx in seq_iterator:
-        # define time windows
-        target_ts = timestamps[seq_start_idx + prediction_horizon - 1]
-        seq_timestamps = timestamps[seq_start_idx - sequence_length:seq_start_idx]
-        
-        # extract features and targets using vectorized polars operations
-        x_seq = extract_vectorized_features(
-            df_lazy, seq_timestamps, clusters, cluster_to_idx, feature_cols
-        )
-        
-        y_target = extract_vectorized_targets(
-            df_lazy, target_ts, clusters, cluster_to_idx, target_cols
-        )
-        
-        # create dynamic graphs using vectorized correlation computation
-        edge_seq = create_vectorized_correlation_graphs(
-            df_lazy, seq_timestamps, timestamps, clusters, cluster_to_idx,
-            safe_correlation_col, correlation_window, min_correlation
-        )
-        
-        # create sequence dictionary
-        sequence = {
-            'x_seq': x_seq,
-            'edge_seq': edge_seq,
-            'y': y_target,
-            'timestamps': seq_timestamps + [target_ts],
-            'target_timestamp': target_ts
-        }
-        
-        batch_data.append(sequence)
-    
-    return batch_data
 
-
-def extract_vectorized_features(
-    df_lazy: pl.LazyFrame,
-    seq_timestamps: List,
-    clusters: List,
-    cluster_to_idx: Dict,
-    feature_cols: List[str]
-) -> np.ndarray:
-    """Extract features using vectorized Polars operations."""
-    
-    # create timestamp filter for this sequence
-    ts_filter = pl.col('ts_start').is_in(seq_timestamps)
-    
-    # extract all data for these timestamps at once
-    seq_data = (
-        df_lazy
-        .filter(ts_filter)
-        .select(['cluster_id', 'ts_start'] + feature_cols)
-        .collect()
-    )
-    
-    # initialize feature matrix
-    seq_len = len(seq_timestamps)
-    num_clusters = len(clusters)
-    num_features = len(feature_cols)
-    x_seq = np.zeros((seq_len, num_clusters, num_features))
-    
-    # fill feature matrix using vectorized operations
-    if seq_data.height > 0:
-        for t_idx, ts in enumerate(seq_timestamps):
-            ts_rows = seq_data.filter(pl.col('ts_start') == ts)
-            
-            if ts_rows.height > 0:
-                # get cluster data as numpy arrays
-                cluster_ids = ts_rows['cluster_id'].to_numpy()
-                feature_arrays = ts_rows.select(feature_cols).to_numpy()
-                
-                # map cluster ids to indices and fill matrix
-                for i, cluster_id in enumerate(cluster_ids):
-                    if cluster_id in cluster_to_idx:
-                        cluster_idx = cluster_to_idx[cluster_id]
-                        x_seq[t_idx, cluster_idx, :] = feature_arrays[i]
-    
-    # handle NaN values
-    x_seq = np.nan_to_num(x_seq, nan=0.0)
-    
-    return x_seq
-
-
-def extract_vectorized_targets(
-    df_lazy: pl.LazyFrame,
-    target_ts,
-    clusters: List,
-    cluster_to_idx: Dict,
-    target_cols: List[str]
-) -> np.ndarray:
-    """Extract targets using vectorized Polars operations."""
-    
-    # extract target data for this timestamp
-    target_data = (
-        df_lazy
-        .filter(pl.col('ts_start') == target_ts)
-        .select(['cluster_id'] + target_cols)
-        .collect()
-    )
-    
-    # initialize target array
-    num_clusters = len(clusters)
-    num_targets = len(target_cols)
-    y_target = np.zeros((num_clusters, num_targets))
-    
-    if target_data.height > 0:
-        # get data as numpy arrays
-        cluster_ids = target_data['cluster_id'].to_numpy()
-        target_arrays = target_data.select(target_cols).to_numpy()
-        
-        # fill target matrix
-        for i, cluster_id in enumerate(cluster_ids):
-            if cluster_id in cluster_to_idx:
-                cluster_idx = cluster_to_idx[cluster_id]
-                y_target[cluster_idx, :] = target_arrays[i]
-    
-    # handle NaN values
-    y_target = np.nan_to_num(y_target, nan=0.0)
-    
-    # squeeze if single target
-    if num_targets == 1:
-        y_target = y_target.squeeze(-1)
-    
-    return y_target
-
-
-def create_vectorized_correlation_graphs(
-    df_lazy: pl.LazyFrame,
-    seq_timestamps: List,
-    all_timestamps: List,
-    clusters: List,
-    cluster_to_idx: Dict,
-    correlation_col: str,
-    correlation_window: int,
-    min_correlation: float
-) -> List[np.ndarray]:
-    """Create correlation graphs using vectorized operations."""
-    
-    edge_seq = []
-    
-    for ts in seq_timestamps:
-        try:
-            current_idx = all_timestamps.index(ts)
-        except ValueError:
-            edge_seq.append(np.empty((2, 0), dtype=np.int64))
-            continue
-        
-        if current_idx < correlation_window:
-            edge_seq.append(np.empty((2, 0), dtype=np.int64))
-            continue
-        
-        # get historical window
-        hist_timestamps = all_timestamps[current_idx - correlation_window:current_idx]
-        
-        # extract correlation data using vectorized operations
-        hist_filter = pl.col('ts_start').is_in(hist_timestamps)
-        
-        corr_data = (
-            df_lazy
-            .filter(hist_filter)
-            .select(['cluster_id', 'ts_start', correlation_col])
-            .collect()
-        )
-        
-        if corr_data.height > 0:
-            # create pivot table for correlation computation
-            correlation_matrix = create_correlation_matrix(
-                corr_data, hist_timestamps, clusters, cluster_to_idx, correlation_col
-            )
-            
-            # compute edges from correlation matrix
-            edge_index = compute_correlation_edges(
-                correlation_matrix, clusters, min_correlation
-            )
-        else:
-            edge_index = np.empty((2, 0), dtype=np.int64)
-        
-        edge_seq.append(edge_index)
-    
-    return edge_seq
-
-
-def create_correlation_matrix(
-    corr_data: pl.DataFrame,
-    hist_timestamps: List,
-    clusters: List,
-    cluster_to_idx: Dict,
-    correlation_col: str
-) -> np.ndarray:
-    """Create correlation matrix using vectorized operations."""
-    
-    num_timestamps = len(hist_timestamps)
-    num_clusters = len(clusters)
-    correlation_data = np.zeros((num_timestamps, num_clusters))
-    
-    if corr_data.height > 0:
-        # group by timestamp and cluster for efficient processing
-        for t_idx, ts in enumerate(hist_timestamps):
-            ts_data = corr_data.filter(pl.col('ts_start') == ts)
-            
-            if ts_data.height > 0:
-                cluster_ids = ts_data['cluster_id'].to_numpy()
-                values = ts_data[correlation_col].to_numpy()
-                
-                # handle NaN and inf values in the input data
-                values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-                
-                for i, cluster_id in enumerate(cluster_ids):
-                    if cluster_id in cluster_to_idx:
-                        cluster_idx = cluster_to_idx[cluster_id]
-                        correlation_data[t_idx, cluster_idx] = values[i]
-    
-    return correlation_data
-
-
-def compute_correlation_edges(
-    correlation_data: np.ndarray,
-    clusters: List,
-    min_correlation: float
-) -> np.ndarray:
-    """Compute edges from correlation matrix with proper handling of constant values."""
-    
-    num_clusters = len(clusters)
-    
-    # check if we have enough data points for correlation
-    if correlation_data.shape[0] < 2:
-        return np.empty((2, 0), dtype=np.int64)
-    
-    try:
-        # check for columns with zero variance (constant values)
-        std_devs = np.std(correlation_data, axis=0)
-        valid_cols = std_devs > 1e-10  # threshold for numerical stability
-        
-        if np.sum(valid_cols) < 2:
-            # not enough columns with variance, return empty graph
-            return np.empty((2, 0), dtype=np.int64)
-        
-        # filter out constant columns before correlation computation
-        filtered_data = correlation_data[:, valid_cols]
-        valid_indices = np.where(valid_cols)[0]
-        
-        # suppress warnings for cleaner output
-        with np.errstate(divide='ignore', invalid='ignore'):
-            corr_matrix_filtered = np.corrcoef(filtered_data.T)
-        
-        # handle NaN and inf values
-        corr_matrix_filtered = np.nan_to_num(corr_matrix_filtered, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # reconstruct full correlation matrix
-        corr_matrix = np.zeros((num_clusters, num_clusters))
-        for i, idx_i in enumerate(valid_indices):
-            for j, idx_j in enumerate(valid_indices):
-                corr_matrix[idx_i, idx_j] = corr_matrix_filtered[i, j]
-        
-        # set diagonal to 1 for valid columns
-        for idx in valid_indices:
-            corr_matrix[idx, idx] = 1.0
-            
-    except Exception as e:
-        # fallback to empty graph if correlation computation fails
-        return np.empty((2, 0), dtype=np.int64)
-    
-    # create edges based on correlation threshold
-    edges = []
-    
-    for i in range(num_clusters):
-        for j in range(num_clusters):
-            if i != j and abs(corr_matrix[i, j]) >= min_correlation:
-                edges.append([i, j])
-    
-    # convert to edge_index format
-    if edges:
-        edge_index = np.array(edges, dtype=np.int64).T
-    else:
-        edge_index = np.empty((2, 0), dtype=np.int64)
-    
-    return edge_index
 
 
 def save_temporal_sequences(
