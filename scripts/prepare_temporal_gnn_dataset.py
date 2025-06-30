@@ -200,7 +200,7 @@ def precompute_correlation_matrices(
         .pivot(
             values=correlation_col,
             index="ts_start", 
-            columns="cluster_id",
+            on="cluster_id",
             aggregate_function="first"
         )
         .sort("ts_start")
@@ -601,7 +601,7 @@ def create_feature_pivot_table(df_lazy: pl.LazyFrame, feature_cols: List[str], c
                 .pivot(
                     values=col,
                     index="ts_start",
-                    columns="cluster_id", 
+                    on="cluster_id", 
                     aggregate_function="first"
                 )
                 .sort("ts_start")
@@ -635,7 +635,7 @@ def create_target_pivot_table(df_lazy: pl.LazyFrame, target_cols: List[str], clu
             .pivot(
                 values=col,
                 index="ts_start",
-                columns="cluster_id",
+                on="cluster_id",
                 aggregate_function="first"
             )
             .sort("ts_start")
