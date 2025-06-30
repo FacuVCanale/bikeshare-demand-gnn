@@ -134,7 +134,7 @@ class TemporalGraphDataset(Dataset):
             '_flag_',           # generic flag patterns if present
             '_weather_flag_',   # explicit weather flags if named so
             'cluster_station_count',
-            '_rolling_mean_',  # static scalar per node
+            '_rolling_mean_',  
         ]
         self.exclude_patterns = exclude_patterns if exclude_patterns is not None else default_exclude
         
