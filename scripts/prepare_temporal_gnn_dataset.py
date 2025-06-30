@@ -230,8 +230,9 @@ def precompute_correlation_matrices(
             windows, min_correlation
         )
         
-        # Map back to timestamps
-        for i, corr_matrix in enumerate(correlation_matrices_batch):
+        # Map back to timestamps with progress bar
+        print(f"      Mapping correlation matrices to timestamps...")
+        for i, corr_matrix in enumerate(tqdm(correlation_matrices_batch, desc="Mapping correlations", unit="matrix")):
             if i + correlation_window < len(ts_column):
                 ts = ts_column[i + correlation_window]
                 correlation_matrices[ts] = corr_matrix
@@ -259,7 +260,8 @@ def compute_correlations_vectorized(windows: np.ndarray, min_correlation: float)
     """
     batch_correlations = []
     
-    for window_data in windows:
+    # Add progress bar for correlation computation
+    for window_data in tqdm(windows, desc="Computing correlations", unit="window", leave=False):
         # Check for columns with variance
         std_devs = np.std(window_data, axis=0)
         valid_cols = std_devs > 1e-10
@@ -592,7 +594,7 @@ def create_feature_pivot_table(df_lazy: pl.LazyFrame, feature_cols: List[str], c
     for i in range(0, len(feature_cols), chunk_size):
         chunk_cols = feature_cols[i:i+chunk_size]
         
-        for col in chunk_cols:
+        for col in tqdm(chunk_cols, desc=f"Chunk {i//chunk_size + 1}/{(len(feature_cols) + chunk_size - 1)//chunk_size}", unit="feature", leave=False):
             pivot_data = (
                 df_lazy
                 .select(["ts_start", "cluster_id", col])
@@ -626,7 +628,7 @@ def create_target_pivot_table(df_lazy: pl.LazyFrame, target_cols: List[str], clu
     
     target_pivot = {}
     
-    for col in target_cols:
+    for col in tqdm(target_cols, desc="Processing targets", unit="target", leave=False):
         pivot_data = (
             df_lazy
             .select(["ts_start", "cluster_id", col])
