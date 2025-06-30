@@ -179,8 +179,10 @@ def create_vectorized_temporal_sequences(
     start_time = time.time()
     
     # identify safe features and targets
-    feature_cols = identify_safe_features(df.columns)
-    target_cols = identify_target_features(df.columns)
+    # get columns from LazyFrame schema
+    all_columns = list(df.schema.keys())
+    feature_cols = identify_safe_features(all_columns)
+    target_cols = identify_target_features(all_columns)
     
     if not feature_cols:
         raise ValueError("No safe feature columns found")
@@ -203,9 +205,12 @@ def create_vectorized_temporal_sequences(
     if safe_correlation_col in target_cols:
         raise ValueError(f"Data leakage: correlation feature {safe_correlation_col} is a target variable")
     
-    # get basic dataset info
-    clusters = sorted(df['cluster_id'].unique())
-    timestamps = sorted(df['ts_start'].unique())
+    # get basic dataset info using proper LazyFrame operations
+    clusters_series = df.select(pl.col('cluster_id').unique().sort()).collect()
+    timestamps_series = df.select(pl.col('ts_start').unique().sort()).collect()
+    
+    clusters = clusters_series['cluster_id'].to_list()
+    timestamps = timestamps_series['ts_start'].to_list()
     num_clusters = len(clusters)
     num_features = len(feature_cols)
     
