@@ -527,6 +527,9 @@ def create_correlation_matrix(
                 cluster_ids = ts_data['cluster_id'].to_numpy()
                 values = ts_data[correlation_col].to_numpy()
                 
+                # handle NaN and inf values in the input data
+                values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+                
                 for i, cluster_id in enumerate(cluster_ids):
                     if cluster_id in cluster_to_idx:
                         cluster_idx = cluster_to_idx[cluster_id]
@@ -540,14 +543,46 @@ def compute_correlation_edges(
     clusters: List,
     min_correlation: float
 ) -> np.ndarray:
-    """Compute edges from correlation matrix."""
+    """Compute edges from correlation matrix with proper handling of constant values."""
     
     num_clusters = len(clusters)
     
+    # check if we have enough data points for correlation
+    if correlation_data.shape[0] < 2:
+        return np.empty((2, 0), dtype=np.int64)
+    
     try:
-        corr_matrix = np.corrcoef(correlation_data.T)
-        corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
-    except:
+        # check for columns with zero variance (constant values)
+        std_devs = np.std(correlation_data, axis=0)
+        valid_cols = std_devs > 1e-10  # threshold for numerical stability
+        
+        if np.sum(valid_cols) < 2:
+            # not enough columns with variance, return empty graph
+            return np.empty((2, 0), dtype=np.int64)
+        
+        # filter out constant columns before correlation computation
+        filtered_data = correlation_data[:, valid_cols]
+        valid_indices = np.where(valid_cols)[0]
+        
+        # suppress warnings for cleaner output
+        with np.errstate(divide='ignore', invalid='ignore'):
+            corr_matrix_filtered = np.corrcoef(filtered_data.T)
+        
+        # handle NaN and inf values
+        corr_matrix_filtered = np.nan_to_num(corr_matrix_filtered, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # reconstruct full correlation matrix
+        corr_matrix = np.zeros((num_clusters, num_clusters))
+        for i, idx_i in enumerate(valid_indices):
+            for j, idx_j in enumerate(valid_indices):
+                corr_matrix[idx_i, idx_j] = corr_matrix_filtered[i, j]
+        
+        # set diagonal to 1 for valid columns
+        for idx in valid_indices:
+            corr_matrix[idx, idx] = 1.0
+            
+    except Exception as e:
+        # fallback to empty graph if correlation computation fails
         return np.empty((2, 0), dtype=np.int64)
     
     # create edges based on correlation threshold
