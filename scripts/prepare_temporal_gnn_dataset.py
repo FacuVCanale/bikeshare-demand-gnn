@@ -27,6 +27,7 @@ import pickle
 import gc
 import time
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 
 def load_cluster_metadata(metadata_path: str) -> Dict:
@@ -177,10 +178,14 @@ def create_vectorized_temporal_sequences(
     print(f"  Correlation window: {correlation_window}")
     
     start_time = time.time()
+    step_times = {}
     
-    # identify safe features and targets
-    # get columns from LazyFrame schema
-    all_columns = list(df.schema.keys())
+    # step 1: identify safe features and targets
+    step_start = time.time()
+    print(f"  Step 1/6: Identifying safe features...")
+    
+    # get columns from LazyFrame schema (avoiding performance warning)
+    all_columns = list(df.collect_schema().keys())
     feature_cols = identify_safe_features(all_columns)
     target_cols = identify_target_features(all_columns)
     
@@ -189,8 +194,9 @@ def create_vectorized_temporal_sequences(
     if not target_cols:
         raise ValueError("No target columns found")
     
-    print(f"  Safe features: {len(feature_cols)}")
-    print(f"  Targets: {target_cols}")
+    step_times['feature_identification'] = time.time() - step_start
+    print(f"    ✓ Safe features: {len(feature_cols)} ({step_times['feature_identification']:.2f}s)")
+    print(f"    ✓ Targets: {target_cols}")
     
     # validate no data leakage
     unsafe_features = [f for f in feature_cols if f in target_cols]
@@ -199,13 +205,16 @@ def create_vectorized_temporal_sequences(
     
     # find safe correlation feature
     safe_correlation_col = find_safe_correlation_feature(feature_cols, target_cols[0])
-    print(f"  Using safe correlation feature: {safe_correlation_col}")
+    print(f"    ✓ Using safe correlation feature: {safe_correlation_col}")
     
     # additional safety check
     if safe_correlation_col in target_cols:
         raise ValueError(f"Data leakage: correlation feature {safe_correlation_col} is a target variable")
     
-    # get basic dataset info using proper LazyFrame operations
+    # step 2: extract dataset info
+    step_start = time.time()
+    print(f"  Step 2/6: Extracting dataset information...")
+    
     clusters_series = df.select(pl.col('cluster_id').unique().sort()).collect()
     timestamps_series = df.select(pl.col('ts_start').unique().sort()).collect()
     
@@ -214,13 +223,18 @@ def create_vectorized_temporal_sequences(
     num_clusters = len(clusters)
     num_features = len(feature_cols)
     
-    print(f"  Clusters: {num_clusters}")
-    print(f"  Timestamps: {len(timestamps)}")
-    
     # create cluster to index mapping
     cluster_to_idx = {cluster: idx for idx, cluster in enumerate(clusters)}
     
-    # minimum time steps needed for valid sequences
+    step_times['dataset_info'] = time.time() - step_start
+    print(f"    ✓ Clusters: {num_clusters} ({step_times['dataset_info']:.2f}s)")
+    print(f"    ✓ Timestamps: {len(timestamps)}")
+    print(f"    ✓ Features per cluster: {num_features}")
+    
+    # step 3: validate temporal requirements
+    step_start = time.time()
+    print(f"  Step 3/6: Validating temporal requirements...")
+    
     min_steps_needed = correlation_window + sequence_length + prediction_horizon
     
     if len(timestamps) < min_steps_needed:
@@ -235,17 +249,18 @@ def create_vectorized_temporal_sequences(
     else:
         df_lazy = df
     
-    # create sequence windows using vectorized operations
+    step_times['validation'] = time.time() - step_start
+    print(f"    ✓ Temporal validation passed ({step_times['validation']:.2f}s)")
+    print(f"    ✓ Required steps: {min_steps_needed}, Available: {len(timestamps)}")
+    
+    # step 4: create sequence windows
+    step_start = time.time()
+    print(f"  Step 4/6: Creating sequence windows...")
+    
     valid_start_idx = correlation_window + sequence_length
     total_sequences = len(timestamps) - prediction_horizon + 1 - valid_start_idx
     
-    print(f"  Total sequences to create: {total_sequences}")
-    print(f"  Creating sequence windows vectorized...")
-    
     # create all sequence indices at once
-    sequence_data = []
-    
-    # use polars to create a cross-join of all valid sequence starts with timestamps
     sequence_starts = list(range(valid_start_idx, len(timestamps) - prediction_horizon + 1))
     
     # create sequence metadata using vectorized operations
@@ -255,24 +270,35 @@ def create_vectorized_temporal_sequences(
         'target_idx': [s + prediction_horizon - 1 for s in sequence_starts]
     })
     
-    print(f"  Processing sequences in batches for efficiency...")
+    step_times['sequence_planning'] = time.time() - step_start
+    print(f"    ✓ Sequence windows created ({step_times['sequence_planning']:.2f}s)")
+    print(f"    ✓ Total sequences to create: {total_sequences}")
+    print(f"    ✓ Valid start index: {valid_start_idx}")
+    
+    # step 5: process sequences in batches
+    step_start = time.time()
+    print(f"  Step 5/6: Processing sequences in batches...")
     
     # process sequences in batches to manage memory
     batch_size = min(1000, total_sequences)
     sequences = []
     
+    # create progress bar
+    total_batches = (len(sequence_starts) + batch_size - 1) // batch_size
+    pbar = tqdm(
+        total=len(sequence_starts),
+        desc="Processing sequences",
+        unit="seq",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    )
+    
     for batch_start in range(0, len(sequence_starts), batch_size):
         batch_end = min(batch_start + batch_size, len(sequence_starts))
         batch_sequences = sequence_starts[batch_start:batch_end]
+        current_batch = batch_start // batch_size + 1
         
-        if (batch_start // batch_size) % 10 == 0:
-            elapsed = time.time() - start_time
-            progress = batch_start / len(sequence_starts) * 100
-            if batch_start > 0:
-                rate = batch_start / elapsed
-                remaining = (len(sequence_starts) - batch_start) / rate
-                print(f"    Processing batch {batch_start//batch_size + 1}/{(len(sequence_starts)-1)//batch_size + 1} "
-                      f"({progress:.1f}%) - Elapsed: {elapsed:.1f}s, Remaining: {remaining:.1f}s")
+        # update progress bar description with batch info
+        pbar.set_description(f"Processing batch {current_batch}/{total_batches}")
         
         # process this batch
         batch_data = process_sequence_batch(
@@ -283,12 +309,22 @@ def create_vectorized_temporal_sequences(
         
         sequences.extend(batch_data)
         
+        # update progress bar
+        pbar.update(len(batch_sequences))
+        
         # memory cleanup
         if batch_start > 0 and batch_start % (batch_size * 10) == 0:
             gc.collect()
     
-    total_time = time.time() - start_time
-    print(f"  Created {len(sequences)} sequences in {total_time:.1f}s ({len(sequences)/total_time:.1f} seq/s)")
+    pbar.close()
+    
+    step_times['sequence_processing'] = time.time() - step_start
+    print(f"    ✓ Sequence processing completed ({step_times['sequence_processing']:.1f}s)")
+    print(f"    ✓ Processing rate: {len(sequences)/step_times['sequence_processing']:.1f} sequences/second")
+    
+    # step 6: finalize and create metadata
+    step_start = time.time()
+    print(f"  Step 6/6: Creating metadata...")
     
     # create metadata
     metadata = {
@@ -302,6 +338,19 @@ def create_vectorized_temporal_sequences(
         'target_columns': target_cols,
         'cluster_to_idx': cluster_to_idx
     }
+    
+    step_times['metadata_creation'] = time.time() - step_start
+    total_time = time.time() - start_time
+    
+    print(f"    ✓ Metadata created ({step_times['metadata_creation']:.2f}s)")
+    print(f"\n  🎉 Total processing completed in {total_time:.1f}s")
+    print(f"     - Feature identification: {step_times['feature_identification']:.2f}s")
+    print(f"     - Dataset info extraction: {step_times['dataset_info']:.2f}s") 
+    print(f"     - Temporal validation: {step_times['validation']:.2f}s")
+    print(f"     - Sequence planning: {step_times['sequence_planning']:.2f}s")
+    print(f"     - Sequence processing: {step_times['sequence_processing']:.1f}s")
+    print(f"     - Metadata creation: {step_times['metadata_creation']:.2f}s")
+    print(f"  📊 Final result: {len(sequences)} sequences ({len(sequences)/total_time:.1f} seq/s average)")
     
     return sequences, metadata
 
@@ -324,7 +373,18 @@ def process_sequence_batch(
     
     batch_data = []
     
-    for seq_start_idx in batch_sequences:
+    # create progress bar for individual sequences within batch (only for large batches)
+    if len(batch_sequences) > 100:
+        seq_iterator = tqdm(
+            batch_sequences, 
+            desc="Processing batch sequences", 
+            leave=False,
+            unit="seq"
+        )
+    else:
+        seq_iterator = batch_sequences
+    
+    for seq_start_idx in seq_iterator:
         # define time windows
         target_ts = timestamps[seq_start_idx + prediction_horizon - 1]
         seq_timestamps = timestamps[seq_start_idx - sequence_length:seq_start_idx]
