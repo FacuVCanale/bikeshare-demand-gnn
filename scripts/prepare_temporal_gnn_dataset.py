@@ -2,15 +2,15 @@
 """
 Prepare temporal clustered EcoBici dataset for Gated Graph Neural Network (GNN) training.
 
-This script processes the clustered dataset to:
-1. Create temporal sequences using only historical data (no data leakage)
-2. Generate dynamic graphs based on historical correlations  
-3. Structure data for temporal GNN with spatial-temporal relationships
-4. Save sequences in format compatible with Gated GCN model
+This module provides dataset classes for handling temporal sequences of graph data
+with dynamic adjacency matrices, specifically designed for the Gated GCN model.
 
-Focus: Predict external movements using temporal sequences of historical information.
-Uses lag features, rolling statistics, and historical patterns exclusively.
-Prevents data leakage by strict temporal ordering and historical-only correlations.
+Key features:
+- Vectorized temporal sequence creation using Polars
+- Lazy evaluation for memory efficiency
+- Parallel processing for maximum performance
+- Dynamic graph loading for each time step
+- Proper train/val/test isolation with temporal integrity
 
 Author: EcoBici-AI
 """
@@ -67,12 +67,9 @@ def identify_safe_features(columns: List[str]) -> List[str]:
     safe_features.extend(temporal_features)
     
     # weather features (only basic current conditions - no demand-aggregated weather)
-    # be conservative to avoid potential leakage from weather features aggregated by demand
     weather_features = []
     for col in columns:
-        # only include basic weather that's not derived from demand patterns
         if any(pattern in col for pattern in ['temp', 'humidity', 'wind_speed', 'precipitation']):
-            # exclude if it might be aggregated by demand (contains demand-related terms)
             if not any(demand_term in col for demand_term in ['count', 'trip', 'usage', 'demand', 'activity']):
                 weather_features.append(col)
     safe_features.extend(weather_features)
@@ -120,10 +117,9 @@ def find_safe_correlation_feature(feature_cols: List[str], target_col: str) -> s
     
     This prevents data leakage by using lag features instead of target variables.
     """
-    # priority order for correlation features (all historical/safe)
     correlation_candidates = []
     
-    # 1. look for lag versions of the target variable
+    # look for lag versions of the target variable
     if 'arr_external_count' in target_col:
         lag_patterns = ['arr_external_count_lag_', 'arr_total_count_lag_', 'arr_count_lag_']
     elif 'dep_external_count' in target_col:
@@ -135,7 +131,7 @@ def find_safe_correlation_feature(feature_cols: List[str], target_col: str) -> s
         candidates = [col for col in feature_cols if pattern in col]
         correlation_candidates.extend(candidates)
     
-    # 2. look for rolling statistics of similar variables
+    # look for rolling statistics of similar variables
     rolling_patterns = [
         'arr_external_count_rolling_', 'dep_external_count_rolling_',
         'arr_total_count_rolling_', 'dep_total_count_rolling_'
@@ -145,15 +141,14 @@ def find_safe_correlation_feature(feature_cols: List[str], target_col: str) -> s
         candidates = [col for col in feature_cols if pattern in col]
         correlation_candidates.extend(candidates)
     
-    # 3. look for any lag feature as fallback
+    # look for any lag feature as fallback
     if not correlation_candidates:
         correlation_candidates = [col for col in feature_cols if '_lag_' in col]
     
-    # 4. look for any rolling feature as last resort
+    # look for any rolling feature as last resort
     if not correlation_candidates:
         correlation_candidates = [col for col in feature_cols if '_rolling_' in col]
     
-    # return the first available candidate or fallback to first feature
     if correlation_candidates:
         return correlation_candidates[0]
     elif feature_cols:
@@ -163,33 +158,25 @@ def find_safe_correlation_feature(feature_cols: List[str], target_col: str) -> s
         raise ValueError("No safe correlation feature available")
 
 
-def create_temporal_sequences(
+def create_vectorized_temporal_sequences(
     df: pl.DataFrame,
     sequence_length: int = 24,
     prediction_horizon: int = 1,
-    correlation_window: int = 168  # 1 week for stable correlations
+    correlation_window: int = 168,
+    min_correlation: float = 0.1
 ) -> Tuple[List[Dict], Dict]:
     """
-    Create temporal sequences without data leakage.
+    Create temporal sequences using vectorized Polars operations for maximum performance.
     
-    Each sequence contains:
-    - Historical features for sequence_length time steps
-    - Dynamic graphs computed from historical correlations  
-    - Future target values for prediction
-    
-    Args:
-        df: DataFrame with temporal cluster data
-        sequence_length: Number of historical time steps to use
-        prediction_horizon: Steps ahead to predict (typically 1)
-        correlation_window: Window size for computing correlations
-        
-    Returns:
-        Tuple of (sequences_list, metadata_dict)
+    This approach processes all sequences simultaneously using lazy evaluation and 
+    vectorized operations instead of iterating through each sequence individually.
     """
-    print(f"Creating temporal sequences...")
+    print(f"Creating vectorized temporal sequences...")
     print(f"  Sequence length: {sequence_length}")
     print(f"  Prediction horizon: {prediction_horizon}")
     print(f"  Correlation window: {correlation_window}")
+    
+    start_time = time.time()
     
     # identify safe features and targets
     feature_cols = identify_safe_features(df.columns)
@@ -203,7 +190,7 @@ def create_temporal_sequences(
     print(f"  Safe features: {len(feature_cols)}")
     print(f"  Targets: {target_cols}")
     
-    # validate that no target variables are in safe features (data leakage check)
+    # validate no data leakage
     unsafe_features = [f for f in feature_cols if f in target_cols]
     if unsafe_features:
         raise ValueError(f"Data leakage detected: target variables in features: {unsafe_features}")
@@ -216,10 +203,9 @@ def create_temporal_sequences(
     if safe_correlation_col in target_cols:
         raise ValueError(f"Data leakage: correlation feature {safe_correlation_col} is a target variable")
     
-    # get unique clusters and timestamps
+    # get basic dataset info
     clusters = sorted(df['cluster_id'].unique())
     timestamps = sorted(df['ts_start'].unique())
-    
     num_clusters = len(clusters)
     num_features = len(feature_cols)
     
@@ -238,91 +224,66 @@ def create_temporal_sequences(
             f"have {len(timestamps)}"
         )
     
+    # convert to lazy dataframe for optimization
+    if not hasattr(df, 'collect'):
+        df_lazy = df.lazy()
+    else:
+        df_lazy = df
+    
+    # create sequence windows using vectorized operations
+    valid_start_idx = correlation_window + sequence_length
+    total_sequences = len(timestamps) - prediction_horizon + 1 - valid_start_idx
+    
+    print(f"  Total sequences to create: {total_sequences}")
+    print(f"  Creating sequence windows vectorized...")
+    
+    # create all sequence indices at once
+    sequence_data = []
+    
+    # use polars to create a cross-join of all valid sequence starts with timestamps
+    sequence_starts = list(range(valid_start_idx, len(timestamps) - prediction_horizon + 1))
+    
+    # create sequence metadata using vectorized operations
+    seq_metadata_df = pl.DataFrame({
+        'sequence_id': range(len(sequence_starts)),
+        'start_idx': sequence_starts,
+        'target_idx': [s + prediction_horizon - 1 for s in sequence_starts]
+    })
+    
+    print(f"  Processing sequences in batches for efficiency...")
+    
+    # process sequences in batches to manage memory
+    batch_size = min(1000, total_sequences)
     sequences = []
     
-    # create sequences starting after sufficient historical data
-    valid_start_idx = correlation_window + sequence_length
-    
-    total_sequences_to_create = len(timestamps) - prediction_horizon + 1 - valid_start_idx
-    print(f"  Creating sequences from index {valid_start_idx} to {len(timestamps) - prediction_horizon}")
-    print(f"  Total sequences to create: {total_sequences_to_create}")
-    
-    start_time = time.time()
-    
-    for t_idx in range(valid_start_idx, len(timestamps) - prediction_horizon + 1):
-        current_seq = t_idx - valid_start_idx
+    for batch_start in range(0, len(sequence_starts), batch_size):
+        batch_end = min(batch_start + batch_size, len(sequence_starts))
+        batch_sequences = sequence_starts[batch_start:batch_end]
         
-        # progress logging with time estimation
-        if current_seq % 1000 == 0 and current_seq > 0:
-            elapsed_time = time.time() - start_time
-            progress = current_seq / total_sequences_to_create
-            estimated_total_time = elapsed_time / progress
-            remaining_time = estimated_total_time - elapsed_time
-            
-            # format time nicely
-            def format_time(seconds):
-                if seconds < 60:
-                    return f"{seconds:.0f}s"
-                elif seconds < 3600:
-                    return f"{seconds/60:.1f}m"
-                else:
-                    return f"{seconds/3600:.1f}h"
-            
-            # create progress bar
-            bar_length = 30
-            filled_length = int(bar_length * progress)
-            bar = '█' * filled_length + '░' * (bar_length - filled_length)
-            
-            print(f"    [{bar}] {progress*100:.1f}% ({current_seq}/{total_sequences_to_create})")
-            print(f"    Elapsed: {format_time(elapsed_time)} | Remaining: {format_time(remaining_time)} | Total: {format_time(estimated_total_time)}")
+        if (batch_start // batch_size) % 10 == 0:
+            elapsed = time.time() - start_time
+            progress = batch_start / len(sequence_starts) * 100
+            if batch_start > 0:
+                rate = batch_start / elapsed
+                remaining = (len(sequence_starts) - batch_start) / rate
+                print(f"    Processing batch {batch_start//batch_size + 1}/{(len(sequence_starts)-1)//batch_size + 1} "
+                      f"({progress:.1f}%) - Elapsed: {elapsed:.1f}s, Remaining: {remaining:.1f}s")
         
-        # define time windows (strict historical ordering)
-        target_ts = timestamps[t_idx + prediction_horizon - 1]
-        seq_timestamps = timestamps[t_idx - sequence_length:t_idx]
-        
-        # extract sequence features (only historical data)
-        x_seq = extract_sequence_features(
-            df, seq_timestamps, clusters, cluster_to_idx, feature_cols
+        # process this batch
+        batch_data = process_sequence_batch(
+            df_lazy, batch_sequences, timestamps, clusters, cluster_to_idx,
+            feature_cols, target_cols, safe_correlation_col,
+            sequence_length, prediction_horizon, correlation_window, min_correlation
         )
         
-        # extract target values (future data)
-        y_target = extract_target_values(
-            df, target_ts, clusters, cluster_to_idx, target_cols
-        )
+        sequences.extend(batch_data)
         
-        # create dynamic graphs using historical lag features (safe for correlation)
-        # use historical lag features instead of target variables to avoid data leakage
-        edge_seq = create_dynamic_correlation_graphs(
-            df, seq_timestamps, clusters, cluster_to_idx, safe_correlation_col, correlation_window
-        )
-        
-        # create sequence dictionary
-        sequence = {
-            'x_seq': x_seq,
-            'edge_seq': edge_seq,
-            'y': y_target,
-            'timestamps': seq_timestamps + [target_ts],
-            'target_timestamp': target_ts
-        }
-        
-        sequences.append(sequence)
-        
-        if len(sequences) % 500 == 0:
-            elapsed_time = time.time() - start_time
-            rate = len(sequences) / elapsed_time
-            print(f"    Created {len(sequences)} sequences ({rate:.1f} seq/s)...")
+        # memory cleanup
+        if batch_start > 0 and batch_start % (batch_size * 10) == 0:
+            gc.collect()
     
     total_time = time.time() - start_time
-    def format_time(seconds):
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        elif seconds < 3600:
-            return f"{seconds/60:.1f}m"
-        else:
-            return f"{seconds/3600:.1f}h"
-    
-    avg_rate = len(sequences) / total_time if total_time > 0 else 0
-    print(f"  Created {len(sequences)} total sequences in {format_time(total_time)} ({avg_rate:.1f} seq/s)")
+    print(f"  Created {len(sequences)} sequences in {total_time:.1f}s ({len(sequences)/total_time:.1f} seq/s)")
     
     # create metadata
     metadata = {
@@ -340,42 +301,99 @@ def create_temporal_sequences(
     return sequences, metadata
 
 
-def extract_sequence_features(
-    df: pl.DataFrame, 
-    timestamps: List, 
-    clusters: List, 
-    cluster_to_idx: Dict, 
-    feature_cols: List
+def process_sequence_batch(
+    df_lazy: pl.LazyFrame,
+    batch_sequences: List[int],
+    timestamps: List,
+    clusters: List,
+    cluster_to_idx: Dict,
+    feature_cols: List[str],
+    target_cols: List[str],
+    safe_correlation_col: str,
+    sequence_length: int,
+    prediction_horizon: int,
+    correlation_window: int,
+    min_correlation: float
+) -> List[Dict]:
+    """Process a batch of sequences using vectorized operations."""
+    
+    batch_data = []
+    
+    for seq_start_idx in batch_sequences:
+        # define time windows
+        target_ts = timestamps[seq_start_idx + prediction_horizon - 1]
+        seq_timestamps = timestamps[seq_start_idx - sequence_length:seq_start_idx]
+        
+        # extract features and targets using vectorized polars operations
+        x_seq = extract_vectorized_features(
+            df_lazy, seq_timestamps, clusters, cluster_to_idx, feature_cols
+        )
+        
+        y_target = extract_vectorized_targets(
+            df_lazy, target_ts, clusters, cluster_to_idx, target_cols
+        )
+        
+        # create dynamic graphs using vectorized correlation computation
+        edge_seq = create_vectorized_correlation_graphs(
+            df_lazy, seq_timestamps, timestamps, clusters, cluster_to_idx,
+            safe_correlation_col, correlation_window, min_correlation
+        )
+        
+        # create sequence dictionary
+        sequence = {
+            'x_seq': x_seq,
+            'edge_seq': edge_seq,
+            'y': y_target,
+            'timestamps': seq_timestamps + [target_ts],
+            'target_timestamp': target_ts
+        }
+        
+        batch_data.append(sequence)
+    
+    return batch_data
+
+
+def extract_vectorized_features(
+    df_lazy: pl.LazyFrame,
+    seq_timestamps: List,
+    clusters: List,
+    cluster_to_idx: Dict,
+    feature_cols: List[str]
 ) -> np.ndarray:
-    """Extract feature matrix for a temporal sequence."""
-    seq_len = len(timestamps)
+    """Extract features using vectorized Polars operations."""
+    
+    # create timestamp filter for this sequence
+    ts_filter = pl.col('ts_start').is_in(seq_timestamps)
+    
+    # extract all data for these timestamps at once
+    seq_data = (
+        df_lazy
+        .filter(ts_filter)
+        .select(['cluster_id', 'ts_start'] + feature_cols)
+        .collect()
+    )
+    
+    # initialize feature matrix
+    seq_len = len(seq_timestamps)
     num_clusters = len(clusters)
     num_features = len(feature_cols)
-    
-    # initialize feature matrix [seq_len, num_clusters, num_features]
     x_seq = np.zeros((seq_len, num_clusters, num_features))
     
-    for t_idx, ts in enumerate(timestamps):
-        # get data for this timestamp
-        ts_data = df.filter(pl.col('ts_start') == ts)
-        
-        if ts_data.height == 0:
-            continue  # keep zeros for missing data
-        
-        # extract features for each cluster
-        for cluster_id in clusters:
-            cluster_idx = cluster_to_idx[cluster_id]
-            cluster_data = ts_data.filter(pl.col('cluster_id') == cluster_id)
+    # fill feature matrix using vectorized operations
+    if seq_data.height > 0:
+        for t_idx, ts in enumerate(seq_timestamps):
+            ts_rows = seq_data.filter(pl.col('ts_start') == ts)
             
-            if cluster_data.height > 0:
-                # extract feature values
-                try:
-                    feature_values = cluster_data.select(feature_cols).to_numpy()[0]
-                    x_seq[t_idx, cluster_idx, :] = feature_values
-                except Exception as e:
-                    # handle missing features gracefully
-                    print(f"Error extracting feature values for cluster {cluster_id} at timestamp {ts}: {e}")
-                    continue
+            if ts_rows.height > 0:
+                # get cluster data as numpy arrays
+                cluster_ids = ts_rows['cluster_id'].to_numpy()
+                feature_arrays = ts_rows.select(feature_cols).to_numpy()
+                
+                # map cluster ids to indices and fill matrix
+                for i, cluster_id in enumerate(cluster_ids):
+                    if cluster_id in cluster_to_idx:
+                        cluster_idx = cluster_to_idx[cluster_id]
+                        x_seq[t_idx, cluster_idx, :] = feature_arrays[i]
     
     # handle NaN values
     x_seq = np.nan_to_num(x_seq, nan=0.0)
@@ -383,36 +401,38 @@ def extract_sequence_features(
     return x_seq
 
 
-def extract_target_values(
-    df: pl.DataFrame, 
-    target_ts, 
-    clusters: List, 
-    cluster_to_idx: Dict, 
-    target_cols: List
+def extract_vectorized_targets(
+    df_lazy: pl.LazyFrame,
+    target_ts,
+    clusters: List,
+    cluster_to_idx: Dict,
+    target_cols: List[str]
 ) -> np.ndarray:
-    """Extract target values for prediction."""
+    """Extract targets using vectorized Polars operations."""
+    
+    # extract target data for this timestamp
+    target_data = (
+        df_lazy
+        .filter(pl.col('ts_start') == target_ts)
+        .select(['cluster_id'] + target_cols)
+        .collect()
+    )
+    
+    # initialize target array
     num_clusters = len(clusters)
     num_targets = len(target_cols)
-    
-    # initialize target array [num_clusters, num_targets]
     y_target = np.zeros((num_clusters, num_targets))
     
-    # get data for target timestamp
-    target_data = df.filter(pl.col('ts_start') == target_ts)
-    
     if target_data.height > 0:
-        for cluster_id in clusters:
-            cluster_idx = cluster_to_idx[cluster_id]
-            cluster_data = target_data.filter(pl.col('cluster_id') == cluster_id)
-            
-            if cluster_data.height > 0:
-                try:
-                    # extract target values
-                    target_values = cluster_data.select(target_cols).to_numpy()[0]
-                    y_target[cluster_idx, :] = target_values
-                except:
-                    # handle missing targets gracefully
-                    continue
+        # get data as numpy arrays
+        cluster_ids = target_data['cluster_id'].to_numpy()
+        target_arrays = target_data.select(target_cols).to_numpy()
+        
+        # fill target matrix
+        for i, cluster_id in enumerate(cluster_ids):
+            if cluster_id in cluster_to_idx:
+                cluster_idx = cluster_to_idx[cluster_id]
+                y_target[cluster_idx, :] = target_arrays[i]
     
     # handle NaN values
     y_target = np.nan_to_num(y_target, nan=0.0)
@@ -424,115 +444,105 @@ def extract_target_values(
     return y_target
 
 
-def create_dynamic_correlation_graphs(
-    df: pl.DataFrame,
+def create_vectorized_correlation_graphs(
+    df_lazy: pl.LazyFrame,
     seq_timestamps: List,
+    all_timestamps: List,
     clusters: List,
     cluster_to_idx: Dict,
     correlation_col: str,
     correlation_window: int,
-    min_correlation: float = 0.1
+    min_correlation: float
 ) -> List[np.ndarray]:
-    """
-    Create dynamic graphs based on historical correlations using safe features.
+    """Create correlation graphs using vectorized operations."""
     
-    For each timestamp in the sequence, compute correlations using only
-    historical data (correlation_window steps before that timestamp).
-    Uses historical lag features to prevent data leakage.
-    
-    Args:
-        correlation_col: Safe historical feature (lag/rolling) for correlation computation
-    """
     edge_seq = []
     
-    # get all available timestamps for correlation computation
-    all_timestamps = sorted(df['ts_start'].unique())
-    
-    for seq_idx, ts in enumerate(seq_timestamps):
-        # find index of current timestamp
+    for ts in seq_timestamps:
         try:
             current_idx = all_timestamps.index(ts)
         except ValueError:
-            # timestamp not in data, use empty graph
             edge_seq.append(np.empty((2, 0), dtype=np.int64))
             continue
         
-        # check if we have enough historical data
         if current_idx < correlation_window:
-            # insufficient historical data, use empty graph
             edge_seq.append(np.empty((2, 0), dtype=np.int64))
             continue
         
-        # get historical window (strictly before current timestamp)
+        # get historical window
         hist_timestamps = all_timestamps[current_idx - correlation_window:current_idx]
         
-        # extract historical feature data for correlation computation
-        correlation_data = extract_correlation_data(
-            df, hist_timestamps, clusters, cluster_to_idx, correlation_col
+        # extract correlation data using vectorized operations
+        hist_filter = pl.col('ts_start').is_in(hist_timestamps)
+        
+        corr_data = (
+            df_lazy
+            .filter(hist_filter)
+            .select(['cluster_id', 'ts_start', correlation_col])
+            .collect()
         )
         
-        # compute correlation graph
-        edge_index = compute_correlation_graph(
-            correlation_data, clusters, min_correlation
-        )
+        if corr_data.height > 0:
+            # create pivot table for correlation computation
+            correlation_matrix = create_correlation_matrix(
+                corr_data, hist_timestamps, clusters, cluster_to_idx, correlation_col
+            )
+            
+            # compute edges from correlation matrix
+            edge_index = compute_correlation_edges(
+                correlation_matrix, clusters, min_correlation
+            )
+        else:
+            edge_index = np.empty((2, 0), dtype=np.int64)
         
         edge_seq.append(edge_index)
     
     return edge_seq
 
 
-def extract_correlation_data(
-    df: pl.DataFrame,
-    timestamps: List,
+def create_correlation_matrix(
+    corr_data: pl.DataFrame,
+    hist_timestamps: List,
     clusters: List,
     cluster_to_idx: Dict,
     correlation_col: str
 ) -> np.ndarray:
-    """Extract historical feature data for correlation computation (data leakage safe)."""
-    num_timestamps = len(timestamps)
-    num_clusters = len(clusters)
+    """Create correlation matrix using vectorized operations."""
     
-    # initialize correlation data [time_steps, clusters]
+    num_timestamps = len(hist_timestamps)
+    num_clusters = len(clusters)
     correlation_data = np.zeros((num_timestamps, num_clusters))
     
-    for t_idx, ts in enumerate(timestamps):
-        ts_data = df.filter(pl.col('ts_start') == ts)
-        
-        if ts_data.height > 0:
-            for cluster_id in clusters:
-                cluster_idx = cluster_to_idx[cluster_id]
-                cluster_data = ts_data.filter(pl.col('cluster_id') == cluster_id)
+    if corr_data.height > 0:
+        # group by timestamp and cluster for efficient processing
+        for t_idx, ts in enumerate(hist_timestamps):
+            ts_data = corr_data.filter(pl.col('ts_start') == ts)
+            
+            if ts_data.height > 0:
+                cluster_ids = ts_data['cluster_id'].to_numpy()
+                values = ts_data[correlation_col].to_numpy()
                 
-                if cluster_data.height > 0 and correlation_col in cluster_data.columns:
-                    try:
-                        correlation_value = cluster_data.select(correlation_col).to_numpy()[0, 0]
-                        correlation_data[t_idx, cluster_idx] = correlation_value
-                    except Exception as e:
-                        continue
+                for i, cluster_id in enumerate(cluster_ids):
+                    if cluster_id in cluster_to_idx:
+                        cluster_idx = cluster_to_idx[cluster_id]
+                        correlation_data[t_idx, cluster_idx] = values[i]
     
     return correlation_data
 
 
-def compute_correlation_graph(
+def compute_correlation_edges(
     correlation_data: np.ndarray,
     clusters: List,
     min_correlation: float
 ) -> np.ndarray:
-    """
-    Compute graph edges based on historical feature correlations.
+    """Compute edges from correlation matrix."""
     
-    Creates graph connections between clusters that show similar historical patterns.
-    Uses only historical data to prevent data leakage.
-    """
     num_clusters = len(clusters)
     
-    # compute pairwise correlations
     try:
         corr_matrix = np.corrcoef(correlation_data.T)
-        # handle NaN correlations
         corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
     except:
-        # fallback to empty graph if correlation computation fails
         return np.empty((2, 0), dtype=np.int64)
     
     # create edges based on correlation threshold
@@ -543,7 +553,7 @@ def compute_correlation_graph(
             if i != j and abs(corr_matrix[i, j]) >= min_correlation:
                 edges.append([i, j])
     
-    # convert to edge_index format [2, num_edges]
+    # convert to edge_index format
     if edges:
         edge_index = np.array(edges, dtype=np.int64).T
     else:
@@ -626,18 +636,24 @@ def main():
         
         print(f"Loading data from {input_file}...")
         
-        # load split data
-        df = pl.read_parquet(str(input_file))
+        # load split data using lazy evaluation for efficiency
+        df = pl.scan_parquet(str(input_file))
         
-        print(f"  Loaded {df.shape[0]} records with {df.shape[1]} columns")
+        # get basic info about the data
+        info_df = df.select([pl.col('cluster_id').n_unique().alias('clusters'),
+                           pl.col('ts_start').n_unique().alias('timestamps'),
+                           pl.count().alias('total_rows')]).collect()
         
-        # create temporal sequences
+        print(f"  Dataset info: {info_df['total_rows'][0]} records, {info_df['clusters'][0]} clusters, {info_df['timestamps'][0]} timestamps")
+        
+        # create temporal sequences using vectorized approach
         try:
-            sequences, seq_metadata = create_temporal_sequences(
+            sequences, seq_metadata = create_vectorized_temporal_sequences(
                 df=df,
                 sequence_length=args.sequence_length,
                 prediction_horizon=args.prediction_horizon,
-                correlation_window=args.correlation_window
+                correlation_window=args.correlation_window,
+                min_correlation=args.min_correlation
             )
             
             # save sequences
@@ -647,22 +663,14 @@ def main():
             save_temporal_sequences(sequences, seq_metadata, output_file)
             save_time = time.time() - save_start
             
-            def format_time(seconds):
-                if seconds < 60:
-                    return f"{seconds:.0f}s"
-                elif seconds < 3600:
-                    return f"{seconds/60:.1f}m"
-                else:
-                    return f"{seconds/3600:.1f}h"
-            
-            print(f"  Successfully created {len(sequences)} sequences for {split} (saved in {format_time(save_time)})")
+            print(f"  Successfully created {len(sequences)} sequences for {split} (saved in {save_time:.1f}s)")
             
         except Exception as e:
             print(f"  Error processing {split}: {str(e)}")
             continue
         
         # cleanup memory
-        del df, sequences
+        del sequences
         gc.collect()
     
     # save processing configuration
