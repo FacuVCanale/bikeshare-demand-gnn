@@ -179,8 +179,6 @@ class GNNTrainer:
         weight_decay: float = 1e-5,
         scheduler_name: str = 'plateau',
         loss_function: str = 'mse',
-        loss_params: Dict[str, Any] = None,
-        analyze_targets: bool = False,
         **optimizer_kwargs
     ):
         """
@@ -191,10 +189,7 @@ class GNNTrainer:
             learning_rate: Learning rate
             weight_decay: Weight decay for regularization
             scheduler_name: Learning rate scheduler ('plateau', 'cosine', 'none')
-            loss_function: Loss function ('mse', 'mae', 'huber', 'zero_inflated', 
-                          'weighted_mse', 'focal_regression', 'robust_l1', 'adaptive_zero_inflated')
-            loss_params: Additional parameters for custom loss functions
-            analyze_targets: Whether to analyze target distribution for loss selection
+            loss_function: Loss function ('mse', 'mae', 'huber')
             **optimizer_kwargs: Additional optimizer arguments
         """
         # setup optimizer
@@ -244,52 +239,19 @@ class GNNTrainer:
             raise ValueError(f"Unknown scheduler: {scheduler_name}")
         
         # setup loss function
-        loss_params = loss_params or {}
-        
-        if loss_function.lower() in ['mse', 'mae', 'huber']:
-            # standard PyTorch loss functions
-            if loss_function.lower() == 'mse':
-                self.criterion = nn.MSELoss()
-            elif loss_function.lower() == 'mae':
-                self.criterion = nn.L1Loss()
-            elif loss_function.lower() == 'huber':
-                self.criterion = nn.HuberLoss()
-            
-            loss_description = f"{loss_function.upper()}"
-            
+        if loss_function.lower() == 'mse':
+            self.criterion = nn.MSELoss()
+        elif loss_function.lower() == 'mae':
+            self.criterion = nn.L1Loss()
+        elif loss_function.lower() == 'huber':
+            self.criterion = nn.HuberLoss()
         else:
-            # custom loss functions for handling zero-inflated data
-            try:
-                self.criterion = create_loss_function(loss_function, **loss_params)
-                
-                # create descriptive string for logging
-                if loss_function.lower() == 'zero_inflated':
-                    loss_description = f"Zero-Inflated Loss (zero_weight={loss_params.get('zero_weight', 1.0)}, nonzero_weight={loss_params.get('nonzero_weight', 2.0)})"
-                elif loss_function.lower() == 'weighted_mse':
-                    loss_description = f"Weighted MSE (zero_weight={loss_params.get('zero_weight', 0.5)}, nonzero_weight={loss_params.get('nonzero_weight', 2.0)})"
-                elif loss_function.lower() == 'focal_regression':
-                    loss_description = f"Focal Regression (alpha={loss_params.get('alpha', 1.0)}, gamma={loss_params.get('gamma', 2.0)})"
-                elif loss_function.lower() == 'robust_l1':
-                    loss_description = f"Robust L1 (zero_weight={loss_params.get('zero_weight', 0.3)}, nonzero_weight={loss_params.get('nonzero_weight', 1.5)})"
-                elif loss_function.lower() == 'adaptive_zero_inflated':
-                    loss_description = f"Adaptive Zero-Inflated (base_weight={loss_params.get('base_nonzero_weight', 2.0)}, adaptive_factor={loss_params.get('adaptive_factor', 0.5)})"
-                else:
-                    loss_description = f"Custom {loss_function}"
-                    
-            except ValueError as e:
-                raise ValueError(f"Unknown loss function: {loss_function}. Error: {e}")
+            raise ValueError(f"Unknown loss function: {loss_function}")
         
         self.logger.info(f"Training setup complete:")
         self.logger.info(f"  Optimizer: {optimizer_name} (lr={learning_rate}, wd={weight_decay})")
         self.logger.info(f"  Scheduler: {scheduler_name}")
-        self.logger.info(f"  Loss: {loss_description}")
-        
-        # store loss configuration for experiment tracking
-        self.loss_config = {
-            'loss_function': loss_function,
-            'loss_params': loss_params,
-            'analyze_targets': analyze_targets
-        }
+        self.logger.info(f"  Loss: {loss_function}")
     
     def _determine_batching_strategy(self, data: Data) -> bool:
         """
@@ -656,10 +618,6 @@ class GNNTrainer:
         """
         if self.optimizer is None:
             self.setup_training()
-        
-        # analyze target distribution if requested
-        if hasattr(self, 'loss_config') and self.loss_config.get('analyze_targets', False):
-            self.analyze_training_targets(train_data, train_mask)
         
         # create data loaders
         if train_mask is not None:
@@ -1250,36 +1208,6 @@ class GNNTrainer:
         
         all_predictions = torch.cat(all_predictions, dim=0)
         return all_predictions.cpu().numpy()
-
-    def analyze_training_targets(self, train_data: Data, train_mask: Optional[torch.Tensor] = None):
-        """
-        Analyze target distribution to provide loss function recommendations.
-        
-        Args:
-            train_data: Training data
-            train_mask: Optional mask for training samples
-        """
-        targets = train_data.y
-        if train_mask is not None:
-            targets = targets[train_mask]
-        
-        # analyze distribution
-        stats = analyze_target_distribution(targets)
-        
-        self.logger.info("TARGET DISTRIBUTION ANALYSIS")
-        self.logger.info("-" * 50)
-        self.logger.info(f"Total samples: {stats['total_samples']:,}")
-        self.logger.info(f"Zero samples: {stats['zero_count']:,} ({stats['zero_proportion']:.1%})")
-        self.logger.info(f"Non-zero samples: {stats['nonzero_count']:,}")
-        self.logger.info(f"Non-zero mean: {stats['nonzero_mean']:.3f}")
-        self.logger.info(f"Non-zero std: {stats['nonzero_std']:.3f}")
-        self.logger.info(f"Overall mean: {stats['overall_mean']:.3f}")
-        self.logger.info(f"Overall std: {stats['overall_std']:.3f}")
-        self.logger.info("")
-        self.logger.info(f"RECOMMENDATION: {stats['recommendation']}")
-        self.logger.info(f"REASON: {stats['reason']}")
-        
-        return stats
 
 
 def train_gnn_experiment(

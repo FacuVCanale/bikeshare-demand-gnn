@@ -19,6 +19,9 @@ import numpy as np
 
 from abc import ABC, abstractmethod
 
+# import gated GCN model
+from .gated_gcn import GateGCN
+
 
 class BaseGNNModel(nn.Module, ABC):
     """
@@ -569,7 +572,7 @@ def create_gnn_model(
     Factory function to create GNN models.
     
     Args:
-        model_type: Type of GNN model ('gcn', 'gat', 'sage', 'transformer', 'hybrid')
+        model_type: Type of GNN model ('gcn', 'gat', 'sage', 'transformer', 'hybrid', 'gatedgcn')
         num_features: Number of input features
         num_targets: Number of target variables
         **kwargs: Additional model-specific parameters
@@ -589,8 +592,10 @@ def create_gnn_model(
         return GraphTransformer(num_features=num_features, num_targets=num_targets, **kwargs)
     elif model_type == 'hybrid':
         return HybridSpatioTemporalGNN(num_features=num_features, num_targets=num_targets, **kwargs)
+    elif model_type == 'gatedgcn':
+        return GateGCN(num_features=num_features, num_targets=num_targets, **kwargs)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from: 'gcn', 'gat', 'sage', 'transformer', 'hybrid'")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from: 'gcn', 'gat', 'sage', 'transformer', 'hybrid', 'gatedgcn'")
 
 
 # utility functions for model evaluation
