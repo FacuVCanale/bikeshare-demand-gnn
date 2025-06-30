@@ -25,6 +25,7 @@ import argparse
 import torch
 import pickle
 import gc
+import time
 from sklearn.preprocessing import StandardScaler
 
 
@@ -242,9 +243,39 @@ def create_temporal_sequences(
     # create sequences starting after sufficient historical data
     valid_start_idx = correlation_window + sequence_length
     
+    total_sequences_to_create = len(timestamps) - prediction_horizon + 1 - valid_start_idx
     print(f"  Creating sequences from index {valid_start_idx} to {len(timestamps) - prediction_horizon}")
+    print(f"  Total sequences to create: {total_sequences_to_create}")
+    
+    start_time = time.time()
     
     for t_idx in range(valid_start_idx, len(timestamps) - prediction_horizon + 1):
+        current_seq = t_idx - valid_start_idx
+        
+        # progress logging with time estimation
+        if current_seq % 1000 == 0 and current_seq > 0:
+            elapsed_time = time.time() - start_time
+            progress = current_seq / total_sequences_to_create
+            estimated_total_time = elapsed_time / progress
+            remaining_time = estimated_total_time - elapsed_time
+            
+            # format time nicely
+            def format_time(seconds):
+                if seconds < 60:
+                    return f"{seconds:.0f}s"
+                elif seconds < 3600:
+                    return f"{seconds/60:.1f}m"
+                else:
+                    return f"{seconds/3600:.1f}h"
+            
+            # create progress bar
+            bar_length = 30
+            filled_length = int(bar_length * progress)
+            bar = '█' * filled_length + '░' * (bar_length - filled_length)
+            
+            print(f"    [{bar}] {progress*100:.1f}% ({current_seq}/{total_sequences_to_create})")
+            print(f"    Elapsed: {format_time(elapsed_time)} | Remaining: {format_time(remaining_time)} | Total: {format_time(estimated_total_time)}")
+        
         # define time windows (strict historical ordering)
         target_ts = timestamps[t_idx + prediction_horizon - 1]
         seq_timestamps = timestamps[t_idx - sequence_length:t_idx]
@@ -276,10 +307,22 @@ def create_temporal_sequences(
         
         sequences.append(sequence)
         
-        if len(sequences) % 100 == 0:
-            print(f"    Created {len(sequences)} sequences...")
+        if len(sequences) % 500 == 0:
+            elapsed_time = time.time() - start_time
+            rate = len(sequences) / elapsed_time
+            print(f"    Created {len(sequences)} sequences ({rate:.1f} seq/s)...")
     
-    print(f"  Created {len(sequences)} total sequences")
+    total_time = time.time() - start_time
+    def format_time(seconds):
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.1f}m"
+        else:
+            return f"{seconds/3600:.1f}h"
+    
+    avg_rate = len(sequences) / total_time if total_time > 0 else 0
+    print(f"  Created {len(sequences)} total sequences in {format_time(total_time)} ({avg_rate:.1f} seq/s)")
     
     # create metadata
     metadata = {
@@ -329,8 +372,9 @@ def extract_sequence_features(
                 try:
                     feature_values = cluster_data.select(feature_cols).to_numpy()[0]
                     x_seq[t_idx, cluster_idx, :] = feature_values
-                except:
+                except Exception as e:
                     # handle missing features gracefully
+                    print(f"Error extracting feature values for cluster {cluster_id} at timestamp {ts}: {e}")
                     continue
     
     # handle NaN values
@@ -404,7 +448,7 @@ def create_dynamic_correlation_graphs(
     # get all available timestamps for correlation computation
     all_timestamps = sorted(df['ts_start'].unique())
     
-    for ts in seq_timestamps:
+    for seq_idx, ts in enumerate(seq_timestamps):
         # find index of current timestamp
         try:
             current_idx = all_timestamps.index(ts)
@@ -463,7 +507,7 @@ def extract_correlation_data(
                     try:
                         correlation_value = cluster_data.select(correlation_col).to_numpy()[0, 0]
                         correlation_data[t_idx, cluster_idx] = correlation_value
-                    except:
+                    except Exception as e:
                         continue
     
     return correlation_data
@@ -597,10 +641,21 @@ def main():
             )
             
             # save sequences
+            print(f"  Saving sequences...")
+            save_start = time.time()
             output_file = output_dir / f'{split}_temporal_sequences.pkl'
             save_temporal_sequences(sequences, seq_metadata, output_file)
+            save_time = time.time() - save_start
             
-            print(f"  Successfully created {len(sequences)} sequences for {split}")
+            def format_time(seconds):
+                if seconds < 60:
+                    return f"{seconds:.0f}s"
+                elif seconds < 3600:
+                    return f"{seconds/60:.1f}m"
+                else:
+                    return f"{seconds/3600:.1f}h"
+            
+            print(f"  Successfully created {len(sequences)} sequences for {split} (saved in {format_time(save_time)})")
             
         except Exception as e:
             print(f"  Error processing {split}: {str(e)}")
