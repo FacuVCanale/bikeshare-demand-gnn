@@ -325,7 +325,43 @@ class FeatureEngineer:
                 null_count = delta_df.select(pl.col(col).is_null().sum()).item()
                 if null_count > 0:
                     print(f"    {col}: {null_count} nulls after merge ({null_count/len(delta_df)*100:.1f}%)")
-            
+
+                    # --- Start of diagnostic code ---
+                    print(f"    Analyzing null time ranges for '{col}':")
+                    null_weather_df = (
+                        delta_df
+                        .filter(pl.col(col).is_null())
+                        .select('datetime')
+                        .unique()
+                        .sort('datetime')
+                    )
+
+                    if not null_weather_df.is_empty():
+                        # Find gaps to identify contiguous blocks of nulls
+                        null_weather_df = null_weather_df.with_columns(
+                            (pl.col('datetime').diff().dt.total_seconds() > (self.delta_t_minutes * 60)).fill_null(True).alias('is_new_block')
+                        ).with_columns(
+                            pl.col('is_new_block').cumsum().alias('block_id')
+                        )
+
+                        # Get min and max for each block to define the ranges
+                        null_ranges = (
+                            null_weather_df
+                            .group_by('block_id')
+                            .agg(
+                                pl.col('datetime').min().alias('start_time'),
+                                pl.col('datetime').max().alias('end_time'),
+                                pl.count().alias('intervals_in_block')
+                            )
+                            .sort('start_time')
+                            .drop('block_id')
+                        )
+                        
+                        print("    Time ranges with null weather data (before forward fill):")
+                        with pl.Config(tbl_rows=20):
+                             print(null_ranges)
+                    # --- End of diagnostic code ---
+
             # Forward fill weather data
             print("  Forward filling weather data...")
             delta_df = delta_df.with_columns([
