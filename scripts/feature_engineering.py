@@ -91,7 +91,7 @@ class FeatureEngineer:
         delta_df = self._clean_features(delta_df)
         
         self.feature_columns = [col for col in delta_df.columns if col not in 
-                               ['datetime', 'station_id', 'arrivals', 'departures']]
+                               ['datetime', 'station_id', 'arrivals', 'departures', 'lat', 'lon']]
         
         print(f"\n{'='*50}")
         print("FEATURE ENGINEERING SUMMARY")
@@ -125,6 +125,39 @@ class FeatureEngineer:
         """
         Convert trip data to 30-minute time intervals with arrival/departure counts.
         """
+        # Extract station coordinates before any filtering
+        # This ensures we have coordinate data for all possible stations
+        print("  Extracting station coordinates...")
+        # Assuming coordinate column names, will raise error if not found
+        try:
+            coords_origen = df.select([
+                pl.col('id_estacion_origen').alias('station_id'),
+                pl.col('lat_estacion_origen').alias('lat'),
+                pl.col('long_estacion_origen').alias('lon')
+            ]).drop_nulls()
+            
+            coords_destino = df.select([
+                pl.col('id_estacion_destino').alias('station_id'),
+                pl.col('lat_estacion_destino').alias('lat'),
+                pl.col('long_estacion_destino').alias('lon')
+            ]).drop_nulls()
+
+            station_coords = (
+                pl.concat([coords_origen, coords_destino])
+                .unique(subset='station_id', keep='first')
+                .with_columns(pl.col('station_id').cast(pl.Int64))
+            )
+            print(f"  Found coordinates for {len(station_coords)} unique stations")
+        except Exception as e:
+            print(f"  ERROR: Could not find coordinate columns (e.g., 'lat_estacion_origen').")
+            print(f"  Please ensure coordinate columns are in the input data. Details: {e}")
+            # Create an empty dataframe so the script can continue without coords
+            station_coords = pl.DataFrame({
+                'station_id': pl.Series([], dtype=pl.Int64),
+                'lat': pl.Series([], dtype=pl.Float64),
+                'lon': pl.Series([], dtype=pl.Float64)
+            })
+            
         # Ensure datetime columns and station_id consistency
         df = df.with_columns([
             pl.col('fecha_origen_recorrido').str.to_datetime(),
@@ -235,6 +268,15 @@ class FeatureEngineer:
         delta_df = delta_df.join(departures_count, on=['datetime', 'station_id'], how='left')
         print(f"  Merging arrival counts...")
         delta_df = delta_df.join(arrivals_count, on=['datetime', 'station_id'], how='left')
+        
+        # Merge coordinates
+        if not station_coords.is_empty():
+            print(f"  Merging coordinates...")
+            delta_df = delta_df.join(station_coords, on='station_id', how='left')
+            # Check for nulls after coordinate merge
+            lat_null_count = delta_df.select(pl.col('lat').is_null().sum()).item()
+            if lat_null_count > 0:
+                print(f"    WARNING: {lat_null_count} rows are missing coordinate data after merge.")
         
         print(f"  After merging: {len(delta_df)} rows, columns: {delta_df.columns}")
         
@@ -648,7 +690,7 @@ class FeatureEngineer:
         """
         # Separate features and targets
         feature_cols = [col for col in df.columns if col not in 
-                       ['datetime', 'station_id'] + target_cols]
+                       ['datetime', 'station_id', 'lat', 'lon'] + target_cols]
         
         X = df.select(feature_cols)
         y = df.select(target_cols)
@@ -817,6 +859,7 @@ def save_splits_to_files(splits, output_dir, feature_engineer):
         'target_columns': target_cols,
         'n_features': len(feature_names),
         'n_targets': len(target_cols),
+        'has_coordinates': 'lat' in splits['train'].columns,
         'unique_stations': sorted(unique_stations),
         'n_stations': len(unique_stations),
         'delta_t_minutes': feature_engineer.delta_t_minutes,
@@ -961,6 +1004,7 @@ def main():
             'target_columns': ['arrivals', 'departures'],
             'n_features': len(feature_names),
             'n_targets': 2,
+            'has_coordinates': 'lat' in processed_df.columns,
             'unique_stations': sorted(unique_stations),
             'n_stations': len(unique_stations),
             'delta_t_minutes': fe.delta_t_minutes,
