@@ -40,27 +40,34 @@ def evaluate_metrics(y_true, y_pred, metrics):
 
 def load_model_from_checkpoint(model_dir, device='cpu', model_filename='best_model.pt'):
     model_dir = Path(model_dir)
-    checkpoint = torch.load(model_dir / model_filename, map_location=device, weights_only=True)
-    model_class = checkpoint.get('model_class', 'gcn').lower()
-    # Alias para compatibilidad
-    if model_class == 'graphtransformer':
-        model_class = 'transformer'
+    checkpoint = torch.load(model_dir / model_filename, map_location=device, weights_only=False)
+    
+    model_class_name = checkpoint.get('model_class', 'gcn').lower()
+    if model_class_name == 'graphtransformer':
+        model_class_name = 'transformer'
+    
     model_init_params = checkpoint.get('model_init_params', {})
+    
     num_features = model_init_params.get('num_features')
+    if num_features is None:
+        raise ValueError("Could not determine 'num_features' from model checkpoint.")
+
     num_targets = model_init_params.get('num_targets')
-    hidden_dim = model_init_params.get('hidden_dim', 128)
-    dropout = model_init_params.get('dropout', 0.2)
-    num_layers = model_init_params.get('num_layers', 3)
-    num_heads = model_init_params.get('num_heads', 8)
+    if num_targets is None:
+        raise ValueError("Could not determine 'num_targets' from model checkpoint.")
+        
     model = create_gnn_model(
-        model_type=model_class,
+        model_type=model_class_name,
         num_features=num_features,
         num_targets=num_targets,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        dropout=dropout
+        hidden_dim=model_init_params.get('hidden_dim', 128),
+        num_layers=model_init_params.get('num_layers', 3),
+        num_heads=model_init_params.get('num_heads', 8),
+        dropout=model_init_params.get('dropout', 0.2),
+        **{k: v for k, v in model_init_params.items() if k not in 
+           ['num_features', 'num_targets', 'hidden_dim', 'num_layers', 'num_heads', 'dropout']}
     )
+    
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     return model
@@ -92,12 +99,8 @@ def main():
 
     # Predicción
     with torch.no_grad():
-        model_name = model.__class__.__name__.lower()
-        if model_name in ['graphtransformer', 'transformer']:
-            data_obj = Data(x=x, edge_index=edge_index)
-            y_pred = model(data_obj)
-        else:
-            y_pred = model(x, edge_index)
+        data_obj = Data(x=x, edge_index=edge_index)
+        y_pred = model(data_obj)
 
     # Evaluación
     results = evaluate_metrics(y, y_pred, metrics)
