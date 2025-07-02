@@ -7,6 +7,7 @@ import json
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from src.models.gnn_models import create_gnn_model
+from torch_geometric.data import Data
 
 def load_batch(batch_path):
     batch = torch.load(batch_path, weights_only=True)
@@ -93,7 +94,8 @@ def main():
     with torch.no_grad():
         model_name = model.__class__.__name__.lower()
         if model_name in ['graphtransformer', 'transformer']:
-            y_pred = model(x)
+            data_obj = Data(x=x, edge_index=edge_index)
+            y_pred = model(data_obj)
         else:
             y_pred = model(x, edge_index)
 
