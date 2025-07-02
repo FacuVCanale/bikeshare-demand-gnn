@@ -121,32 +121,60 @@ def prepare_data_for_gnn(
     target_cols: List[str]
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
     """
-    Prepare data exactly as it comes from feature_engineering.py for GNN.
-    No aggregations or modifications - just format conversion.
+    Prepare data for GNN by aggregating time series data per station.
+    Each station becomes one node with aggregated features.
     """
-    print("Preparing data for GNN (no modifications)...")
+    print("Preparing data for GNN (aggregating by station)...")
     
     # Identify feature columns (exclude metadata and targets)
-    exclude_cols = ['datetime', 'station_id'] + target_cols
+    exclude_cols = ['datetime', 'station_id', 'lat', 'lon'] + target_cols
     feature_cols = [col for col in df.columns if col not in exclude_cols]
     
-    print(f"  Using {len(feature_cols)} feature columns as-is")
-    print(f"  Using {len(target_cols)} target columns")
+    print(f"  Original data: {len(df)} time intervals")
+    print(f"  Unique stations: {df['station_id'].n_unique()}")
+    print(f"  Aggregating {len(feature_cols)} feature columns per station")
+    print(f"  Aggregating {len(target_cols)} target columns per station")
+    
+    # Define aggregation strategy for different feature types
+    numeric_cols = []
+    for col in feature_cols + target_cols:
+        if col in df.columns and df[col].dtype in [pl.Float32, pl.Float64, pl.Int32, pl.Int64]:
+            numeric_cols.append(col)
+    
+    # Aggregate data by station
+    agg_exprs = []
+    
+    # For numeric features and targets: use mean
+    for col in numeric_cols:
+        agg_exprs.append(pl.col(col).mean().alias(f"{col}"))
+    
+    # Add coordinate columns if available
+    if 'lat' in df.columns:
+        agg_exprs.append(pl.col('lat').first().alias('lat'))
+    if 'lon' in df.columns:
+        agg_exprs.append(pl.col('lon').first().alias('lon'))
+    
+    print(f"  Aggregating {len(agg_exprs)} columns...")
+    
+    # Group by station and aggregate
+    df_agg = df.group_by('station_id').agg(agg_exprs)
+    
+    print(f"  After aggregation: {len(df_agg)} stations (nodes)")
     
     # Add node index for graph structure
-    df = df.with_columns([
+    df_agg = df_agg.with_columns([
         pl.col('station_id').map_elements(
             lambda x: station_id_mapping[x], 
             return_dtype=pl.Int64
         ).alias('node_idx')
     ])
     
-    # Sort by node index and datetime for consistency
-    df = df.sort(['node_idx', 'datetime'])
+    # Sort by node index for consistency
+    df_agg = df_agg.sort('node_idx')
     
-    # Extract features and targets
-    features = df.select(feature_cols).to_numpy(writable=False)
-    targets = df.select(target_cols).to_numpy(writable=False)
+    # Extract aggregated features and targets
+    features = df_agg.select(feature_cols).to_numpy(writable=False)
+    targets = df_agg.select(target_cols).to_numpy(writable=False)
     
     # Handle NaN values
     features = np.nan_to_num(features, copy=False, nan=0.0)
@@ -156,8 +184,8 @@ def prepare_data_for_gnn(
     x = torch.tensor(features, dtype=torch.float32)
     y = torch.tensor(targets, dtype=torch.float32)
     
-    print(f"  Data shape: {x.shape[0]} samples, {x.shape[1]} features")
-    print(f"  Target shape: {y.shape}")
+    print(f"  Final data shape: {x.shape[0]} nodes (stations), {x.shape[1]} features")
+    print(f"  Final target shape: {y.shape}")
     
     return x, y, feature_cols
 
