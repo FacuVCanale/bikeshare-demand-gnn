@@ -147,6 +147,17 @@ def main():
     if dropped > 0:
         print(f"Warning: {dropped} rows dropped due to unseen station_id")
 
+    # keep only specified hours (12-18 inclusive)
+    desired_hours = [12, 13, 14, 15, 16, 17, 18]
+    before_hour_filter = len(df)
+    df = df.filter(pl.col("datetime").dt.hour().is_in(desired_hours))
+    print(f"Hour filter applied (12-18h): {before_hour_filter} -> {len(df)} rows")
+
+    # keep only rows from September 9 (any year)
+    before_date_filter = len(df)
+    df = df.filter((pl.col("datetime").dt.month() == 9) & (pl.col("datetime").dt.day() == 9))
+    print(f"Date filter applied (9/9): {before_date_filter} -> {len(df)} rows")
+
     df = df.sort(["node_idx", "datetime"])
 
     # Arrange features
