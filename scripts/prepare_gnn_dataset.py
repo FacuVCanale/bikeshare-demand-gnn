@@ -24,6 +24,7 @@ from sklearn.neighbors import NearestNeighbors
 import torch
 from torch_geometric.data import Data
 import gc
+import time
 
 def load_station_coordinates_from_data(df: pl.DataFrame) -> Dict:
     """Extract station coordinates from the dataset to create graph structure, keeping the most frequent coordinates for each station."""
@@ -192,13 +193,21 @@ def prepare_temporal_snapshots(
     df = df.sort(["datetime", "node_idx"])
 
     # unique timestamps (ns precision)
-    timestamps = df.select("datetime").unique().sort("datetime").to_series().to_list()
-    n_nodes = len(station_id_mapping)
-    n_features = len(feature_cols)
-    n_targets = len(target_cols)
+    timestamps = (
+        df.select("datetime")
+          .unique()
+          .sort("datetime")
+          .to_series()
+          .to_list()
+    )
+
+    total_ts = len(timestamps)
+    print(f"  Total snapshots to create: {total_ts:,}")
+
+    t0 = time.time()
 
     snapshots: List[Data] = []
-    for ts in timestamps:
+    for idx, ts in enumerate(timestamps):
         snap_df = df.filter(pl.col("datetime") == ts)
 
         # Allocate zeros and then fill positions we have data for
@@ -220,7 +229,13 @@ def prepare_temporal_snapshots(
             datetime=str(ts)  # keep timestamp for reference
         )
         snapshots.append(data_obj)
-    print(f"  Created {len(snapshots)} snapshots")
+
+        # progress log every 1000 snapshots or last one
+        if (idx + 1) % 1000 == 0 or idx + 1 == total_ts:
+            elapsed = time.time() - t0
+            print(f"    [{idx+1:,}/{total_ts:,}] snapshots built  |  {elapsed/60:.1f} min elapsed")
+
+    print(f"  Created {len(snapshots)} snapshots in { (time.time()-t0)/60:.1f} min")
     return snapshots
 
 def main():
