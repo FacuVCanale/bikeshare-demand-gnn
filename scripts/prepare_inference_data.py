@@ -130,25 +130,18 @@ def prepare_inference_data(
         end_date=str(end_date)
     )
 
-    inference_trips_with_weather_df = weather_collector.match_weather_to_trips(
-        trips_df=inference_trips_df.to_pandas(),
-        weather_df=weather_df
-    )
-    inference_trips_with_weather_df = pl.from_pandas(inference_trips_with_weather_df)
-    print("Weather data matched successfully.")
-
-    # fix: cast datetime columns to nanoseconds to match expectations
-    # of the feature engineering script and avoid schemaerror on join.
-    inference_trips_with_weather_df = inference_trips_with_weather_df.with_columns([
-        pl.col("fecha_origen_recorrido").cast(pl.Datetime("ns")),
-        pl.col("fecha_destino_recorrido").cast(pl.Datetime("ns")),
-    ])
-
     # 5. Convert inference trips to delta_t format (without historical features)
     print("Converting inference trips to delta_t format...")
-    # This calls a "private" method, which is necessary given the current structure
-    # of FeatureEngineer. This is a reasonable approach for a dedicated script.
-    inference_delta_df = fe._convert_to_delta_t(inference_trips_with_weather_df)
+    inference_delta_df = fe._convert_to_delta_t(inference_trips_df)
+
+    # Add weather data at delta_t level
+    print("Matching weather data to delta_t intervals…")
+    inference_delta_df = weather_collector.match_weather_to_delta(
+        delta_df=inference_delta_df,
+        weather_df=weather_df,
+        delta_t_minutes=delta_t_minutes
+    )
+    print("Weather data merged with delta_t dataframe.")
 
     # Add features that don't depend on historical context
     inference_delta_df = fe._add_time_features(inference_delta_df)

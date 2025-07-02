@@ -297,9 +297,9 @@ class FeatureEngineer:
         
         # Add only the three key weather features mentioned in approach document
         key_weather_features = [
-            'temperature_2m',
-            'relative_humidity_2m', 
-            'apparent_temperature'
+            'weather_temperature_2m',
+            'weather_relative_humidity_2m', 
+            'weather_apparent_temperature'
         ]
         
         # Check which of the key weather features are available

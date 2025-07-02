@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 import numpy as np
 from datetime import datetime, timedelta
+import polars as pl
 
 
 class WeatherDataCollector:
@@ -39,7 +40,7 @@ class WeatherDataCollector:
         # setup cached session for API requests
         cache_session = requests_cache.CachedSession(
             str(self.cache_dir / 'weather_cache'), 
-            expire_after=-1
+            expire_ =-1
         )
         retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
         self.openmeteo = openmeteo_requests.Client(session=retry_session)
@@ -406,3 +407,66 @@ class WeatherDataCollector:
             df['is_comfortable'] = ((df['temperature_2m'] >= 15) & (df['temperature_2m'] <= 25)).astype(int)
         
         return df 
+
+    def match_weather_to_delta(
+        self,
+        delta_df: 'pl.DataFrame',
+        weather_df: pd.DataFrame,
+        datetime_column: str = 'datetime',
+        delta_t_minutes: int = 30,
+        prefix: str = 'weather_'  # keep prefix consistent with rest of pipeline
+    ) -> 'pl.DataFrame':
+        """
+        Attach weather conditions to a delta-T dataframe (one row per time interval).
+
+        The function aligns each \`datetime\` in the delta_df to the nearest hour (or
+        to the exact timestamp if a matching record exists) and merges the
+        corresponding weather observation.
+
+        Args:
+            delta_df: polars DataFrame with a datetime column (e.g. 30-minute grid).
+            weather_df: Pandas DataFrame returned by `get_weather_data` containing an
+                hourly "date" column and weather variables.
+            datetime_column: Name of the datetime column in `delta_df`.
+            delta_t_minutes: Interval size of `delta_df` (default: 30).
+            prefix: Prefix to prepend to weather column names to avoid name clashes.
+
+        Returns:
+            The input `delta_df` with weather columns added.
+        """
+        import polars as pl  # local import to avoid optional dependency when class is unused
+        import numpy as np
+        from pandas.api.types import is_datetime64_any_dtype
+
+        if not is_datetime64_any_dtype(weather_df['date']):
+            weather_df['date'] = pd.to_datetime(weather_df['date'])
+
+        # floor weather timestamps to the same granularity as delta_t (e.g. 30min)
+        weather_df['datetime'] = weather_df['date'].dt.floor(f'{delta_t_minutes}T')
+
+        # drop the original date column to avoid confusion
+        weather_df = weather_df.drop(columns=['date'])
+
+        # Add prefix to weather feature names to be consistent with other parts of the pipeline
+        weather_df = weather_df.rename(columns={col: f"{prefix}{col}" for col in weather_df.columns if col != 'datetime'})
+
+        # convert to polars and ensure datetime precision
+        weather_pl = pl.from_pandas(weather_df).with_columns(
+            pl.col('datetime').cast(pl.Datetime('ns'))
+        )
+
+        # ensure datetime column in delta_df has ns precision
+        delta_df = delta_df.with_columns(
+            pl.col(datetime_column).cast(pl.Datetime('ns'))
+        )
+
+        # left join – keep all rows from delta_df
+        merged = delta_df.join(weather_pl, on='datetime', how='left')
+
+        # simple forward-fill of weather gaps per feature (optional but handy)
+        weather_cols = [c for c in merged.columns if c.startswith(prefix)]
+        if weather_cols:
+            merged = merged.sort(datetime_column).with_columns([
+                pl.col(c).fill_null(strategy='forward') for c in weather_cols
+            ])
+        return merged
