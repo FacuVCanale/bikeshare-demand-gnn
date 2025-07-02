@@ -108,9 +108,16 @@ def prepare_inference_data(
     )
     weather_df_30min_pl = pl.from_pandas(weather_df_30min)
 
-    # Round trip start time to the nearest 30min interval to use as a join key.
+    # fix: cast the trip start time to utc with nanosecond precision to match the
+    # timezone-aware weather data, preventing a schema error on join.
+    # we assume the source trip data is in the local buenos aires timezone.
     inference_trips_df = inference_trips_df.with_columns(
-        pl.col('fecha_origen_recorrido').dt.truncate(f"{delta_t_minutes}m").alias('weather_match_time')
+        pl.col('fecha_origen_recorrido')
+        .cast(pl.Datetime("ns"))
+        .dt.replace_time_zone("America/Argentina/Buenos_Aires", ambiguous='earliest')
+        .dt.convert_time_zone("UTC")
+        .dt.truncate(f"{delta_t_minutes}m")
+        .alias('weather_match_time')
     )
     
     # Prefix weather columns to avoid name collisions

@@ -190,8 +190,8 @@ class WeatherDataCollector:
                 weather_df = self.load_weather_data(str(file_path))
                 
                 # validate data completeness
-                expected_start = pd.to_datetime(start_date)
-                expected_end = pd.to_datetime(end_date)
+                expected_start = pd.to_datetime(start_date).tz_localize('UTC')
+                expected_end = pd.to_datetime(end_date).tz_localize('UTC')
                 actual_start = weather_df['date'].min()
                 actual_end = weather_df['date'].max()
                 
