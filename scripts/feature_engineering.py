@@ -178,6 +178,9 @@ class FeatureEngineer:
         if datetime_conversions:
             df = df.with_columns(datetime_conversions)
         
+        # Import datetime classes for time filtering and calculations
+        from datetime import datetime, timedelta
+        
         # Filter data to only include trips up to August 31st
         print("  Applying August 31st cutoff filter...")
         original_count = len(df)
@@ -207,7 +210,6 @@ class FeatureEngineer:
         print(f"  Time range: {start_time} to {end_time}")
         
         # Round to nearest delta_t interval using proper datetime arithmetic
-        from datetime import datetime, timedelta
         
         # Convert to total minutes since epoch for easier calculation
         epoch = datetime(1970, 1, 1)
