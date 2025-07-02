@@ -178,9 +178,33 @@ class FeatureEngineer:
         if datetime_conversions:
             df = df.with_columns(datetime_conversions)
         
-        # Create time range
+        # Filter data to only include trips up to August 31st
+        print("  Applying August 31st cutoff filter...")
+        original_count = len(df)
+        
+        # Extract year from the data to determine which August 31st to use
+        sample_year = df.select(pl.col('fecha_origen_recorrido').dt.year().min()).item()
+        cutoff_date = datetime(sample_year, 8, 31, 23, 59, 59)
+        print(f"  Using cutoff date: {cutoff_date}")
+        
+        # Filter out trips that start or end after August 31st
+        df = df.filter(
+            (pl.col('fecha_origen_recorrido') <= cutoff_date) &
+            (pl.col('fecha_destino_recorrido') <= cutoff_date)
+        )
+        
+        filtered_count = len(df)
+        removed_count = original_count - filtered_count
+        print(f"  Filtered trips: {filtered_count} remaining ({removed_count} removed after Aug 31)")
+        
+        if filtered_count == 0:
+            raise ValueError(f"No trips remain after filtering to August 31st, {sample_year}")
+        
+        # Create time range up to August 31st
         start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
-        end_time = df.select(pl.col('fecha_destino_recorrido').max()).item()
+        end_time = cutoff_date  # Always end at August 31st
+        
+        print(f"  Time range: {start_time} to {end_time}")
         
         # Round to nearest delta_t interval using proper datetime arithmetic
         from datetime import datetime, timedelta
