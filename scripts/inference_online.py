@@ -3,12 +3,12 @@ from pathlib import Path
 import polars as pl
 import torch
 import sys
+import pandas as pd
 
-# Import feature engineering
 sys.path.append(str(Path(__file__).parent))
 from feature_engineering import load_and_process_data
 
-# Import GNN dataset utilities
+# import GNN dataset utilities
 from prepare_gnn_dataset import (
     load_station_coordinates_from_data,
     create_station_adjacency_matrix,
@@ -17,17 +17,39 @@ from prepare_gnn_dataset import (
     prepare_data_for_gnn
 )
 
-def trips_to_features(trips_path, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero'):
+# import weather utilities
+sys.path.append(str(Path(__file__).parent.parent))
+from src.features.weather import WeatherDataCollector
+
+def trips_to_features(trips_path, weather_path=None, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero'):
     """
     Load trips and generate delta T features using feature engineering pipeline.
+    If weather_path is provided, merge weather data before feature engineering.
     """
-    features_df, _ = load_and_process_data(
-        data_path=trips_path,
-        delta_t_minutes=delta_t_minutes,
-        fill_nulls=fill_nulls,
-        fill_strategy=fill_strategy,
-        create_splits=False
-    )
+    print(f"Loading trips from {trips_path}")
+    if weather_path is not None:
+        print(f"Loading weather from {weather_path}")
+        trips_df = pd.read_csv(trips_path, parse_dates=True)
+        weather_df = pd.read_csv(weather_path, parse_dates=['date'])
+        collector = WeatherDataCollector()
+        trips_df = collector.match_weather_to_trips(trips_df, weather_df)
+        # convert to polars for feature engineering
+        features_df, _ = load_and_process_data(
+            data_path=None,  
+            delta_t_minutes=delta_t_minutes,
+            fill_nulls=fill_nulls,
+            fill_strategy=fill_strategy,
+            create_splits=False,
+            df=pl.from_pandas(trips_df)
+        )
+    else:
+        features_df, _ = load_and_process_data(
+            data_path=trips_path,
+            delta_t_minutes=delta_t_minutes,
+            fill_nulls=fill_nulls,
+            fill_strategy=fill_strategy,
+            create_splits=False
+        )
     return features_df
 
 def features_to_gnn(features_df, target_cols, k_neighbors=5, distance_threshold=5.0):
@@ -50,6 +72,7 @@ def main():
     parser = argparse.ArgumentParser(description='Online inference: trips to GNN-ready batch')
     parser.add_argument('--input_trips', type=str, required=True, help='Path to trips.parquet or .csv')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for GNN batch')
+    parser.add_argument('--weather_data', type=str, default='data/meteo/hourly_open_meteo.csv', help='Path to weather CSV file')
     parser.add_argument('--target', type=str, default='arrivals', choices=['arrivals', 'departures', 'both'])
     parser.add_argument('--delta_t_minutes', type=int, default=30)
     parser.add_argument('--k_neighbors', type=int, default=5)
@@ -67,6 +90,7 @@ def main():
 
     features_df = trips_to_features(
         trips_path=args.input_trips,
+        weather_path=args.weather_data,
         delta_t_minutes=args.delta_t_minutes,
         fill_nulls=args.fill_nulls,
         fill_strategy=args.fill_strategy
