@@ -89,8 +89,8 @@ def main():
 
     # Predicción
     with torch.no_grad():
-        data_obj = Data(x=x, edge_index=edge_index)
-        y_pred = model(data_obj)
+            data_obj = Data(x=x, edge_index=edge_index)
+            y_pred = model(data_obj)
 
     # Evaluación
     results = evaluate_metrics(y, y_pred, metrics)
