@@ -169,6 +169,22 @@ def main():
         preds = model(data_inf.to(args.device))
     preds_np = preds.cpu().numpy()
 
+    # ----------------------------------------------------------
+    # optional: compute R² if ground-truth targets are present
+    # ----------------------------------------------------------
+    if "targets" in meta and all(t in df.columns for t in meta["targets"]):
+        from sklearn.metrics import r2_score
+
+        y_true = df.select(meta["targets"]).to_numpy()
+        if y_true.shape[1] == 1:
+            y_true = y_true.flatten()
+            r2 = r2_score(y_true, preds_np.flatten())
+        else:
+            r2 = r2_score(y_true, preds_np, multioutput='uniform_average')
+        print(f"R² on provided targets: {r2:.4f}")
+    else:
+        print("Ground-truth target columns not found – skipping R² computation.")
+
     # Save predictions alongside original rows
     out_df = df.with_columns(pl.Series("prediction", preds_np.flatten()))
     Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
