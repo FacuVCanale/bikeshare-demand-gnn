@@ -163,8 +163,8 @@ def prepare_data_for_gnn(
     
     # Add node index for graph structure
     df_agg = df_agg.with_columns([
-        pl.col('station_id').map_elements(
-            lambda x: station_id_mapping[x], 
+        pl.col('station_id').replace_strict(
+            station_id_mapping, 
             return_dtype=pl.Int64
         ).alias('node_idx')
     ])
@@ -173,12 +173,12 @@ def prepare_data_for_gnn(
     df_agg = df_agg.sort('node_idx')
     
     # Extract aggregated features and targets
-    features = df_agg.select(feature_cols).to_numpy(writable=False)
-    targets = df_agg.select(target_cols).to_numpy(writable=False)
+    features = df_agg.select(feature_cols).to_numpy()
+    targets = df_agg.select(target_cols).to_numpy()
     
     # Handle NaN values
-    features = np.nan_to_num(features, copy=False, nan=0.0)
-    targets = np.nan_to_num(targets, copy=False, nan=0.0)
+    features = np.nan_to_num(features, copy=True, nan=0.0)
+    targets = np.nan_to_num(targets, copy=True, nan=0.0)
     
     # Convert to tensors
     x = torch.tensor(features, dtype=torch.float32)
