@@ -160,8 +160,6 @@ class FeatureEngineer:
             
         # Ensure datetime columns and station_id consistency
         df = df.with_columns([
-            pl.col('fecha_origen_recorrido').str.to_datetime(),
-            pl.col('fecha_destino_recorrido').str.to_datetime(),
             pl.col('id_estacion_origen').cast(pl.Int64),
             pl.col('id_estacion_destino').cast(pl.Int64)
         ])
