@@ -399,6 +399,9 @@ class FeatureEngineer:
         Add station-wise features focusing on past vs future state.
         """
         print("Adding station features...")
+
+        # ensure chronological order before any lag/rolling operations to avoid data leakage
+        df = df.sort(['station_id', 'datetime'])
         
         # Last delta T features and 1 week lag features
         lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
@@ -481,12 +484,6 @@ class FeatureEngineer:
                 if null_count_before > 0:
                     if self.fill_strategy == 'zero':
                         fill_exprs.append(pl.col(feature).fill_null(0))
-                    elif self.fill_strategy == 'mean':
-                        mean_val = df.select(pl.col(feature).mean()).item()
-                        fill_exprs.append(pl.col(feature).fill_null(mean_val))
-                    elif self.fill_strategy == 'median':
-                        median_val = df.select(pl.col(feature).median()).item()
-                        fill_exprs.append(pl.col(feature).fill_null(median_val))
                     elif self.fill_strategy == 'forward_fill':
                         fill_exprs.append(
                             pl.col(feature).fill_null(strategy='forward').over('station_id').fill_null(0)
@@ -622,18 +619,6 @@ class FeatureEngineer:
                     fill_exprs = [pl.col(col).fill_null(0) for col in null_cols]
                     df = df.with_columns(fill_exprs)
                     
-                elif self.fill_strategy == 'mean':
-                    for col in null_cols:
-                        mean_val = df.select(pl.col(col).mean()).item()
-                        df = df.with_columns(pl.col(col).fill_null(mean_val))
-                        print(f"    {col}: filled with mean={mean_val:.3f}")
-                        
-                elif self.fill_strategy == 'median':
-                    for col in null_cols:
-                        median_val = df.select(pl.col(col).median()).item()
-                        df = df.with_columns(pl.col(col).fill_null(median_val))
-                        print(f"    {col}: filled with median={median_val:.3f}")
-                        
                 elif self.fill_strategy == 'forward_fill':
                     # Sort by station_id and datetime first for proper forward fill
                     df = df.sort(['station_id', 'datetime'])
