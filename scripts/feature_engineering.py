@@ -341,7 +341,7 @@ class FeatureEngineer:
                         null_weather_df = null_weather_df.with_columns(
                             (pl.col('datetime').diff().dt.total_seconds() > (self.delta_t_minutes * 60)).fill_null(True).alias('is_new_block')
                         ).with_columns(
-                            pl.col('is_new_block').cumsum().alias('block_id')
+                            pl.col('is_new_block').cum_sum().alias('block_id')
                         )
 
                         # Get min and max for each block to define the ranges
