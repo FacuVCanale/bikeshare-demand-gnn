@@ -349,6 +349,24 @@ class GNNTrainer:
         Returns:
             DataLoader or iterable
         """
+        # support datasets provided as list/tuple of snapshot graphs
+        # treat each snapshot graph as an independent training sample and use
+        # standard PyG DataLoader for batching
+        if isinstance(data, (list, tuple)):
+            from torch_geometric.loader import DataLoader as GeometricDataLoader
+
+            batch_size = self.batch_size or 32  # default snapshot batch size
+            loader = GeometricDataLoader(
+                list(data),  # ensure list type
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=0
+            )
+            self.logger.info(
+                f"Created snapshot DataLoader: {len(data)} graphs, batch_size={batch_size}, shuffle={shuffle}"
+            )
+            return loader
+
         use_sampling = self._determine_batching_strategy(data)
         
         if use_sampling and self.batch_size is not None:
@@ -657,8 +675,9 @@ class GNNTrainer:
         if self.optimizer is None:
             self.setup_training()
         
-        # analyze target distribution if requested
-        if hasattr(self, 'loss_config') and self.loss_config.get('analyze_targets', False):
+        # analyze target distribution if requested and train_data is a Data object
+        if (hasattr(self, 'loss_config') and self.loss_config.get('analyze_targets', False) and
+            isinstance(train_data, Data)):
             self.analyze_training_targets(train_data, train_mask)
         
         # create data loaders
@@ -1304,10 +1323,16 @@ def train_gnn_experiment(
     Returns:
         Tuple of (trained_model, results_dict)
     """
-    # create model
-    num_features = train_data.x.shape[1]
-    num_targets = train_data.y.shape[1] if len(train_data.y.shape) > 1 else 1
+    # detect snapshot list
+    if isinstance(train_data, (list, tuple)) and len(train_data):
+        sample_graph = train_data[0]
+        num_features = sample_graph.x.shape[1]
+        num_targets = sample_graph.y.shape[1] if len(sample_graph.y.shape) > 1 else 1
+    else:
+        num_features = train_data.x.shape[1]
+        num_targets = train_data.y.shape[1] if len(train_data.y.shape) > 1 else 1
     
+    # create model
     model = create_gnn_model(
         model_type=model_type,
         num_features=num_features,

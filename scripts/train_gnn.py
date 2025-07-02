@@ -58,7 +58,11 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
     test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
     
     # check if in production mode (empty val/test data)
-    production_mode = (len(val_data.x) == 0 and len(test_data.x) == 0)
+    if isinstance(val_data, (list, tuple)) and isinstance(test_data, (list, tuple)):
+        production_mode = (len(val_data) == 0 and len(test_data) == 0)
+    else:
+        production_mode = (getattr(val_data, 'x', torch.empty(0)).numel() == 0 and
+                           getattr(test_data, 'x', torch.empty(0)).numel() == 0)
     if production_mode:
         print("  Detected PRODUCTION MODE: No validation/test data, training with all available data")
     
@@ -203,16 +207,34 @@ def run_single_experiment(
     print(f"{'='*60}")
     
     # print data info
-    print(f"Dataset Information:")
-    print(f"  Train nodes: {data['train_data'].x.shape[0]}")
-    if production_mode or data.get('production_mode', False):
-        print(f"  PRODUCTION MODE: Using all data for training (no validation/test)")
+    print("Dataset Information:")
+
+    # detect snapshot mode (list of Data objects)
+    is_snapshot = isinstance(data['train_data'], (list, tuple))
+
+    if is_snapshot:
+        num_snapshots = len(data['train_data'])
+        nodes_per_snapshot = data['train_data'][0].x.shape[0] if num_snapshots else 0
+        edges_per_snapshot = data['train_data'][0].edge_index.shape[1] if num_snapshots else 0
+
+        print(f"  Train snapshots: {num_snapshots}")
+        if not (production_mode or data.get('production_mode', False)):
+            print(f"  Val snapshots: {len(data['val_data'])}")
+            print(f"  Test snapshots: {len(data['test_data'])}")
+        print(f"  Nodes per snapshot: {nodes_per_snapshot}")
+        print(f"  Edges per snapshot: {edges_per_snapshot}")
     else:
-        print(f"  Val nodes: {data['val_data'].x.shape[0]}")
-        print(f"  Test nodes: {data['test_data'].x.shape[0]}")
+        # single graph mode
+        print(f"  Train nodes: {data['train_data'].x.shape[0]}")
+        if production_mode or data.get('production_mode', False):
+            print("  PRODUCTION MODE: Using all data for training (no validation/test)")
+        else:
+            print(f"  Val nodes: {data['val_data'].x.shape[0]}")
+            print(f"  Test nodes: {data['test_data'].x.shape[0]}")
+        print(f"  Graph edges: {data['train_data'].edge_index.shape[1]}")
+
     print(f"  Features: {data['n_features']}")
     print(f"  Targets: {data['n_targets']}")
-    print(f"  Graph edges: {data['train_data'].edge_index.shape[1]}")
     
     # create and print model summary
     model = create_gnn_model(
@@ -223,7 +245,10 @@ def run_single_experiment(
     )
     
     print(f"\nModel Summary:")
-    print_model_summary(model, (data['train_data'].x.shape[0], data['n_features']))
+    if is_snapshot:
+        print_model_summary(model, (nodes_per_snapshot, data['n_features']))
+    else:
+        print_model_summary(model, (data['train_data'].x.shape[0], data['n_features']))
     
     # train model
     actual_production_mode = production_mode or data.get('production_mode', False)
