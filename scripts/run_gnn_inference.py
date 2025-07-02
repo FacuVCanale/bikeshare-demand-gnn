@@ -74,12 +74,10 @@ def load_trained_model(model_path: Path, num_features: int, num_targets: int):
     model_type = mapping.get(str(raw_type).lower(), str(raw_type).lower())
 
     # configuration stored in checkpoint (optional)
-    config = {}
-    if "config" in ckpt and isinstance(ckpt["config"], dict):
-        config = ckpt["config"].get("model_params", ckpt["config"].get("model_params", {}))
-    elif "hyperparameters" in ckpt:
-        # optuna/trainer may have stored params under this key
-        config = ckpt["hyperparameters"]
+    if "model_init_params" in ckpt:
+        config = ckpt["model_init_params"]
+    elif "config" in ckpt and isinstance(ckpt["config"], dict):
+        config = ckpt["config"].get("model_params", {})
 
     # ensure we only keep args that the factory will accept
     allowed_keys = {"hidden_dim", "num_layers", "num_heads", "dropout", "use_batch_norm", "activation", "attention_dropout", "aggregation", "use_temporal", "temporal_dim"}
