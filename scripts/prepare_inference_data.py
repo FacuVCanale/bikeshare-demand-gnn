@@ -52,6 +52,11 @@ def prepare_inference_data(
     print(f"Loading historical processed data from: {historical_data_path}")
     historical_df = pl.read_csv(historical_data_path, try_parse_dates=True)
 
+    # fix: ensure historical datetime column has nanosecond precision to match
+    # the dataframe it will be concatenated with.
+    if "datetime" in historical_df.columns:
+        historical_df = historical_df.with_columns(pl.col('datetime').cast(pl.Datetime("ns")))
+
     # 2. Load new RAW trip data for inference
     print(f"Loading inference trip data from: {inference_trips_path}")
     inference_trips_df = pl.read_csv(inference_trips_path, try_parse_dates=True)
