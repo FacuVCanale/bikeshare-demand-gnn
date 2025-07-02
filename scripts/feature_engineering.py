@@ -186,9 +186,15 @@ class FeatureEngineer:
         original_count = len(df)
         
         # Extract year from the data to determine which August 31st to use
-        sample_year = df.select(pl.col('fecha_origen_recorrido').dt.year().min()).item()
+        min_year = df.select(pl.col('fecha_origen_recorrido').dt.year().min()).item()
+        max_year = df.select(pl.col('fecha_origen_recorrido').dt.year().max()).item()
+        
+        # Use the most recent year that has data
+        sample_year = max_year
         cutoff_date = datetime(sample_year, 8, 31, 23, 59, 59)
-        print(f"  Using cutoff date: {cutoff_date}")
+        
+        print(f"  Data spans years: {min_year} to {max_year}")
+        print(f"  Using cutoff date: {cutoff_date} (most recent year)")
         
         # Filter out trips that start or end after August 31st
         df = df.filter(
