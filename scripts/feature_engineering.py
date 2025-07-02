@@ -168,30 +168,8 @@ class FeatureEngineer:
         start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
         end_time = df.select(pl.col('fecha_destino_recorrido').max()).item()
         
-        # ------------------------------------------------------------------
-        # DEBUG: inspect raw time bounds before any rounding/truncation
-        # ------------------------------------------------------------------
-        print("  Raw datetime bounds (before rounding):")
-        print(f"    earliest origin      : {start_time}")
-        print(f"    latest destination   : {end_time}")
-
-        # sanity-check: if the latest destination is >24h after the latest origin, it
-        # is probably an outlier (e.g. badly-parsed date) that would lead to many
-        # empty future intervals. cap the range to the latest origin in that case.
-        origin_max_time = df.select(pl.col('fecha_origen_recorrido').max()).item()
-        time_gap_hours = (end_time - origin_max_time).total_seconds() / 3600
-        if time_gap_hours > 24:
-            print(
-                f"  WARNING: destination/origin gap of {time_gap_hours:.1f}h detected. "
-                "Capping end_time to latest origin to avoid generating extra slots."
-            )
-            end_time = origin_max_time
-        
         # Round to nearest delta_t interval using proper datetime arithmetic
         from datetime import datetime, timedelta
-        
-        # After potential capping, print the effective end_time to be used
-        print(f"  Effective end_time used for interval generation: {end_time}")
         
         # Convert to total minutes since epoch for easier calculation
         epoch = datetime(1970, 1, 1)
@@ -208,8 +186,6 @@ class FeatureEngineer:
         
         # Create time index as polars DataFrame
         time_index = pl.datetime_range(start_time, end_time, f'{self.delta_t_minutes}m', eager=True)
-        
-        print(f"  Time range after rounding: {start_time} -> {end_time}  ({len(time_index)} intervals)")
         
         if station_id is not None:
             # Single station case
@@ -321,9 +297,9 @@ class FeatureEngineer:
         
         # Add only the three key weather features mentioned in approach document
         key_weather_features = [
-            'weather_temperature_2m',
-            'weather_relative_humidity_2m', 
-            'weather_apparent_temperature'
+            'temperature_2m',
+            'relative_humidity_2m', 
+            'apparent_temperature'
         ]
         
         # Check which of the key weather features are available
