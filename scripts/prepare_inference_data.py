@@ -64,6 +64,31 @@ def prepare_inference_data(
     print(f"Loading inference trip data from: {inference_trips_path}")
     inference_trips_df = pl.read_csv(inference_trips_path, try_parse_dates=True)
 
+    # DEBUG: ensure datetime columns were correctly parsed and inspect their ranges
+    date_cols = ['fecha_origen_recorrido', 'fecha_destino_recorrido']
+    for _col in date_cols:
+        # if the column was not auto-parsed as datetime, attempt manual parsing (day-first format)
+        if inference_trips_df[_col].dtype != pl.Datetime:
+            print(f"[DEBUG] Column '{_col}' not parsed as datetime – attempting '%d/%m/%Y %H:%M:%S' format parse…")
+            inference_trips_df = inference_trips_df.with_columns(
+                pl.col(_col).str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False)
+            )
+        # cast to ns precision for downstream consistency
+        inference_trips_df = inference_trips_df.with_columns(
+            pl.col(_col).cast(pl.Datetime("ns"))
+        )
+
+    # print min/max after parsing for quick verification
+    print("[DEBUG] Inference trips datetime ranges (after parsing):")
+    print("  fecha_origen_recorrido:",
+          inference_trips_df.select(pl.col('fecha_origen_recorrido').min()).item(),
+          "->",
+          inference_trips_df.select(pl.col('fecha_origen_recorrido').max()).item())
+    print("  fecha_destino_recorrido:",
+          inference_trips_df.select(pl.col('fecha_destino_recorrido').min()).item(),
+          "->",
+          inference_trips_df.select(pl.col('fecha_destino_recorrido').max()).item())
+
     # 3. Load metadata and instantiate FeatureEngineer
     if metadata_path is None:
         metadata_path = Path(historical_data_path).parent / 'feature_metadata.json'
