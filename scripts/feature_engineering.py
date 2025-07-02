@@ -23,7 +23,7 @@ class FeatureEngineer:
     and creating station-level features for bike prediction.
     """
     
-    def __init__(self, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero'):
+    def __init__(self, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero', use_rolling_means=True):
         """
         Initialize the feature engineer.
         
@@ -31,10 +31,12 @@ class FeatureEngineer:
             delta_t_minutes (int): Time interval in minutes (default: 30)
             fill_nulls (bool): Whether to fill null values (default: True)
             fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
+            use_rolling_means (bool): Whether to use rolling means for station features
         """
         self.delta_t_minutes = delta_t_minutes
         self.fill_nulls = fill_nulls
         self.fill_strategy = fill_strategy
+        self.use_rolling_means = use_rolling_means
         self.feature_columns = []
         
     def process_data(self, df, station_id=None):
@@ -297,9 +299,9 @@ class FeatureEngineer:
         
         # Add only the three key weather features mentioned in approach document
         key_weather_features = [
-            'temperature_2m',
-            'relative_humidity_2m', 
-            'apparent_temperature'
+            'weather_temperature_2m',
+            'weather_relative_humidity_2m', 
+            'weather_apparent_temperature'
         ]
         
         # Check which of the key weather features are available
@@ -403,27 +405,21 @@ class FeatureEngineer:
         # ensure chronological order before any lag/rolling operations to avoid data leakage
         df = df.sort(['station_id', 'datetime'])
         
-        # Last delta T features and 1 week lag features
-        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
-        
-        df = df.with_columns([
+        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)
+
+        # always include last delta t
+        lag_exprs = [
             pl.col('arrivals').shift(1).over('station_id').alias('arrivals_last_dt'),
-            pl.col('departures').shift(1).over('station_id').alias('departures_last_dt'),
-            pl.col('arrivals').shift(lag_periods).over('station_id').alias('arrivals_1w_lag'),
-            pl.col('departures').shift(lag_periods).over('station_id').alias('departures_1w_lag')
-        ])
-        
-        # Print null counts for last delta T features
-        arrivals_last_nulls = df.select(pl.col('arrivals_last_dt').is_null().sum()).item()
-        departures_last_nulls = df.select(pl.col('departures_last_dt').is_null().sum()).item()
-        print(f"  arrivals_last_dt: {arrivals_last_nulls} nulls ({arrivals_last_nulls/len(df)*100:.1f}%)")
-        print(f"  departures_last_dt: {departures_last_nulls} nulls ({departures_last_nulls/len(df)*100:.1f}%)")
-        
-        # Print null counts for 1 week lag features
-        arrivals_1w_nulls = df.select(pl.col('arrivals_1w_lag').is_null().sum()).item()
-        departures_1w_nulls = df.select(pl.col('departures_1w_lag').is_null().sum()).item()
-        print(f"  arrivals_1w_lag: {arrivals_1w_nulls} nulls ({arrivals_1w_nulls/len(df)*100:.1f}%)")
-        print(f"  departures_1w_lag: {departures_1w_nulls} nulls ({departures_1w_nulls/len(df)*100:.1f}%)")
+            pl.col('departures').shift(1).over('station_id').alias('departures_last_dt')
+        ]
+
+        if self.use_rolling_means:
+            lag_exprs.extend([
+                pl.col('arrivals').shift(lag_periods).over('station_id').alias('arrivals_1w_lag'),
+                pl.col('departures').shift(lag_periods).over('station_id').alias('departures_1w_lag')
+            ])
+
+        df = df.with_columns(lag_exprs)
         
         # Create time slot identifier for same-time-across-weeks moving averages
         # Combine hour and day_of_week to create unique time slots
@@ -447,19 +443,18 @@ class FeatureEngineer:
         # Sort by station_id, time_slot, and datetime for proper window operations
         df = df.sort(['station_id', 'time_slot', 'datetime'])
         
-        # 4-week and 12-week moving averages for same time slots
-        print("    Computing 4-week and 12-week moving averages (excluding current interval)...")
-        df = df.with_columns([
-            # Shift 1 interval back to avoid using value at t (prevents leakage)
-            pl.col('arrivals').shift(1).rolling_mean(window_size=4, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
-            pl.col('departures').shift(1).rolling_mean(window_size=4, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
-            pl.col('arrivals').shift(1).rolling_mean(window_size=12, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
-            pl.col('departures').shift(1).rolling_mean(window_size=12, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
-        ])
+        if self.use_rolling_means:
+            print("    Computing 4-week and 12-week moving averages (excluding current interval)...")
+            df = df.with_columns([
+                pl.col('arrivals').shift(1).rolling_mean(window_size=4, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
+                pl.col('departures').shift(1).rolling_mean(window_size=4, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
+                pl.col('arrivals').shift(1).rolling_mean(window_size=12, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
+                pl.col('departures').shift(1).rolling_mean(window_size=12, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
+            ])
         
         # Print null counts for moving averages
         ma_cols = ['arrivals_ma4_weekly', 'departures_ma4_weekly', 'arrivals_ma12_weekly', 'departures_ma12_weekly']
@@ -468,12 +463,13 @@ class FeatureEngineer:
             print(f"  {col}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
         
         # Conditionally fill missing values in station features
-        station_features = [
-            'arrivals_last_dt', 'departures_last_dt',
-            'arrivals_1w_lag', 'departures_1w_lag',
-            'arrivals_ma4_weekly', 'departures_ma4_weekly',
-            'arrivals_ma12_weekly', 'departures_ma12_weekly'
-        ]
+        station_features = ['arrivals_last_dt', 'departures_last_dt']
+        if self.use_rolling_means:
+            station_features.extend([
+                'arrivals_1w_lag', 'departures_1w_lag',
+                'arrivals_ma4_weekly', 'departures_ma4_weekly',
+                'arrivals_ma12_weekly', 'departures_ma12_weekly'
+            ])
         
         if self.fill_nulls:
             print(f"  Filling station feature nulls with strategy: {self.fill_strategy}...")
@@ -690,8 +686,8 @@ class FeatureEngineer:
 
 
 def load_and_process_data(data_path, station_id=None, delta_t_minutes=30, 
-                         fill_nulls=True, fill_strategy='zero', create_splits=False,
-                         train_split=0.7, val_split=0.15, output_dir=None):
+                         fill_nulls=True, fill_strategy='zero', use_rolling_means=True,
+                         create_splits=False, train_split=0.7, val_split=0.15, output_dir=None):
     """
     Convenience function to load and process data.
     
@@ -701,6 +697,7 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
         delta_t_minutes (int): Time interval in minutes
         fill_nulls (bool): Whether to fill null values (default: True)
         fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
+        use_rolling_means (bool): Whether to use rolling means for station features (default: True)
         create_splits (bool): Whether to create train/val/test splits (default: False)
         train_split (float): Fraction of data for training (default: 0.7)
         val_split (float): Fraction of data for validation (default: 0.15)
@@ -739,7 +736,8 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
     # Initialize feature engineer
     fe = FeatureEngineer(delta_t_minutes=delta_t_minutes, 
                         fill_nulls=fill_nulls, 
-                        fill_strategy=fill_strategy)
+                        fill_strategy=fill_strategy,
+                        use_rolling_means=use_rolling_means)
     
     # Process data
     processed_df = fe.process_data(df, station_id=station_id)
@@ -874,15 +872,16 @@ def save_splits_to_files(splits, output_dir, feature_engineer):
                 ]
             }
         },
-        'processing_config': {
-            'fill_nulls': feature_engineer.fill_nulls,
-            'fill_strategy': feature_engineer.fill_strategy,
-            'created_features': {
-                'climate': bool([f for f in feature_names if 'weather_' in f]),
-                'station': bool([f for f in feature_names if any(x in f for x in ['arrivals_', 'departures_'])]),
-                'time': bool([f for f in feature_names if any(x in f for x in ['day_of_week', 'is_weekend'])]),
+                    'processing_config': {
+                'fill_nulls': feature_engineer.fill_nulls,
+                'fill_strategy': feature_engineer.fill_strategy,
+                'use_rolling_means': feature_engineer.use_rolling_means,
+                'created_features': {
+                    'climate': bool([f for f in feature_names if 'weather_' in f]),
+                    'station': bool([f for f in feature_names if any(x in f for x in ['arrivals_', 'departures_'])]),
+                    'time': bool([f for f in feature_names if any(x in f for x in ['day_of_week', 'is_weekend'])]),
+                }
             }
-        }
     }
     
     # Save metadata
@@ -931,6 +930,9 @@ def main():
     parser.add_argument('--fill_strategy', type=str, default='zero',
                         choices=['zero', 'mean', 'median', 'forward_fill'],
                         help='Strategy for filling nulls (default: zero)')
+    parser.add_argument('--use_rolling_means', type=str, default='True',
+                        choices=['True', 'False'],
+                        help='Whether to use rolling means for station features (default: True)')
     parser.add_argument('--train_split', type=float, default=0.7,
                         help='Fraction of data for training (default: 0.7)')
     parser.add_argument('--val_split', type=float, default=0.15,
@@ -939,6 +941,9 @@ def main():
                         help='Do not create train/val/test splits, just process features')
     
     args = parser.parse_args()
+    
+    # Convert string boolean to actual boolean
+    use_rolling_means = args.use_rolling_means.lower() == 'true'
     
     # Validate split ratios
     if not args.no_splits:
@@ -958,6 +963,7 @@ def main():
     print(f"Time interval: {args.delta_t_minutes} minutes")
     print(f"Null handling: {'Enabled' if args.fill_nulls else 'Disabled'}" + 
           (f" (strategy: {args.fill_strategy})" if args.fill_nulls else ""))
+    print(f"Rolling means: {'Enabled' if use_rolling_means else 'Disabled'}")
     print(f"Create splits: {'No' if args.no_splits else 'Yes'}")
     
     if args.no_splits:
@@ -968,6 +974,7 @@ def main():
             delta_t_minutes=args.delta_t_minutes,
             fill_nulls=args.fill_nulls,
             fill_strategy=args.fill_strategy,
+            use_rolling_means=use_rolling_means,
             create_splits=False
         )
         
@@ -1004,6 +1011,7 @@ def main():
             'processing_config': {
                 'fill_nulls': fe.fill_nulls,
                 'fill_strategy': fe.fill_strategy,
+                'use_rolling_means': fe.use_rolling_means,
                 'station_filter': args.station_id
             }
         }
@@ -1028,6 +1036,7 @@ def main():
             delta_t_minutes=args.delta_t_minutes,
             fill_nulls=args.fill_nulls,
             fill_strategy=args.fill_strategy,
+            use_rolling_means=use_rolling_means,
             create_splits=True,
             train_split=args.train_split,
             val_split=args.val_split,

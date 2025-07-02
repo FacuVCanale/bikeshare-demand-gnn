@@ -99,6 +99,7 @@ def prepare_inference_data(
         delta_t_minutes = 30
         fill_nulls = True
         fill_strategy = 'zero'
+        use_rolling_means = True
     else:
         print(f"Loading metadata from {metadata_path}")
         with open(metadata_path, 'r') as f:
@@ -106,11 +107,13 @@ def prepare_inference_data(
         delta_t_minutes = metadata['delta_t_minutes']
         fill_nulls = metadata['processing_config']['fill_nulls']
         fill_strategy = metadata['processing_config']['fill_strategy']
+        use_rolling_means = metadata['processing_config'].get('use_rolling_means', True)
 
     fe = FeatureEngineer(
         delta_t_minutes=delta_t_minutes,
         fill_nulls=fill_nulls,
-        fill_strategy=fill_strategy
+        fill_strategy=fill_strategy,
+        use_rolling_means=use_rolling_means
     )
     print(f"FeatureEngineer initialized with delta_t={delta_t_minutes} mins, fill_strategy='{fill_strategy}'")
 

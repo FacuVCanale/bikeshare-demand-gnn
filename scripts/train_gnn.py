@@ -57,6 +57,11 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
     val_data = torch.load(data_path / 'val_data.pt', weights_only=False)
     test_data = torch.load(data_path / 'test_data.pt', weights_only=False)
     
+    # check if in production mode (empty val/test data)
+    production_mode = (len(val_data.x) == 0 and len(test_data.x) == 0)
+    if production_mode:
+        print("  Detected PRODUCTION MODE: No validation/test data, training with all available data")
+    
     # load metadata
     with open(data_path / 'train_feature_names.json', 'r') as f:
         train_metadata = json.load(f)
@@ -72,7 +77,8 @@ def load_gnn_data(data_dir: str) -> Dict[str, Any]:
         'target_names': train_metadata['targets'],
         'n_features': train_metadata['n_features'],
         'n_targets': train_metadata['n_targets'],
-        'processing_config': processing_config
+        'processing_config': processing_config,
+        'production_mode': production_mode
     }
 
 
@@ -176,7 +182,8 @@ def run_single_experiment(
     model_type: str,
     data: Dict[str, Any],
     config: Dict[str, Any],
-    experiment_name: str = None
+    experiment_name: str = None,
+    production_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Run a single GNN training experiment.
@@ -186,6 +193,7 @@ def run_single_experiment(
         data: Data dictionary
         config: Model configuration
         experiment_name: Name for the experiment
+        production_mode: Whether to run in production mode (no validation)
         
     Returns:
         Experiment results
@@ -197,8 +205,11 @@ def run_single_experiment(
     # print data info
     print(f"Dataset Information:")
     print(f"  Train nodes: {data['train_data'].x.shape[0]}")
-    print(f"  Val nodes: {data['val_data'].x.shape[0]}")
-    print(f"  Test nodes: {data['test_data'].x.shape[0]}")
+    if production_mode or data.get('production_mode', False):
+        print(f"  PRODUCTION MODE: Using all data for training (no validation/test)")
+    else:
+        print(f"  Val nodes: {data['val_data'].x.shape[0]}")
+        print(f"  Test nodes: {data['test_data'].x.shape[0]}")
     print(f"  Features: {data['n_features']}")
     print(f"  Targets: {data['n_targets']}")
     print(f"  Graph edges: {data['train_data'].edge_index.shape[1]}")
@@ -215,17 +226,32 @@ def run_single_experiment(
     print_model_summary(model, (data['train_data'].x.shape[0], data['n_features']))
     
     # train model
-    trained_model, results = train_gnn_experiment(
-        model_type=model_type,
-        train_data=data['train_data'],
-        val_data=data['val_data'],
-        test_data=data['test_data'],
-        config=config,
-        experiment_name=experiment_name
-    )
+    actual_production_mode = production_mode or data.get('production_mode', False)
+    
+    if actual_production_mode:
+        # Production mode: use None for val_data to disable validation
+        trained_model, results = train_gnn_experiment(
+            model_type=model_type,
+            train_data=data['train_data'],
+            val_data=None,
+            test_data=data['train_data'],  # Use train data for "test" evaluation
+            config=config,
+            experiment_name=experiment_name
+        )
+        print(f"\nProduction Mode Results (evaluated on training data):")
+    else:
+        # Normal mode: use validation data
+        trained_model, results = train_gnn_experiment(
+            model_type=model_type,
+            train_data=data['train_data'],
+            val_data=data['val_data'],
+            test_data=data['test_data'],
+            config=config,
+            experiment_name=experiment_name
+        )
+        print(f"\nFinal Results:")
     
     # print results
-    print(f"\nFinal Results:")
     test_metrics = results['test_metrics']
     for metric, value in test_metrics.items():
         print(f"  {metric}: {value:.4f}")
@@ -236,7 +262,8 @@ def run_single_experiment(
 def run_model_comparison(
     data: Dict[str, Any],
     models_to_compare: List[str] = None,
-    save_results: bool = True
+    save_results: bool = True,
+    production_mode: bool = False
 ) -> Dict[str, Dict[str, Any]]:
     """
     Run comparison between different GNN models.
@@ -245,6 +272,7 @@ def run_model_comparison(
         data: Data dictionary
         models_to_compare: List of model types to compare
         save_results: Whether to save comparison results
+        production_mode: Whether to run in production mode
         
     Returns:
         Dictionary of results for each model
@@ -271,7 +299,8 @@ def run_model_comparison(
                 model_type=model_type,
                 data=data,
                 config=configs[model_type],
-                experiment_name=experiment_name
+                experiment_name=experiment_name,
+                production_mode=production_mode
             )
             all_results[model_type] = results
             
@@ -401,6 +430,8 @@ def main():
                         help='Minimum improvement required to save best model')
     parser.add_argument('--save_results', action='store_true',
                         help='Save detailed results')
+    parser.add_argument('--production_mode', action='store_true',
+                        help='Production mode: ignore validation data and train with all available data')
     
     args = parser.parse_args()
     
@@ -486,9 +517,11 @@ def main():
     
     if args.model == 'all':
         # run comparison
+        production_mode = args.production_mode or data.get('production_mode', False)
         results = run_model_comparison(
             data=data,
-            save_results=args.save_results
+            save_results=args.save_results,
+            production_mode=production_mode
         )
     else:
         # run single model
@@ -497,11 +530,13 @@ def main():
             print(f"Available models: {list(configs.keys())}")
             return
         
+        production_mode = args.production_mode or data.get('production_mode', False)
         results = run_single_experiment(
             model_type=args.model,
             data=data,
             config=configs[args.model],
-            experiment_name=args.experiment_name
+            experiment_name=args.experiment_name,
+            production_mode=production_mode
         )
         
         if args.save_results:

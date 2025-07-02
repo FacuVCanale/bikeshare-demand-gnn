@@ -180,6 +180,8 @@ def main():
                         help='Fraction of data for training (only used with single input file)')
     parser.add_argument('--val_split', type=float, default=0.15,
                         help='Fraction of data for validation (only used with single input file)')
+    parser.add_argument('--no_splits', action='store_true',
+                        help='Use all data for training (production mode - no validation/test splits)')
     
     args = parser.parse_args()
     
@@ -199,23 +201,32 @@ def main():
         print(f"Single file mode: Loading data from {args.input_file}")
         df = load_single_file(args.input_file)
     
-        # Create temporal splits
-        print("Creating temporal data splits...")
-        df_sorted = df.sort('datetime')
-        n_total = len(df_sorted)
-        
-        train_end = int(n_total * args.train_split)
-        val_end = int(n_total * (args.train_split + args.val_split))
-        
-        splits = {
-            'train': df_sorted[:train_end],
-            'val': df_sorted[train_end:val_end],
-            'test': df_sorted[val_end:]
-        }
-        
-        print(f"Data splits:")
-        for split_name, split_df in splits.items():
-            print(f"  {split_name}: {len(split_df)} records")
+        if args.no_splits:
+            # Production mode - use all data for training
+            print("Production mode: Using ALL data for training (no validation/test splits)")
+            splits = {
+                'train': df.sort('datetime')
+            }
+            print(f"Data allocation:")
+            print(f"  train: {len(splits['train'])} records (100% of data)")
+        else:
+            # Create temporal splits
+            print("Creating temporal data splits...")
+            df_sorted = df.sort('datetime')
+            n_total = len(df_sorted)
+            
+            train_end = int(n_total * args.train_split)
+            val_end = int(n_total * (args.train_split + args.val_split))
+            
+            splits = {
+                'train': df_sorted[:train_end],
+                'val': df_sorted[train_end:val_end],
+                'test': df_sorted[val_end:]
+            }
+            
+            print(f"Data splits:")
+            for split_name, split_df in splits.items():
+                print(f"  {split_name}: {len(split_df)} records")
             
     else:
         # Pre-split files mode - load existing splits
@@ -366,6 +377,23 @@ def main():
         del x, y, data
         gc.collect()
     
+    # Create empty val/test files for compatibility if in production mode
+    if args.no_splits:
+        print("\nCreating empty val/test files for train_gnn.py compatibility...")
+        
+        # Create minimal empty data objects
+        empty_data = Data(
+            x=torch.zeros((0, len(feature_cols)), dtype=torch.float32),
+            y=torch.zeros((0, len(target_cols)), dtype=torch.float32),
+            edge_index=torch.zeros((2, 0), dtype=torch.long),
+            num_nodes=0
+        )
+        
+        # Save empty val and test files
+        for empty_split in ['val', 'test']:
+            torch.save(empty_data, output_dir / f'{empty_split}_data.pt')
+            print(f"  Created empty {empty_split}_data.pt for compatibility")
+    
     # Save processing configuration
     config = {
         'input_mode': 'single_file' if args.input_file else 'pre_split',
@@ -376,15 +404,23 @@ def main():
         'processing_timestamp': pd.Timestamp.now().isoformat(),
         'n_stations': n_stations,
         'feature_engineering_compatible': True,
-        'no_modifications': True
+        'no_modifications': True,
+        'production_mode': args.no_splits if args.input_file else False
     }
     
     # Add split info for single file mode
     if args.input_file:
-        config.update({
-            'train_split': args.train_split,
-            'val_split': args.val_split
-        })
+        if args.no_splits:
+            config.update({
+                'train_split': 1.0,
+                'val_split': 0.0,
+                'test_split': 0.0
+            })
+        else:
+            config.update({
+                'train_split': args.train_split,
+                'val_split': args.val_split
+            })
     
     with open(output_dir / 'processing_config.json', 'w') as f:
         json.dump(config, f, indent=2)
@@ -401,7 +437,8 @@ def main():
     print(f"{'='*80}")
     
     if args.input_file:
-        print(f"Input: {args.input_file} (single file)")
+        mode_str = "PRODUCTION MODE (all data for training)" if args.no_splits else "single file with splits"
+        print(f"Input: {args.input_file} ({mode_str})")
     else:
         print(f"Input: {args.input_dir} (pre-split files)")
         
