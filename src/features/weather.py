@@ -447,8 +447,9 @@ class WeatherDataCollector:
         # drop the original date column to avoid confusion
         weather_df = weather_df.drop(columns=['date'])
 
-        # Add prefix to weather feature names to be consistent with other parts of the pipeline
-        weather_df = weather_df.rename(columns={col: f"{prefix}{col}" for col in weather_df.columns if col != 'datetime'})
+        # Optionally add a prefix to avoid clashes. If prefix is empty string, keep original names.
+        if prefix:
+            weather_df = weather_df.rename(columns={col: f"{prefix}{col}" for col in weather_df.columns if col != 'datetime'})
 
         # convert to polars and ensure datetime precision
         weather_pl = pl.from_pandas(weather_df).with_columns(

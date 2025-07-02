@@ -139,7 +139,8 @@ def prepare_inference_data(
     inference_delta_df = weather_collector.match_weather_to_delta(
         delta_df=inference_delta_df,
         weather_df=weather_df,
-        delta_t_minutes=delta_t_minutes
+        delta_t_minutes=delta_t_minutes,
+        prefix=""  # keep original weather column names
     )
     print("Weather data merged with delta_t dataframe.")
 
