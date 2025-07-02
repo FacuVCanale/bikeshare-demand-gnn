@@ -251,15 +251,19 @@ class WeatherDataCollector:
         # 1. Ensure datetime columns are properly formatted, unified to nanosecond precision, and timezone-naive
         if not pd.api.types.is_datetime64_any_dtype(trips[date_column]):
             trips[date_column] = pd.to_datetime(trips[date_column])
-        trips[date_column] = trips[date_column].astype('datetime64[ns]') # unify precision
+        
+        # first, remove timezone if it exists, then unify precision.
         if trips[date_column].dt.tz is not None:
             trips[date_column] = trips[date_column].dt.tz_localize(None)
+        trips[date_column] = trips[date_column].astype('datetime64[ns]')
 
         if not pd.api.types.is_datetime64_any_dtype(weather['date']):
             weather['date'] = pd.to_datetime(weather['date'])
-        weather['date'] = weather['date'].astype('datetime64[ns]') # unify precision
+
+        # first, remove timezone if it exists, then unify precision.
         if weather['date'].dt.tz is not None:
             weather['date'] = weather['date'].dt.tz_localize(None)
+        weather['date'] = weather['date'].astype('datetime64[ns]')
 
         # 2. Add weather prefix to columns to avoid conflicts
         weather.columns = ['date'] + [f'weather_{col}' for col in weather.columns if col != 'date']
