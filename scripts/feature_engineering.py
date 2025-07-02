@@ -261,6 +261,11 @@ class FeatureEngineer:
                             .rename({'id_estacion_destino': 'station_id'})
                             .with_columns(pl.col('station_id').cast(pl.Int64)))
         
+        # Ensure all datetime columns are the same dtype (ns)
+        delta_df = delta_df.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
+        departures_count = departures_count.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
+        arrivals_count = arrivals_count.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
+        
         # Merge counts (now both single and multi-station cases have station_id column)
         print(f"  Merging departure counts...")
         delta_df = delta_df.join(departures_count, on=['datetime', 'station_id'], how='left')
