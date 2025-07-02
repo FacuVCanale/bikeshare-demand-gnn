@@ -190,8 +190,8 @@ class WeatherDataCollector:
                 weather_df = self.load_weather_data(str(file_path))
                 
                 # validate data completeness
-                expected_start = pd.to_datetime(start_date).tz_localize('UTC')
-                expected_end = pd.to_datetime(end_date).tz_localize('UTC')
+                expected_start = pd.to_datetime(start_date)
+                expected_end = pd.to_datetime(end_date)
                 actual_start = weather_df['date'].min()
                 actual_end = weather_df['date'].max()
                 
@@ -231,7 +231,7 @@ class WeatherDataCollector:
         date_column: str = 'fecha_origen_recorrido'
     ) -> pd.DataFrame:
         """
-        Match weather conditions to trip data by finding the closest hour.
+        Match weather conditions to trip data by finding the closest hour using merge_asof.
         
         Args:
             trips_df: DataFrame with trip data
@@ -241,119 +241,59 @@ class WeatherDataCollector:
         Returns:
             DataFrame with trips and matching weather conditions
         """
-        print("matching weather conditions to trips...")
+        print("matching weather conditions to trips using efficient 'merge_asof'...")
+
+        # create copies to avoid modifying original data
+        trips = trips_df.copy()
+        weather = weather_df.copy()
+
+        # --- Data Preparation ---
+        # 1. Ensure datetime columns are properly formatted and timezone-naive
+        if not pd.api.types.is_datetime64_any_dtype(trips[date_column]):
+            trips[date_column] = pd.to_datetime(trips[date_column])
+        if trips[date_column].dt.tz is not None:
+            trips[date_column] = trips[date_column].dt.tz_localize(None)
+
+        if not pd.api.types.is_datetime64_any_dtype(weather['date']):
+            weather['date'] = pd.to_datetime(weather['date'])
+        if weather['date'].dt.tz is not None:
+            weather['date'] = weather['date'].dt.tz_localize(None)
+
+        # 2. Add weather prefix to columns to avoid conflicts
+        weather.columns = ['date'] + [f'weather_{col}' for col in weather.columns if col != 'date']
         
-        # ensure datetime columns are properly formatted
-        if not pd.api.types.is_datetime64_any_dtype(trips_df[date_column]):
-            trips_df[date_column] = pd.to_datetime(trips_df[date_column])
+        # 3. Sort both dataframes by the datetime key, a requirement for merge_asof
+        trips = trips.sort_values(by=date_column)
+        weather = weather.sort_values(by='date')
+
+        # --- Perform the As-Of Join ---
+        # merge_asof finds the nearest value in `weather` for each row in `trips`
+        trips_with_weather = pd.merge_asof(
+            left=trips,
+            right=weather,
+            left_on=date_column,
+            right_on='date',
+            direction='nearest'
+        )
         
-        if not pd.api.types.is_datetime64_any_dtype(weather_df['date']):
-            weather_df['date'] = pd.to_datetime(weather_df['date'])
-        
-        # create a copy to avoid modifying original data
-        trips_with_weather = trips_df.copy()
-        
-        # convert to timezone-naive for matching (assuming both are in same timezone)
-        trips_dates = trips_with_weather[date_column].dt.tz_localize(None) if trips_with_weather[date_column].dt.tz is not None else trips_with_weather[date_column]
-        weather_dates = weather_df['date'].dt.tz_localize(None) if weather_df['date'].dt.tz is not None else weather_df['date']
-        
-        # round trip times to nearest hour for matching
-        trips_with_weather['weather_match_hour'] = trips_dates.dt.round('H')
-        
-        # create weather lookup dictionary for faster matching
-        weather_lookup = weather_df.set_index(weather_dates.dt.round('H')).to_dict('index')
-        
-        # function to get weather data for a given hour
-        def get_weather_for_hour(hour):
-            if pd.isna(hour):
-                return {col: np.nan for col in weather_df.columns if col != 'date'}
-            
-            weather_data = weather_lookup.get(hour, {})
-            if not weather_data:
-                # if exact hour not found, find closest
-                time_diffs = np.abs((weather_dates - hour).dt.total_seconds())
-                closest_idx = time_diffs.idxmin()
-                weather_data = weather_df.iloc[closest_idx].to_dict()
-                weather_data.pop('date', None)
+        # --- Final Reporting ---
+        # Check one of the weather columns for successful matches
+        weather_temp_col = 'weather_temperature_2m'
+        if weather_temp_col not in trips_with_weather.columns:
+             # Find any weather column if the default one is not present
+            weather_cols = [c for c in trips_with_weather.columns if c.startswith('weather_')]
+            if weather_cols:
+                weather_temp_col = weather_cols[0]
             else:
-                weather_data.pop('date', None)
-            
-            return weather_data
-        
-        # match weather data to trips
-        print("finding weather conditions for each trip...")
-        weather_matches = trips_with_weather['weather_match_hour'].apply(get_weather_for_hour)
-        
-        # convert to dataframe and add to trips
-        weather_features_df = pd.DataFrame(weather_matches.tolist(), index=trips_with_weather.index)
-        
-        # add weather prefix to column names to avoid conflicts
-        weather_features_df.columns = [f'weather_{col}' for col in weather_features_df.columns]
-        
-        # combine trips with weather data
-        trips_with_weather = pd.concat([trips_with_weather, weather_features_df], axis=1)
-        
-        # remove temporary column
-        trips_with_weather = trips_with_weather.drop('weather_match_hour', axis=1)
-        
-        # report matching statistics
-        matched_trips = trips_with_weather['weather_temperature_2m'].notna().sum()
+                 print("Warning: No weather columns found after merge.")
+                 return trips_with_weather
+
+        matched_trips = trips_with_weather[weather_temp_col].notna().sum()
         total_trips = len(trips_with_weather)
         print(f"matched weather data for {matched_trips:,} out of {total_trips:,} trips ({matched_trips/total_trips*100:.1f}%)")
         
         return trips_with_weather
     
-    def get_resampled_weather_data(
-        self,
-        file_path: str = "../data/raw/meteo/hourly_open_meteo.csv",
-        start_date: str = "2020-01-01",
-        end_date: str = "2024-12-31",
-        frequency: str = "30min",
-        force_refresh: bool = False
-    ) -> pd.DataFrame:
-        """
-        Gets weather data and resamples it to a specified frequency.
-
-        Args:
-            file_path: Path to the weather CSV file.
-            start_date: Start date for the data.
-            end_date: End date for the data.
-            frequency: The frequency to resample to (e.g., '30min').
-            force_refresh: Whether to force a refresh from the API.
-
-        Returns:
-            DataFrame with resampled weather data.
-        """
-        # Get hourly data
-        hourly_weather_df = self.get_weather_data(
-            file_path=file_path,
-            start_date=start_date,
-            end_date=end_date,
-            force_refresh=force_refresh
-        )
-
-        print(f"resampling hourly weather data to {frequency} frequency...")
-        
-        # Ensure 'date' is a datetime index for resampling
-        if not pd.api.types.is_datetime64_any_dtype(hourly_weather_df['date']):
-            hourly_weather_df['date'] = pd.to_datetime(hourly_weather_df['date'])
-        
-        weather_with_index = hourly_weather_df.set_index('date')
-        
-        # Resample and forward-fill
-        resampled_weather_df = weather_with_index.resample(frequency).ffill()
-        
-        # The 'is_day' column is binary and should be back-filled as well to avoid
-        # propagating a 'day' value into a 'night' slot.
-        if 'is_day' in resampled_weather_df.columns:
-            resampled_weather_df['is_day'] = resampled_weather_df['is_day'].bfill()
-
-        # Fill any remaining NaNs at the beginning with backfill
-        resampled_weather_df = resampled_weather_df.bfill()
-        
-        print("resampling complete.")
-        return resampled_weather_df.reset_index()
-
     def get_weather_summary(self, weather_df: pd.DataFrame) -> Dict[str, Any]:
         """
         Get summary statistics of weather data.

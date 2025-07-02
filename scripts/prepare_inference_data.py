@@ -89,8 +89,8 @@ def prepare_inference_data(
     )
     print(f"FeatureEngineer initialized with delta_t={delta_t_minutes} mins, fill_strategy='{fill_strategy}'")
 
-    # 4. Load resampled weather data and merge with inference trips
-    print("Loading and resampling weather data to 30min intervals...")
+    # 4. Load weather data and merge with inference trips
+    print("Loading and matching weather data...")
     weather_collector = WeatherDataCollector()
     
     # Determine date range for weather data from inference trips
@@ -99,38 +99,17 @@ def prepare_inference_data(
     
     print(f"Inference trips date range: {start_date} to {end_date}")
     
-    # Get weather data already at the correct frequency
-    weather_df_30min = weather_collector.get_resampled_weather_data(
+    weather_df = weather_collector.get_weather_data(
         file_path=weather_data_path,
         start_date=str(start_date),
-        end_date=str(end_date),
-        frequency=f"{delta_t_minutes}min"
+        end_date=str(end_date)
     )
-    weather_df_30min_pl = pl.from_pandas(weather_df_30min)
 
-    # fix: cast the trip start time to utc with nanosecond precision to match the
-    # timezone-aware weather data, preventing a schema error on join.
-    # we assume the source trip data is in the local buenos aires timezone.
-    inference_trips_df = inference_trips_df.with_columns(
-        pl.col('fecha_origen_recorrido')
-        .cast(pl.Datetime("ns"))
-        .dt.replace_time_zone("America/Argentina/Buenos_Aires", ambiguous='earliest')
-        .dt.convert_time_zone("UTC")
-        .dt.truncate(f"{delta_t_minutes}m")
-        .alias('weather_match_time')
+    inference_trips_with_weather_df = weather_collector.match_weather_to_trips(
+        trips_df=inference_trips_df.to_pandas(),
+        weather_df=weather_df
     )
-    
-    # Prefix weather columns to avoid name collisions
-    weather_df_30min_pl = weather_df_30min_pl.rename({
-        col: f"weather_{col}" for col in weather_df_30min_pl.columns if col != 'date'
-    })
-    weather_df_30min_pl = weather_df_30min_pl.rename({'date': 'weather_match_time'})
-
-    # Join trips with the dense weather data
-    inference_trips_with_weather_df = inference_trips_df.join(
-        weather_df_30min_pl, on='weather_match_time', how='left'
-    ).drop('weather_match_time')
-
+    inference_trips_with_weather_df = pl.from_pandas(inference_trips_with_weather_df)
     print("Weather data matched successfully.")
 
     # fix: cast datetime columns to nanoseconds to match expectations
