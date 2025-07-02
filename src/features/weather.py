@@ -303,6 +303,57 @@ class WeatherDataCollector:
         
         return trips_with_weather
     
+    def get_resampled_weather_data(
+        self,
+        file_path: str = "../data/raw/meteo/hourly_open_meteo.csv",
+        start_date: str = "2020-01-01",
+        end_date: str = "2024-12-31",
+        frequency: str = "30min",
+        force_refresh: bool = False
+    ) -> pd.DataFrame:
+        """
+        Gets weather data and resamples it to a specified frequency.
+
+        Args:
+            file_path: Path to the weather CSV file.
+            start_date: Start date for the data.
+            end_date: End date for the data.
+            frequency: The frequency to resample to (e.g., '30min').
+            force_refresh: Whether to force a refresh from the API.
+
+        Returns:
+            DataFrame with resampled weather data.
+        """
+        # Get hourly data
+        hourly_weather_df = self.get_weather_data(
+            file_path=file_path,
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=force_refresh
+        )
+
+        print(f"resampling hourly weather data to {frequency} frequency...")
+        
+        # Ensure 'date' is a datetime index for resampling
+        if not pd.api.types.is_datetime64_any_dtype(hourly_weather_df['date']):
+            hourly_weather_df['date'] = pd.to_datetime(hourly_weather_df['date'])
+        
+        weather_with_index = hourly_weather_df.set_index('date')
+        
+        # Resample and forward-fill
+        resampled_weather_df = weather_with_index.resample(frequency).ffill()
+        
+        # The 'is_day' column is binary and should be back-filled as well to avoid
+        # propagating a 'day' value into a 'night' slot.
+        if 'is_day' in resampled_weather_df.columns:
+            resampled_weather_df['is_day'] = resampled_weather_df['is_day'].bfill()
+
+        # Fill any remaining NaNs at the beginning with backfill
+        resampled_weather_df = resampled_weather_df.bfill()
+        
+        print("resampling complete.")
+        return resampled_weather_df.reset_index()
+
     def get_weather_summary(self, weather_df: pd.DataFrame) -> Dict[str, Any]:
         """
         Get summary statistics of weather data.
