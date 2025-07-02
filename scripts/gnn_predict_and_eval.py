@@ -4,12 +4,12 @@ import numpy as np
 from pathlib import Path
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import json
-from src.models.gnn_models import create_gnn_model
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
+from src.models.gnn_models import create_gnn_model
 
 def load_batch(batch_path):
-    batch = torch.load(batch_path)
+    batch = torch.load(batch_path, weights_only=True)
     x = batch['x']
     y = batch['y']
     edge_index = batch['edge_index']
@@ -39,17 +39,18 @@ def evaluate_metrics(y_true, y_pred, metrics):
 
 def load_model_from_checkpoint(model_dir, device='cpu', model_filename='best_model.pt'):
     model_dir = Path(model_dir)
-    checkpoint = torch.load(model_dir / model_filename, map_location=device)
+    checkpoint = torch.load(model_dir / model_filename, map_location=device, weights_only=True)
     model_class = checkpoint.get('model_class', 'gcn').lower()
+    # Alias para compatibilidad
+    if model_class == 'graphtransformer':
+        model_class = 'transformer'
     model_init_params = checkpoint.get('model_init_params', {})
-    # fallback for missing params
     num_features = model_init_params.get('num_features')
     num_targets = model_init_params.get('num_targets')
     hidden_dim = model_init_params.get('hidden_dim', 128)
     dropout = model_init_params.get('dropout', 0.2)
     num_layers = model_init_params.get('num_layers', 3)
     num_heads = model_init_params.get('num_heads', 8)
-    # reconstruir modelo
     model = create_gnn_model(
         model_type=model_class,
         num_features=num_features,
