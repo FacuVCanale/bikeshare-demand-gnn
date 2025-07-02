@@ -26,12 +26,41 @@ from torch_geometric.data import Data
 import gc
 
 def load_station_coordinates_from_data(df: pl.DataFrame) -> Dict:
-    """Extract station coordinates from the dataset to create graph structure."""
+    """Extract station coordinates from the dataset to create graph structure, keeping the most frequent coordinates for each station."""
     print("Extracting station coordinates for graph creation...")
-    
-    # TODO: Implement real coordinate extraction from actual data
-    print("  Coordinate extraction not implemented yet")
-    pass
+
+    # Detect column names
+    if 'lat' in df.columns and 'lon' in df.columns:
+        coords_df = df.select(['station_id', 'lat', 'lon'])
+    elif 'lat_estacion_origen' in df.columns and 'long_estacion_origen' in df.columns:
+        coords_df = df.select([
+            pl.col('station_id'),
+            pl.col('lat_estacion_origen').alias('lat'),
+            pl.col('long_estacion_origen').alias('lon')
+        ])
+    else:
+        raise ValueError("No coordinate columns found in the input data.")
+
+    # Drop nulls
+    coords_df = coords_df.drop_nulls()
+
+    # Convert to pandas for mode calculation
+    coords_pd = coords_df.to_pandas()
+
+    # Group by station_id and get the most frequent (mode) lat/lon for each station
+    def mode(series):
+        return series.mode().iloc[0] if not series.mode().empty else series.iloc[0]
+
+    coords_mode = coords_pd.groupby('station_id').agg({'lat': mode, 'lon': mode}).reset_index()
+
+    # Build dictionary
+    station_coordinates = {
+        int(row['station_id']): {'lat': float(row['lat']), 'lon': float(row['lon'])}
+        for _, row in coords_mode.iterrows()
+    }
+
+    print(f"  Found coordinates for {len(station_coordinates)} unique stations")
+    return station_coordinates
 
 def create_station_adjacency_matrix(
     station_coordinates: Dict, 
