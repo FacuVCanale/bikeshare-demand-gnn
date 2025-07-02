@@ -5,6 +5,8 @@ from pathlib import Path
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import json
 from src.models.gnn_models import create_gnn_model
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
 
 def load_batch(batch_path):
     batch = torch.load(batch_path)
