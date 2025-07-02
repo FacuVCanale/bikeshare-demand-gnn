@@ -87,7 +87,26 @@ def load_trained_model(model_path: Path, num_features: int, num_targets: int):
                              num_targets=num_targets, **config)
 
     state_dict = ckpt.get("state_dict") or ckpt.get("model_state_dict")
-    model.load_state_dict(state_dict)
+
+    # adapt state dict keys if necessary (DataParallel or BatchNorm API changes)
+    adapted_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k
+        # remove leading 'module.' from DataParallel
+        if new_k.startswith('module.'):
+            new_k = new_k[len('module.'):]  # strip root prefix
+        # replace legacy '.module.' inside BatchNorm layers with '.batch_norm.'
+        if '.module.' in new_k:
+            new_k = new_k.replace('.module.', '.batch_norm.')
+        adapted_state_dict[new_k] = v
+
+    # load with strict=False to ignore any unmatched buffers (e.g., num_batches_tracked)
+    missing, unexpected = model.load_state_dict(adapted_state_dict, strict=False)
+    if missing:
+        print(f"Warning: {len(missing)} missing keys while loading checkpoint (ignored). Example: {missing[:5]}")
+    if unexpected:
+        print(f"Warning: {len(unexpected)} unexpected keys in checkpoint (ignored). Example: {unexpected[:5]}")
+
     model.eval()
     return model
 
@@ -118,7 +137,7 @@ def main():
 
     # Map station_id → node_idx
     df = df.with_columns(
-        pl.col("station_id").replace(station_map, default=None).cast(pl.Int64).alias("node_idx")
+        pl.col("station_id").replace_strict(station_map, None).cast(pl.Int64).alias("node_idx")
     ).drop_nulls(subset=["node_idx"]).sort(["node_idx", "datetime"])
 
     # Arrange features
