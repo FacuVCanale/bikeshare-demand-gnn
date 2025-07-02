@@ -206,6 +206,11 @@ def prepare_temporal_snapshots(
 
     t0 = time.time()
 
+    # derive constant dimensions for snapshot tensors
+    n_nodes = len(station_id_mapping)
+    n_features = len(feature_cols)
+    n_targets = len(target_cols)
+
     snapshots: List[Data] = []
     for idx, ts in enumerate(timestamps):
         snap_df = df.filter(pl.col("datetime") == ts)
