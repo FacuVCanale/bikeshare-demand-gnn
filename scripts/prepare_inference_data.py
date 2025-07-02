@@ -104,6 +104,13 @@ def prepare_inference_data(
     inference_trips_with_weather_df = pl.from_pandas(inference_trips_with_weather_df)
     print("Weather data matched successfully.")
 
+    # fix: cast datetime columns to nanoseconds to match expectations
+    # of the feature engineering script and avoid schemaerror on join.
+    inference_trips_with_weather_df = inference_trips_with_weather_df.with_columns([
+        pl.col("fecha_origen_recorrido").cast(pl.Datetime("ns")),
+        pl.col("fecha_destino_recorrido").cast(pl.Datetime("ns")),
+    ])
+
     # 5. Convert inference trips to delta_t format (without historical features)
     print("Converting inference trips to delta_t format...")
     # This calls a "private" method, which is necessary given the current structure
