@@ -133,30 +133,26 @@ class FeatureEngineer:
         # Assuming coordinate column names, will raise error if not found
         try:
             coords_origen = df.select([
-                pl.col('id_estacion_origen').alias('station_id'),
-                pl.col('lat_estacion_origen').alias('lat'),
-                pl.col('long_estacion_origen').alias('lon')
+                pl.col('id_estacion_origen').cast(pl.Int64).alias('station_id'),
+                pl.col('lat_estacion_origen').cast(pl.Float64).alias('lat'),
+                pl.col('long_estacion_origen').cast(pl.Float64).alias('lon')
             ]).drop_nulls()
             
             coords_destino = df.select([
-                pl.col('id_estacion_destino').alias('station_id'),
-                pl.col('lat_estacion_destino').alias('lat'),
-                pl.col('long_estacion_destino').alias('lon')
+                pl.col('id_estacion_destino').cast(pl.Int64).alias('station_id'),
+                pl.col('lat_estacion_destino').cast(pl.Float64).alias('lat'),
+                pl.col('long_estacion_destino').cast(pl.Float64).alias('lon')
             ]).drop_nulls()
 
             station_coords = (
                 pl.concat([coords_origen, coords_destino])
                 .unique(subset='station_id', keep='first')
-                .with_columns([
-                    pl.col('station_id').cast(pl.Int64),
-                    pl.col('lat').cast(pl.Float64),
-                    pl.col('lon').cast(pl.Float64)
-                ])
             )
             print(f"  Found coordinates for {len(station_coords)} unique stations")
         except Exception as e:
-            print(f"  ERROR: Could not find coordinate columns (e.g., 'lat_estacion_origen').")
-            print(f"  Please ensure coordinate columns are in the input data. Details: {e}")
+            print(f"  ERROR: Could not extract coordinate columns.")
+            print(f"  Available columns: {[col for col in df.columns if 'lat' in col.lower() or 'lon' in col.lower()]}")
+            print(f"  Details: {e}")
             # Create an empty dataframe so the script can continue without coords
             station_coords = pl.DataFrame({
                 'station_id': pl.Series([], dtype=pl.Int64),
@@ -204,6 +200,7 @@ class FeatureEngineer:
         
         # Create time index as polars DataFrame
         time_index = pl.datetime_range(start_time, end_time, f'{self.delta_t_minutes}m', eager=True)
+        print(f"  Created time_index with dtype: {time_index.dtype}")
         
         if station_id is not None:
             # Single station case
@@ -279,7 +276,7 @@ class FeatureEngineer:
                             .rename({'id_estacion_destino': 'station_id'})
                             .with_columns(pl.col('station_id').cast(pl.Int64)))
         
-        # Ensure all datetime columns are the same dtype (ns)
+        # Ensure all datetime columns are the same dtype (ns) for consistent joins
         delta_df = delta_df.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
         departures_count = departures_count.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
         arrivals_count = arrivals_count.with_columns(pl.col('datetime').cast(pl.Datetime('ns')))
@@ -325,18 +322,36 @@ class FeatureEngineer:
         
         if available_weather_cols:
             print(f"  Found {len(available_weather_cols)} key weather columns: {available_weather_cols}")
+            print(f"  fecha_origen_recorrido type: {df['fecha_origen_recorrido'].dtype}")
+            
             # Get weather data by taking the mean for each time interval
             weather_agg = (df
                           .select(['fecha_origen_recorrido'] + available_weather_cols)
                           .with_columns(
                               pl.col('fecha_origen_recorrido')
                               .dt.truncate(f'{self.delta_t_minutes}m')
+                              .cast(pl.Datetime('ns'))  # Ensure same precision as delta_df
                               .alias('datetime')
                           )
                           .group_by('datetime')
                           .agg([pl.col(col).mean() for col in available_weather_cols]))
             
-            delta_df = delta_df.join(weather_agg, on='datetime', how='left')
+            # Debug datetime types before join
+            print(f"  Preparing weather join...")
+            print(f"    delta_df datetime type: {delta_df['datetime'].dtype}")
+            print(f"    weather_agg datetime type: {weather_agg['datetime'].dtype}")
+            
+            # Join weather data with error handling
+            try:
+                delta_df = delta_df.join(weather_agg, on='datetime', how='left')
+            except Exception as e:
+                print(f"    ERROR during weather join: {e}")
+                # Convert weather_agg datetime to match delta_df if needed
+                weather_agg = weather_agg.with_columns(
+                    pl.col('datetime').cast(delta_df['datetime'].dtype)
+                )
+                print(f"    Retrying with converted weather_agg datetime type: {weather_agg['datetime'].dtype}")
+                delta_df = delta_df.join(weather_agg, on='datetime', how='left')
             
             # Check for nulls after weather merge
             for col in available_weather_cols:
