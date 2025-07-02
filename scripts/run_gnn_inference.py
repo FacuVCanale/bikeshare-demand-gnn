@@ -95,9 +95,9 @@ def load_trained_model(model_path: Path, num_features: int, num_targets: int):
         # remove leading 'module.' from DataParallel
         if new_k.startswith('module.'):
             new_k = new_k[len('module.'):]  # strip root prefix
-        # replace legacy '.module.' inside BatchNorm layers with '.batch_norm.'
+        # if checkpoint saved BatchNorm via `BatchNorm` wrapper (.module), drop that token
         if '.module.' in new_k:
-            new_k = new_k.replace('.module.', '.batch_norm.')
+            new_k = new_k.replace('.module.', '.')
         adapted_state_dict[new_k] = v
 
     # load with strict=False to ignore any unmatched buffers (e.g., num_batches_tracked)
