@@ -53,9 +53,12 @@ def prepare_inference_data(
     historical_df = pl.read_csv(historical_data_path, try_parse_dates=True)
 
     # fix: ensure historical datetime column has nanosecond precision to match
-    # the dataframe it will be concatenated with.
+    # the output of the feature engineering pipeline, preventing a schema
+    # error on concatenation.
     if "datetime" in historical_df.columns:
-        historical_df = historical_df.with_columns(pl.col('datetime').cast(pl.Datetime("ns")))
+        historical_df = historical_df.with_columns(
+            pl.col("datetime").cast(pl.Datetime("ns"))
+        )
 
     # 2. Load new RAW trip data for inference
     print(f"Loading inference trip data from: {inference_trips_path}")
