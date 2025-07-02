@@ -112,6 +112,9 @@ class GNNTrainer:
             if torch.cuda.device_count() > 1:
                 self.device = torch.device('cuda:0')
                 model = GeometricDataParallel(model)
+                # new logging for multi-GPU
+                gpu_names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+                print(f"[GNNTrainer] Using multi-GPU DataParallel: {torch.cuda.device_count()} GPUs -> {gpu_names}")
             else:
                 # fallback to single GPU/CPU
                 self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

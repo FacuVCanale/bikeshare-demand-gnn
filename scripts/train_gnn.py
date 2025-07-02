@@ -463,6 +463,24 @@ def main():
     # set random seed for reproducibility
     set_seed(args.seed)
     
+    # ------------------------------------------------------------------
+    # Log GPU information for debugging multi-GPU setups
+    # ------------------------------------------------------------------
+    try:
+        if torch.cuda.is_available():
+            n_gpus = torch.cuda.device_count()
+            gpu_names = [torch.cuda.get_device_name(i) for i in range(n_gpus)]
+            print("GPU Info:")
+            print(f"  CUDA available: True – {n_gpus} device(s)")
+            for idx, name in enumerate(gpu_names):
+                print(f"    [{idx}] {name}")
+            if n_gpus > 1:
+                print("  Multi-GPU environment detected – DataParallel will be used if 'device' is set to 'multi'.")
+        else:
+            print("GPU Info: CUDA not available – running on CPU.")
+    except Exception as e:
+        print(f"GPU Info: Error while retrieving CUDA devices – {e}")
+    
     print("Loading GNN data...")
     try:
         data = load_gnn_data(args.data_dir)
