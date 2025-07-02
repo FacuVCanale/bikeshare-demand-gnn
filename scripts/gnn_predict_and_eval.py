@@ -48,24 +48,14 @@ def load_model_from_checkpoint(model_dir, device='cpu', model_filename='best_mod
     
     model_init_params = checkpoint.get('model_init_params', {})
     
-    num_features = model_init_params.get('num_features')
-    if num_features is None:
+    if not model_init_params.get('num_features'):
         raise ValueError("Could not determine 'num_features' from model checkpoint.")
-
-    num_targets = model_init_params.get('num_targets')
-    if num_targets is None:
+    if not model_init_params.get('num_targets'):
         raise ValueError("Could not determine 'num_targets' from model checkpoint.")
         
     model = create_gnn_model(
         model_type=model_class_name,
-        num_features=num_features,
-        num_targets=num_targets,
-        hidden_dim=model_init_params.get('hidden_dim', 128),
-        num_layers=model_init_params.get('num_layers', 3),
-        num_heads=model_init_params.get('num_heads', 8),
-        dropout=model_init_params.get('dropout', 0.2),
-        **{k: v for k, v in model_init_params.items() if k not in 
-           ['num_features', 'num_targets', 'hidden_dim', 'num_layers', 'num_heads', 'dropout']}
+        **model_init_params
     )
     
     model.load_state_dict(checkpoint['model_state_dict'])
