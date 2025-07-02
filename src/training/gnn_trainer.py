@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader, DataLoader as GeometricDataLoader
 from torch_geometric.utils import trim_to_layer
+from torch_geometric.nn import DataParallel as GeometricDataParallel
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,7 @@ import time
 from typing import Dict, List, Optional, Tuple, Any, Union
 import logging
 from datetime import datetime
+import warnings
 
 from src.models.gnn_models import (
     TemporalGCN, SpatialGAT, GraphSAGE, GraphTransformer, 
@@ -104,13 +106,22 @@ class GNNTrainer:
             num_neighbors: Number of neighbors to sample per layer for NeighborLoader
             use_neighbor_sampling: Whether to use neighbor sampling ('auto', True, False)
         """
-        # set device
-        if device == 'auto':
+        # set device and optional multi-GPU wrapper
+        if device == 'multi':
+            # use DataParallel when more than one GPU is visible
+            if torch.cuda.device_count() > 1:
+                self.device = torch.device('cuda:0')
+                model = GeometricDataParallel(model)
+            else:
+                # fallback to single GPU/CPU
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                warnings.warn("'multi' device requested but only one GPU available; falling back to single device", RuntimeWarning)
+        elif device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
         
-        # move model to device
+        # move model to selected device (handles DataParallel wrapper too)
         self.model = model.to(self.device)
         
         # experiment setup

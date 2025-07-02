@@ -422,9 +422,9 @@ class FeatureEngineer:
         
         # Use only the three key weather features as specified in the approach
         key_weather_features = [
-            'temperature_2m',
-            'relative_humidity_2m', 
-            'apparent_temperature'
+            'weather_temperature_2m',
+            'weather_relative_humidity_2m', 
+            'weather_apparent_temperature'
         ]
         
         # Check which features are actually available

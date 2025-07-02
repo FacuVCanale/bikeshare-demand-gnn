@@ -441,7 +441,7 @@ def main():
     parser.add_argument('--analyze_targets', action='store_true',
                         help='Analyze target distribution for loss function recommendation')
     parser.add_argument('--device', type=str, default='auto',
-                        help='Device to use (cuda/cpu/auto)')
+                        help='Device to use (cuda/cpu/auto/multi)')
     parser.add_argument('--batch_size', type=int, default=None,
                         help='Batch size for mini-batch training (None for full-batch)')
     parser.add_argument('--num_neighbors', type=str, default='15,10,5',
