@@ -56,15 +56,29 @@ def load_graph_artifacts(gnn_dir: Path):
 
 
 def load_trained_model(model_path: Path, num_features: int, num_targets: int):
-    """Load model checkpoint stored by train_gnn.py (single-GPU)."""
+    """Load model checkpoint stored by train_gnn.py and map class names to factory types."""
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
-    model_type = ckpt.get("model_type") or ckpt.get("model_class")
-    if model_type is None:
-        raise ValueError("model_type not found in checkpoint; cannot instantiate model.")
-    # When stored from train_gnn.py, config present
+
+    raw_type = ckpt.get("model_type") or ckpt.get("model_class")
+    if raw_type is None:
+        raise ValueError("Could not infer model type from checkpoint.")
+
+    # map possible class names to the factory keywords expected by `create_gnn_model`
+    mapping = {
+        'temporalgcn': 'gcn',
+        'spatialgat': 'gat',
+        'graphsage': 'sage',
+        'graphtransformer': 'transformer',
+        'hybridspatiotemporalgnn': 'hybrid',
+    }
+    model_type = mapping.get(str(raw_type).lower(), str(raw_type).lower())
+
+    # configuration stored in checkpoint (optional)
     config = ckpt.get("config", {}).get("model_params", {})
+
     model = create_gnn_model(model_type=model_type, num_features=num_features,
                              num_targets=num_targets, **config)
+
     state_dict = ckpt.get("state_dict") or ckpt.get("model_state_dict")
     model.load_state_dict(state_dict)
     model.eval()
@@ -97,7 +111,7 @@ def main():
 
     # Map station_id → node_idx
     df = df.with_columns(
-        pl.col("station_id").map_elements(lambda x: station_map[x], return_dtype=pl.Int64).alias("node_idx")
+        pl.col("station_id").replace(station_map).cast(pl.Int64).alias("node_idx")
     ).sort(["node_idx", "datetime"])
 
     # Arrange features
