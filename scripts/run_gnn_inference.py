@@ -131,14 +131,23 @@ def main():
     # Load inference features CSV
     df = pl.read_csv(args.features_csv, try_parse_dates=True)
     original_len = len(df)
-    df = df.filter(pl.col("station_id").is_in(list(station_map)))
-    if len(df) < original_len:
-        print(f"Warning: Dropped {original_len - len(df)} rows with unseen station_ids")
+ 
+    # --- efficient mapping via join ---------------------------------------
+    mapping_df = pl.DataFrame({
+        "station_id": list(station_map.keys()),
+        "node_idx": list(station_map.values())
+    }).with_columns(pl.col("station_id").cast(pl.Int64), pl.col("node_idx").cast(pl.Int64))
 
-    # Map station_id → node_idx
-    df = df.with_columns(
-        pl.col("station_id").replace_strict(station_map, None).cast(pl.Int64).alias("node_idx")
-    ).drop_nulls(subset=["node_idx"]).sort(["node_idx", "datetime"])
+    # ensure type alignment before join
+    df = df.with_columns(pl.col("station_id").cast(pl.Int64))
+
+    df_before = len(df)
+    df = df.join(mapping_df, on="station_id", how="inner")
+    dropped = df_before - len(df)
+    if dropped > 0:
+        print(f"Warning: {dropped} rows dropped due to unseen station_id")
+
+    df = df.sort(["node_idx", "datetime"])
 
     # Arrange features
     X = df.select(feat_names).to_numpy(writable=False)
