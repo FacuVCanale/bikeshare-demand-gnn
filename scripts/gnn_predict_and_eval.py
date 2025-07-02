@@ -91,7 +91,11 @@ def main():
 
     # Predicción
     with torch.no_grad():
-        y_pred = model(x, edge_index)
+        model_name = model.__class__.__name__.lower()
+        if model_name in ['graphtransformer', 'transformer']:
+            y_pred = model(x)
+        else:
+            y_pred = model(x, edge_index)
 
     # Evaluación
     results = evaluate_metrics(y, y_pred, metrics)
