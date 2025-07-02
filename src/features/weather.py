@@ -248,14 +248,16 @@ class WeatherDataCollector:
         weather = weather_df.copy()
 
         # --- Data Preparation ---
-        # 1. Ensure datetime columns are properly formatted and timezone-naive
+        # 1. Ensure datetime columns are properly formatted, unified to nanosecond precision, and timezone-naive
         if not pd.api.types.is_datetime64_any_dtype(trips[date_column]):
             trips[date_column] = pd.to_datetime(trips[date_column])
+        trips[date_column] = trips[date_column].astype('datetime64[ns]') # unify precision
         if trips[date_column].dt.tz is not None:
             trips[date_column] = trips[date_column].dt.tz_localize(None)
 
         if not pd.api.types.is_datetime64_any_dtype(weather['date']):
             weather['date'] = pd.to_datetime(weather['date'])
+        weather['date'] = weather['date'].astype('datetime64[ns]') # unify precision
         if weather['date'].dt.tz is not None:
             weather['date'] = weather['date'].dt.tz_localize(None)
 
