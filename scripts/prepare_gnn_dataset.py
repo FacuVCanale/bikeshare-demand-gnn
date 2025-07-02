@@ -201,16 +201,16 @@ def main():
     # Use first split to determine available columns
     sample_df = next(iter(splits.values()))
     
-        print(f"Configuring target strategy: {args.target}")
+    print(f"Configuring target strategy: {args.target}")
     if args.target == 'arrivals':
         target_cols = ['arrivals']
     elif args.target == 'departures':
         target_cols = ['departures'] 
     elif args.target == 'both':
         target_cols = ['arrivals', 'departures']
-        else:
-            raise ValueError(f"Unknown target option: {args.target}")
-        
+    else:
+        raise ValueError(f"Unknown target option: {args.target}")
+    
     # Verify targets exist
     missing_targets = [t for t in target_cols if t not in sample_df.columns]
     if missing_targets:
@@ -254,33 +254,33 @@ def main():
     print(f"  Graph will use {len(unique_station_ids)} stations from training data only")
     
     print("Creating station connectivity graph...")
-            print(f"  Graph parameters: k_neighbors={args.k_neighbors}, distance_threshold={args.distance_threshold}km")
-            
+    print(f"  Graph parameters: k_neighbors={args.k_neighbors}, distance_threshold={args.distance_threshold}km")
+    
     adj_matrix = create_station_adjacency_matrix(
         station_coordinates,
-                k_neighbors=args.k_neighbors,
-                distance_threshold=args.distance_threshold
-            )
-            edge_index = create_edge_index_from_adjacency(adj_matrix)
-            
+        k_neighbors=args.k_neighbors,
+        distance_threshold=args.distance_threshold
+    )
+    edge_index = create_edge_index_from_adjacency(adj_matrix)
+    
     # Calculate graph statistics
     n_stations = len(station_coordinates)
     if n_stations > 1:
         density = edge_index.shape[1] / (n_stations * (n_stations - 1))
         avg_edges_per_node = edge_index.shape[1] / n_stations
-            else:
-                density = 0.0
-                avg_edges_per_node = 0.0
-                
-            print(f"Created graph with {edge_index.shape[1]} edges")
-            print(f"  Graph density: {density:.4f}")
-            print(f"  Avg edges per node: {avg_edges_per_node:.1f}")
-            
+    else:
+        density = 0.0
+        avg_edges_per_node = 0.0
+    
+    print(f"Created graph with {edge_index.shape[1]} edges")
+    print(f"  Graph density: {density:.4f}")
+    print(f"  Avg edges per node: {avg_edges_per_node:.1f}")
+    
     # Save graph structure
-            print("Saving graph structure...")
-            np.save(output_dir / 'adjacency_matrix.npy', adj_matrix)
-            torch.save(edge_index, output_dir / 'edge_index.pt')
-            
+    print("Saving graph structure...")
+    np.save(output_dir / 'adjacency_matrix.npy', adj_matrix)
+    torch.save(edge_index, output_dir / 'edge_index.pt')
+    
     # Process each split
     for split_name, split_df in splits.items():
         print(f"\n{'='*60}")
