@@ -147,7 +147,11 @@ class FeatureEngineer:
             station_coords = (
                 pl.concat([coords_origen, coords_destino])
                 .unique(subset='station_id', keep='first')
-                .with_columns(pl.col('station_id').cast(pl.Int64))
+                .with_columns([
+                    pl.col('station_id').cast(pl.Int64),
+                    pl.col('lat').cast(pl.Float64),
+                    pl.col('lon').cast(pl.Float64)
+                ])
             )
             print(f"  Found coordinates for {len(station_coords)} unique stations")
         except Exception as e:
@@ -165,6 +169,18 @@ class FeatureEngineer:
             pl.col('id_estacion_origen').cast(pl.Int64),
             pl.col('id_estacion_destino').cast(pl.Int64)
         ])
+        
+        # Ensure datetime columns are properly parsed (only if they're still strings)
+        datetime_cols = ['fecha_origen_recorrido', 'fecha_destino_recorrido']
+        datetime_conversions = []
+        for col in datetime_cols:
+            if col in df.columns and df[col].dtype == pl.Utf8:
+                datetime_conversions.append(pl.col(col).str.to_datetime())
+            elif col in df.columns:
+                datetime_conversions.append(pl.col(col))  # Keep as is if already datetime
+        
+        if datetime_conversions:
+            df = df.with_columns(datetime_conversions)
         
         # Create time range
         start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
@@ -713,9 +729,23 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
     if data_path.lower().endswith('.parquet'):
         print("  Detected parquet format")
         df = pl.read_parquet(data_path)
+        
+        # Ensure datetime columns are properly parsed if they're stored as strings
+        datetime_cols = ['fecha_origen_recorrido', 'fecha_destino_recorrido']
+        for col in datetime_cols:
+            if col in df.columns and df[col].dtype == pl.Utf8:
+                print(f"  Converting {col} from string to datetime")
+                df = df.with_columns(pl.col(col).str.to_datetime())
     elif data_path.lower().endswith('.csv'):
         print("  Detected CSV format")
         df = pl.read_csv(data_path, try_parse_dates=True)
+        
+        # Ensure datetime columns are properly parsed if they weren't auto-detected
+        datetime_cols = ['fecha_origen_recorrido', 'fecha_destino_recorrido']
+        for col in datetime_cols:
+            if col in df.columns and df[col].dtype == pl.Utf8:
+                print(f"  Converting {col} from string to datetime")
+                df = df.with_columns(pl.col(col).str.to_datetime())
     else:
         # Try parquet first, then CSV as fallback
         try:
@@ -729,6 +759,13 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
                 print("  Successfully loaded as CSV")
             except Exception as e:
                 raise ValueError(f"Could not load file {data_path}. Tried both parquet and CSV formats. Error: {str(e)}")
+        
+        # Ensure datetime columns are properly parsed for fallback loading
+        datetime_cols = ['fecha_origen_recorrido', 'fecha_destino_recorrido']
+        for col in datetime_cols:
+            if col in df.columns and df[col].dtype == pl.Utf8:
+                print(f"  Converting {col} from string to datetime")
+                df = df.with_columns(pl.col(col).str.to_datetime())
     
     print(f"Loaded {len(df)} records")
     print(f"Columns: {df.columns}")
