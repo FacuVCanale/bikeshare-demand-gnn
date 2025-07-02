@@ -167,6 +167,62 @@ def prepare_data_for_gnn(
     print(f"  Tensor shapes -> x: {x.shape}, y: {y.shape}")
     return x, y, feature_cols
 
+def prepare_temporal_snapshots(
+    df: pl.DataFrame,
+    station_id_mapping: Dict[int, int],
+    edge_index: torch.Tensor,
+    feature_cols: List[str],
+    target_cols: List[str]
+) -> List[Data]:
+    """Build a list of PyG Data snapshots (one per timestamp).
+
+    Each node corresponds to a station (fixed graph). For every timestamp we
+    create a snapshot with x.shape=(num_stations, num_features) and
+    y.shape=(num_stations, num_targets). Missing station/timestamp rows are
+    filled with zeros so each snapshot has all stations in the same order.
+    """
+    print("  Building temporal snapshots …")
+
+    # map station_id -> node_idx once
+    df = df.with_columns(
+        pl.col("station_id").replace_strict(station_id_mapping, return_dtype=pl.Int64).alias("node_idx")
+    )
+
+    # Sort for reproducibility
+    df = df.sort(["datetime", "node_idx"])
+
+    # unique timestamps (ns precision)
+    timestamps = df.select("datetime").unique().sort("datetime").to_series().to_list()
+    n_nodes = len(station_id_mapping)
+    n_features = len(feature_cols)
+    n_targets = len(target_cols)
+
+    snapshots: List[Data] = []
+    for ts in timestamps:
+        snap_df = df.filter(pl.col("datetime") == ts)
+
+        # Allocate zeros and then fill positions we have data for
+        x_np = np.zeros((n_nodes, n_features), dtype=np.float32)
+        y_np = np.zeros((n_nodes, n_targets), dtype=np.float32)
+
+        if len(snap_df):
+            # ensure order by node_idx
+            snap_df = snap_df.sort("node_idx")
+            node_indices = snap_df["node_idx"].to_numpy()
+            x_np[node_indices, :] = np.nan_to_num(snap_df.select(feature_cols).to_numpy(), nan=0.0)
+            y_np[node_indices, :] = np.nan_to_num(snap_df.select(target_cols).to_numpy(), nan=0.0)
+
+        data_obj = Data(
+            x=torch.tensor(x_np, dtype=torch.float32),
+            y=torch.tensor(y_np, dtype=torch.float32),
+            edge_index=edge_index,
+            num_nodes=n_nodes,
+            datetime=str(ts)  # keep timestamp for reference
+        )
+        snapshots.append(data_obj)
+    print(f"  Created {len(snapshots)} snapshots")
+    return snapshots
+
 def main():
     parser = argparse.ArgumentParser(description='Prepare GNN dataset from feature_engineering.py output')
     parser.add_argument('--input_file', type=str, default=None,
@@ -333,54 +389,42 @@ def main():
         print(f"Processing {split_name.upper()} split...")
         print(f"{'='*60}")
         
-        # Prepare data for GNN (no modifications)
-        x, y, feature_cols = prepare_data_for_gnn(
-            split_df, station_id_mapping, target_cols
+        # Identify feature columns (exclude metadata)
+        exclude_cols = ['datetime', 'station_id', 'lat', 'lon'] + target_cols
+        feature_cols = [c for c in split_df.columns if c not in exclude_cols]
+        
+        # Build temporal snapshots (one per timestamp)
+        snapshots = prepare_temporal_snapshots(
+            split_df, station_id_mapping, edge_index, feature_cols, target_cols
         )
         
-        if len(x) == 0:
+        if len(snapshots) == 0:
             print(f"  ERROR: No data for {split_name} split")
             continue
         
-        # Create PyTorch Geometric data object
-        print("Creating PyTorch Geometric data object...")
-        data = Data(
-            x=x,
-            y=y,
-            edge_index=edge_index,
-            num_nodes=n_stations
-        )
-        
-        # Save processed data
-        print(f"Saving {split_name} data...")
+        # Save snapshots list
         data_file = output_dir / f'{split_name}_data.pt'
-        torch.save(data, data_file)
+        torch.save(snapshots, data_file)
         data_size_mb = data_file.stat().st_size / (1024 * 1024)
+        print(f"  Saved list with {len(snapshots)} snapshots → {data_file} ({data_size_mb:.1f} MB)")
         
-        # Save metadata (compatible with train_gnn.py naming)
+        # Save metadata once (for train)
         if split_name == 'train':
             metadata_file = output_dir / 'train_feature_names.json'
-        else:
-            metadata_file = output_dir / f'{split_name}_metadata.json'
-            
-        with open(metadata_file, 'w') as f:
-            json.dump({
-                'features': feature_cols,
-                'targets': target_cols,
-                'station_ids': unique_station_ids,
-                'station_id_mapping': station_id_mapping,
-                'n_features': len(feature_cols),
-                'n_targets': len(target_cols),
-                'n_stations': n_stations,
-                'n_samples': len(x)
-            }, f, indent=2)
-        
-        print(f"  Saved {split_name} data: {data.x.shape[0]} samples, {data.x.shape[1]} features")
-        print(f"  File size: {data_size_mb:.1f} MB")
-        print(f"  Targets: {data.y.shape[1]} variables")
+            with open(metadata_file, 'w') as f:
+                json.dump({
+                    'features': feature_cols,
+                    'targets': target_cols,
+                    'station_ids': unique_station_ids,
+                    'station_id_mapping': station_id_mapping,
+                    'n_features': len(feature_cols),
+                    'n_targets': len(target_cols),
+                    'n_stations': n_stations,
+                    'n_snapshots': len(snapshots)
+                }, f, indent=2)
         
         # Clean up memory
-        del x, y, data
+        del snapshots
         gc.collect()
     
     # Create empty val/test files for compatibility if in production mode
