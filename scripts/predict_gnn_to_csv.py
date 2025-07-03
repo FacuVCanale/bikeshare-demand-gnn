@@ -118,6 +118,10 @@ def load_trained_model(model_path: str, device: str = 'auto') -> torch.nn.Module
             **model_params
         )
         
+        # fix None -> True for boolean flags
+        if 'use_batch_norm' in model_params and model_params['use_batch_norm'] is None:
+            model_params['use_batch_norm'] = True
+        
     else:
         # old format - try to infer from state dict
         raise ValueError(
