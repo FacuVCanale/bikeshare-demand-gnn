@@ -130,12 +130,26 @@ class FeatureEngineer:
         Convert trip data to 30-minute time intervals with arrival/departure counts.
         """
         # Ensure datetime columns and station_id consistency
-        df = df.with_columns([
-            pl.col('fecha_origen_recorrido').str.to_datetime(),
-            pl.col('fecha_destino_recorrido').str.to_datetime(),
+        datetime_cols = []
+        
+        # Handle fecha_origen_recorrido
+        if df.select(pl.col('fecha_origen_recorrido').dtype).item() == pl.String:
+            datetime_cols.append(pl.col('fecha_origen_recorrido').str.to_datetime())
+        else:
+            datetime_cols.append(pl.col('fecha_origen_recorrido').cast(pl.Datetime))
+            
+        # Handle fecha_destino_recorrido  
+        if df.select(pl.col('fecha_destino_recorrido').dtype).item() == pl.String:
+            datetime_cols.append(pl.col('fecha_destino_recorrido').str.to_datetime())
+        else:
+            datetime_cols.append(pl.col('fecha_destino_recorrido').cast(pl.Datetime))
+            
+        datetime_cols.extend([
             pl.col('id_estacion_origen').cast(pl.Int64),
             pl.col('id_estacion_destino').cast(pl.Int64)
         ])
+        
+        df = df.with_columns(datetime_cols)
         
         # Create time range
         start_time = df.select(pl.col('fecha_origen_recorrido').min()).item()
