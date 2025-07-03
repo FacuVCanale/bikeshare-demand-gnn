@@ -53,13 +53,19 @@ def main():
     serie_r2 = calcular_r2_por_estacion(df, args.target_col, args.pred_col)
 
     # plot
-    plt.figure(figsize=(12, 6), dpi=args.dpi)
-    plt.scatter(serie_r2.index, serie_r2.values, color='steelblue')
-    plt.plot(serie_r2.index, serie_r2.values, color='steelblue', linewidth=1)
-    plt.xlabel('Estación', fontsize=16)
-    plt.ylabel('R²', fontsize=16)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
+    plt.figure(figsize=(16, 8), dpi=args.dpi)
+    # scatter + line for suavizado visual
+    plt.scatter(serie_r2.index, serie_r2.values, color='steelblue', s=50, alpha=0.8)
+    plt.plot(serie_r2.index, serie_r2.values, color='steelblue', linewidth=2, alpha=0.9)
+
+    # etiquetas y estilo
+    plt.xlabel('Estación', fontsize=18)
+    plt.ylabel('R²', fontsize=18)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+
+    # grid agradable
+    plt.grid(True, linestyle='--', alpha=0.4)
     plt.tight_layout()
 
     if args.output:
