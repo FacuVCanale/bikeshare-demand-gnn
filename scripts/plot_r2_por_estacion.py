@@ -54,9 +54,8 @@ def main():
 
     # plot
     plt.figure(figsize=(16, 8), dpi=args.dpi)
-    # scatter + line for suavizado visual
-    plt.scatter(serie_r2.index, serie_r2.values, color='steelblue', s=50, alpha=0.8)
-    plt.plot(serie_r2.index, serie_r2.values, color='steelblue', linewidth=2, alpha=0.9)
+    # gráfico de barras por estación
+    plt.bar(serie_r2.index, serie_r2.values, color='steelblue', alpha=0.8, width=0.8)
 
     # etiquetas y estilo
     plt.xlabel('Estación', fontsize=18)
