@@ -76,6 +76,7 @@ def run_inference(
     departures_model_path: str,
     output_dir: str = "inference_results",
     existing_data_path: str | None = None,
+    weather_data_path: str | None = None,
     delta_t_minutes: int = 30,
     fill_nulls: bool = True,
     fill_strategy: str = "zero",
@@ -110,6 +111,7 @@ def run_inference(
     print("==============================")
     print(f"Test data        : {test_data_path}")
     print(f"Existing raw data: {existing_data_path or 'N/A'}")
+    print(f"Weather data     : {weather_data_path or 'N/A'}")
     print(f"Scaler           : {feature_scaler_path}")
     print(f"Arrivals model   : {arrivals_model_path}")
     print(f"Departures model : {departures_model_path}")
@@ -128,6 +130,62 @@ def run_inference(
         combined_raw = pl.concat([hist_raw, test_raw])
     else:
         combined_raw = test_raw
+
+    # ------------------------------------------------------------------
+    # 1.5. Add weather data if provided
+    # ------------------------------------------------------------------
+    if weather_data_path:
+        print("Loading and merging weather data ...")
+        weather_df = _load_raw_data(weather_data_path)
+        print(f"  Weather rows: {len(weather_df):,}")
+        
+        # Convert weather datetime column to proper format
+        if 'time' in weather_df.columns:
+            weather_df = weather_df.with_columns([
+                pl.col('time').str.to_datetime().alias('datetime_weather')
+            ])
+        elif 'datetime' in weather_df.columns:
+            weather_df = weather_df.with_columns([
+                pl.col('datetime').str.to_datetime().alias('datetime_weather')
+            ])
+        else:
+            raise ValueError("Weather data must have 'time' or 'datetime' column")
+        
+        # Rename weather columns to match expected format
+        weather_cols_mapping = {
+            'temperature_2m': 'weather_temperature_2m',
+            'relative_humidity_2m': 'weather_relative_humidity_2m', 
+            'apparent_temperature': 'weather_apparent_temperature'
+        }
+        
+        # Check which weather columns exist and rename them
+        rename_exprs = []
+        for old_col, new_col in weather_cols_mapping.items():
+            if old_col in weather_df.columns:
+                rename_exprs.append(pl.col(old_col).alias(new_col))
+        
+        if not rename_exprs:
+            print("  Warning: No expected weather columns found in weather data")
+            print(f"  Available columns: {weather_df.columns}")
+        else:
+            weather_df = weather_df.select(['datetime_weather'] + rename_exprs)
+            
+            # Merge weather data with trip data based on datetime
+            # First, add datetime_weather column to combined_raw for merging
+            combined_raw = combined_raw.with_columns([
+                pl.col('fecha_origen_recorrido').dt.truncate('1h').alias('datetime_weather')
+            ])
+            
+            # Join weather data
+            combined_raw = combined_raw.join(
+                weather_df, 
+                on='datetime_weather', 
+                how='left'
+            ).drop('datetime_weather')
+            
+            print(f"  Weather data merged successfully")
+    else:
+        print("No weather data provided - using existing weather columns if available")
 
     # ------------------------------------------------------------------
     # 2. Feature engineering (re-use existing implementation)
@@ -270,6 +328,8 @@ def _cli():
                         help="Directory where predictions & metrics will be stored.")
     parser.add_argument("--existing_data_path", type=str, default=None,
                         help="Optional raw trips file with historical data for lag computation.")
+    parser.add_argument("--weather_data_path", type=str, default=None,
+                        help="Optional weather CSV file with meteorological data.")
     parser.add_argument("--station_id", type=int, default=None,
                         help="If provided, limits inference to a specific station ID.")
     # Feature engineering flags (should match training settings)
@@ -292,6 +352,7 @@ def _cli():
         departures_model_path=args.departures_model_path,
         output_dir=args.output_dir,
         existing_data_path=args.existing_data_path,
+        weather_data_path=args.weather_data_path,
         fill_nulls=not args.no_fill_nulls,
         fill_strategy=args.fill_strategy,
         add_long_lags=not args.disable_long_lags,
