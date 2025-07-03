@@ -107,18 +107,22 @@ class GNNTrainer:
             use_neighbor_sampling: Whether to use neighbor sampling ('auto', True, False)
         """
         # set device and optional multi-GPU wrapper
+        self.multi_gpu_requested = (device == 'multi')
+        self.multi_gpu_model = None  # track if we're using multi-gpu wrapper
+        
         if device == 'multi':
             # use DataParallel when more than one GPU is visible
             if torch.cuda.device_count() > 1:
                 self.device = torch.device('cuda:0')
-                model = GeometricDataParallel(model)
-                # new logging for multi-GPU
+                # defer DataParallel wrapping until we know data format
                 gpu_names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
-                print(f"[GNNTrainer] Using multi-GPU DataParallel: {torch.cuda.device_count()} GPUs -> {gpu_names}")
+                print(f"[GNNTrainer] Multi-GPU setup detected: {torch.cuda.device_count()} GPUs -> {gpu_names}")
+                print(f"[GNNTrainer] DataParallel will be applied based on data format compatibility")
             else:
                 # fallback to single GPU/CPU
                 self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 warnings.warn("'multi' device requested but only one GPU available; falling back to single device", RuntimeWarning)
+                self.multi_gpu_requested = False
         elif device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
@@ -158,6 +162,51 @@ class GNNTrainer:
         self.logger.info(f"Experiment: {self.experiment_name}")
         self.logger.info(f"Batch size: {self.batch_size}")
         self.logger.info(f"Neighbor sampling: {self.use_neighbor_sampling}")
+        
+    def _setup_multi_gpu_if_needed(self, train_data):
+        """
+        Setup multi-GPU DataParallel based on data format compatibility.
+        
+        Args:
+            train_data: Training data to analyze for compatibility
+        """
+        if not self.multi_gpu_requested or torch.cuda.device_count() <= 1:
+            return
+            
+        # check if data is in snapshot format (list/tuple of Data objects)
+        is_snapshot_data = isinstance(train_data, (list, tuple))
+        
+        if is_snapshot_data:
+            # snapshot data with GeometricDataLoader is problematic with GeometricDataParallel
+            # fall back to standard DataParallel for better compatibility
+            try:
+                self.model = torch.nn.DataParallel(self.model)
+                self.multi_gpu_model = "standard"
+                self.logger.info("Applied standard DataParallel for snapshot data compatibility")
+                self.logger.info(f"Multi-GPU training enabled: {torch.cuda.device_count()} GPUs")
+            except Exception as e:
+                self.logger.warning(f"Failed to setup standard DataParallel: {e}")
+                self.logger.info("Continuing with single GPU training")
+                self.multi_gpu_requested = False
+        else:
+            # single graph data - use GeometricDataParallel for better graph support
+            try:
+                self.model = GeometricDataParallel(self.model)
+                self.multi_gpu_model = "geometric"
+                self.logger.info("Applied GeometricDataParallel for single graph data")
+                self.logger.info(f"Multi-GPU training enabled: {torch.cuda.device_count()} GPUs")
+            except Exception as e:
+                self.logger.warning(f"Failed to setup GeometricDataParallel: {e}")
+                # fallback to standard DataParallel
+                try:
+                    self.model = torch.nn.DataParallel(self.model)
+                    self.multi_gpu_model = "standard"
+                    self.logger.info("Fallback to standard DataParallel")
+                    self.logger.info(f"Multi-GPU training enabled: {torch.cuda.device_count()} GPUs")
+                except Exception as e2:
+                    self.logger.warning(f"Failed to setup any DataParallel: {e2}")
+                    self.logger.info("Continuing with single GPU training")
+                    self.multi_gpu_requested = False
         
     def setup_logging(self):
         """Setup logging for the experiment"""
@@ -689,6 +738,9 @@ class GNNTrainer:
         if self.optimizer is None:
             self.setup_training()
         
+        # setup multi-GPU configuration based on data format
+        self._setup_multi_gpu_if_needed(train_data)
+        
         # analyze target distribution if requested and train_data is a Data object
         if (hasattr(self, 'loss_config') and self.loss_config.get('analyze_targets', False) and
             isinstance(train_data, Data)):
@@ -736,8 +788,20 @@ class GNNTrainer:
         else:
             strategy_display = "Full-batch"
         
+        # get model name for display (handle DataParallel wrapper)
+        if hasattr(self.model, 'module'):
+            model_name = self.model.module.__class__.__name__
+            if self.multi_gpu_model == "standard":
+                model_display = f"DataParallel({model_name}) ({trainable_params:,} trainable parameters)"
+            elif self.multi_gpu_model == "geometric":
+                model_display = f"GeometricDataParallel({model_name}) ({trainable_params:,} trainable parameters)"
+            else:
+                model_display = f"{self.model.__class__.__name__} ({trainable_params:,} trainable parameters)"
+        else:
+            model_display = f"{self.model.__class__.__name__} ({trainable_params:,} trainable parameters)"
+        
         config_data = {
-            "Model": f"{self.model.__class__.__name__} ({trainable_params:,} trainable parameters)",
+            "Model": model_display,
             "Training epochs": f"{epochs:,}",
             "Strategy": strategy_display,
             "Logging frequency": f"every {log_frequency} epochs",
