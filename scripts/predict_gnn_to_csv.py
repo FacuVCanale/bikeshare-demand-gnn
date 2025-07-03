@@ -125,19 +125,40 @@ def load_trained_model(model_path: str, device: str = 'auto') -> torch.nn.Module
         )
     
     # load state dict, handling DataParallel wrapper
-    if any(key.startswith('module.') for key in state_dict.keys()):
-        # remove 'module.' prefix from DataParallel
+    # handle both "module." at the beginning and ".module." in the middle of keys
+    if any('module.' in key for key in state_dict.keys()):
+        print("  Detected DataParallel model, cleaning state_dict keys...")
         new_state_dict = {}
         for key, value in state_dict.items():
-            new_key = key.replace('module.', '') if key.startswith('module.') else key
+            # remove 'module.' from anywhere in the key
+            new_key = key.replace('.module.', '.').replace('module.', '')
             new_state_dict[new_key] = value
+            if key != new_key:
+                print(f"    {key} -> {new_key}")
         state_dict = new_state_dict
     
-    model.load_state_dict(state_dict)
+    # try to load state dict with error handling
+    try:
+        model.load_state_dict(state_dict)
+        print(f"  State dict loaded successfully")
+    except RuntimeError as e:
+        print(f"  Warning: Error loading state_dict: {e}")
+        print("  Attempting to load with strict=False...")
+        
+        # try loading with strict=False to ignore missing/unexpected keys
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"  Missing keys: {missing_keys}")
+        if unexpected_keys:
+            print(f"  Unexpected keys: {unexpected_keys}")
+        
+        print("  Model loaded with some parameter mismatches (strict=False)")
+    
     model = model.to(device)
     model.eval()
     
-    print(f"  Loaded model successfully on {device}")
+    print(f"  Model loaded successfully on {device}")
     return model
 
 
