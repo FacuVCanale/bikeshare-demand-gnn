@@ -132,14 +132,18 @@ class FeatureEngineer:
         # Ensure datetime columns and station_id consistency
         datetime_cols = []
         
+        # Check actual column dtypes in the dataframe
+        origen_dtype = df.schema['fecha_origen_recorrido']
+        destino_dtype = df.schema['fecha_destino_recorrido']
+        
         # Handle fecha_origen_recorrido
-        if df.select(pl.col('fecha_origen_recorrido').dtype).item() == pl.String:
+        if origen_dtype == pl.String or origen_dtype == pl.Utf8:
             datetime_cols.append(pl.col('fecha_origen_recorrido').str.to_datetime())
         else:
             datetime_cols.append(pl.col('fecha_origen_recorrido').cast(pl.Datetime))
             
         # Handle fecha_destino_recorrido  
-        if df.select(pl.col('fecha_destino_recorrido').dtype).item() == pl.String:
+        if destino_dtype == pl.String or destino_dtype == pl.Utf8:
             datetime_cols.append(pl.col('fecha_destino_recorrido').str.to_datetime())
         else:
             datetime_cols.append(pl.col('fecha_destino_recorrido').cast(pl.Datetime))
