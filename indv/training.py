@@ -582,6 +582,8 @@ class ModelTrainer:
 def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'], 
                   model_types=['xgboost', 'lightgbm'], save_models=True,
                   save_dir='models', use_gpu=True,
+                  test_size=0.2, validation_size=0.2,
+                  scale_features=True, use_time_split=True,
                   val_start_date=None, test_start_date=None, no_test=False,
                   split_percents=None):
     """
@@ -596,6 +598,10 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
         save_models (bool): Whether to save trained models
         save_dir (str): Directory to save models
         use_gpu (bool): Whether to enable GPU acceleration (default: True)
+        test_size (float): Test set proportion
+        validation_size (float): Validation set proportion
+        scale_features (bool): Whether to scale features
+        use_time_split (bool): Whether to use time-based splitting
         val_start_date (str): Start date for validation split
         test_start_date (str): Start date for test split
         no_test (bool): Only use train/val splits, report train/val metrics
