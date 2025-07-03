@@ -99,6 +99,11 @@ def load_trained_model(model_path: str, device: str = 'auto') -> torch.nn.Module
         print(f"  Model type: {model_class}")
         print(f"  Model parameters: {model_params}")
         
+        # ensure batch_norm is enabled when checkpoint stored None
+        if 'use_batch_norm' in model_params and (model_params['use_batch_norm'] is None):
+            model_params['use_batch_norm'] = True
+            print("  (Adjusted use_batch_norm=None -> True to match saved weights)")
+        
         # map class name to model type string for create_gnn_model
         class_to_type = {
             'TemporalGCN': 'gcn',
