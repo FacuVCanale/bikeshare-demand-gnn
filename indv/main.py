@@ -84,6 +84,10 @@ class BikePredictionPipeline:
             
             # GPU parameters
             'use_gpu': True,
+            
+            # Feature customization
+            'add_long_lags': True,
+            'lookback_intervals': 1,
         }
     
     def validate_config(self):
@@ -118,7 +122,9 @@ class BikePredictionPipeline:
             station_id=self.config['station_id'],
             delta_t_minutes=self.config['delta_t_minutes'],
             fill_nulls=self.config['fill_nulls'],
-            fill_strategy=self.config['fill_strategy']
+            fill_strategy=self.config['fill_strategy'],
+            add_long_lags=self.config['add_long_lags'],
+            lookback_intervals=self.config['lookback_intervals']
         )
         
         # Prepare for training
@@ -377,6 +383,12 @@ def create_config_from_args():
     parser.add_argument('--no_test', action='store_true',
                        help='Only use train/val splits (2024 as validation), skip test set')
     
+    # New feature flags
+    parser.add_argument('--disable_long_lags', action='store_true',
+                       help='Disable rolling means and 1-week lag features')
+    parser.add_argument('--lookback_intervals', type=int, default=1,
+                       help='Number of delta_T intervals to look back for last_dt features (default: 1)')
+    
     args = parser.parse_args()
     
     # Create configuration
@@ -402,6 +414,8 @@ def create_config_from_args():
         'val_start_date': args.val_start_date,
         'test_start_date': args.test_start_date,
         'no_test': args.no_test,
+        'add_long_lags': not args.disable_long_lags,
+        'lookback_intervals': args.lookback_intervals,
     }
     
     return config
@@ -453,7 +467,9 @@ config = {
     'output_dir': 'results',
     'fill_nulls': True,  # Set to False to keep nulls
     'fill_strategy': 'zero',  # 'zero', 'mean', 'median', 'forward_fill'
-    'use_gpu': True  # Set to False for CPU-only training
+    'use_gpu': True,  # Set to False for CPU-only training
+    'add_long_lags': True,
+    'lookback_intervals': 1,
 }
 
 # Run pipeline

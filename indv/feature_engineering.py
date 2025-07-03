@@ -23,7 +23,7 @@ class FeatureEngineer:
     and creating station-level features for bike prediction.
     """
     
-    def __init__(self, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero'):
+    def __init__(self, delta_t_minutes=30, fill_nulls=True, fill_strategy='zero', add_long_lags=True, lookback_intervals=1):
         """
         Initialize the feature engineer.
         
@@ -31,10 +31,14 @@ class FeatureEngineer:
             delta_t_minutes (int): Time interval in minutes (default: 30)
             fill_nulls (bool): Whether to fill null values (default: True)
             fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
+            add_long_lags (bool): Whether to create 1-week lags and rolling means
+            lookback_intervals (int): How many ΔT steps back for last_dt features
         """
         self.delta_t_minutes = delta_t_minutes
         self.fill_nulls = fill_nulls
         self.fill_strategy = fill_strategy
+        self.add_long_lags = add_long_lags
+        self.lookback_intervals = lookback_intervals
         self.feature_columns = []
         
     def process_data(self, df, station_id=None):
@@ -327,23 +331,26 @@ class FeatureEngineer:
         if available_features:
             print(f"  Using available weather features: {available_features}")
             
-            # Add lagged weather features (1 week lag)
-            lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
-            lag_expressions = []
-            
-            for feature in available_features:
-                lag_feature_name = f'{feature}_1w_lag'
-                lag_expressions.append(
-                    pl.col(feature).shift(lag_periods).over('station_id').alias(lag_feature_name)
-                )
-            
-            df = df.with_columns(lag_expressions)
-            
-            # Print null counts for lagged weather features
-            for feature in available_features:
-                lag_feature_name = f'{feature}_1w_lag'
-                null_count = df.select(pl.col(lag_feature_name).is_null().sum()).item()
-                print(f"    {lag_feature_name}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+            if self.add_long_lags:
+                # Add lagged weather features (1 week lag)
+                lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
+                lag_expressions = []
+
+                for feature in available_features:
+                    lag_feature_name = f'{feature}_1w_lag'
+                    lag_expressions.append(
+                        pl.col(feature).shift(lag_periods).over('station_id').alias(lag_feature_name)
+                    )
+
+                df = df.with_columns(lag_expressions)
+
+                # Print null counts for lagged weather features
+                for feature in available_features:
+                    lag_feature_name = f'{feature}_1w_lag'
+                    null_count = df.select(pl.col(lag_feature_name).is_null().sum()).item()
+                    print(f"    {lag_feature_name}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+            else:
+                print("  Skipping 1-week lag weather features (add_long_lags=False)")
         else:
             print("  No key weather features available - skipping climate features")
         
@@ -355,15 +362,21 @@ class FeatureEngineer:
         """
         print("Adding station features...")
         
-        # Last delta T features and 1 week lag features
-        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in delta_t periods
-        
-        df = df.with_columns([
-            pl.col('arrivals').shift(1).over('station_id').alias('arrivals_last_dt'),
-            pl.col('departures').shift(1).over('station_id').alias('departures_last_dt'),
-            pl.col('arrivals').shift(lag_periods).over('station_id').alias('arrivals_1w_lag'),
-            pl.col('departures').shift(lag_periods).over('station_id').alias('departures_1w_lag')
-        ])
+        # Last delta T features and optional 1-week lag / rolling means
+        lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in ΔT periods
+
+        feature_exprs = [
+            pl.col('arrivals').shift(self.lookback_intervals).over('station_id').alias('arrivals_last_dt'),
+            pl.col('departures').shift(self.lookback_intervals).over('station_id').alias('departures_last_dt'),
+        ]
+
+        if self.add_long_lags:
+            feature_exprs += [
+                pl.col('arrivals').shift(lag_periods).over('station_id').alias('arrivals_1w_lag'),
+                pl.col('departures').shift(lag_periods).over('station_id').alias('departures_1w_lag')
+            ]
+
+        df = df.with_columns(feature_exprs)
         
         # Print null counts for last delta T features
         arrivals_last_nulls = df.select(pl.col('arrivals_last_dt').is_null().sum()).item()
@@ -371,11 +384,12 @@ class FeatureEngineer:
         print(f"  arrivals_last_dt: {arrivals_last_nulls} nulls ({arrivals_last_nulls/len(df)*100:.1f}%)")
         print(f"  departures_last_dt: {departures_last_nulls} nulls ({departures_last_nulls/len(df)*100:.1f}%)")
         
-        # Print null counts for 1 week lag features
-        arrivals_1w_nulls = df.select(pl.col('arrivals_1w_lag').is_null().sum()).item()
-        departures_1w_nulls = df.select(pl.col('departures_1w_lag').is_null().sum()).item()
-        print(f"  arrivals_1w_lag: {arrivals_1w_nulls} nulls ({arrivals_1w_nulls/len(df)*100:.1f}%)")
-        print(f"  departures_1w_lag: {departures_1w_nulls} nulls ({departures_1w_nulls/len(df)*100:.1f}%)")
+        if self.add_long_lags:
+            # Print null counts for 1 week lag features
+            arrivals_1w_nulls = df.select(pl.col('arrivals_1w_lag').is_null().sum()).item()
+            departures_1w_nulls = df.select(pl.col('departures_1w_lag').is_null().sum()).item()
+            print(f"  arrivals_1w_lag: {arrivals_1w_nulls} nulls ({arrivals_1w_nulls/len(df)*100:.1f}%)")
+            print(f"  departures_1w_lag: {departures_1w_nulls} nulls ({departures_1w_nulls/len(df)*100:.1f}%)")
         
         # Create time slot identifier for same-time-across-weeks moving averages
         # Combine hour and day_of_week to create unique time slots
@@ -399,33 +413,37 @@ class FeatureEngineer:
         # Sort by station_id, time_slot, and datetime for proper window operations
         df = df.sort(['station_id', 'time_slot', 'datetime'])
         
-        # 4-week and 12-week moving averages for same time slots
-        print("    Computing 4-week and 12-week moving averages (excluding current interval)...")
-        df = df.with_columns([
-            # Shift 1 interval back to avoid using value at t (prevents leakage)
-            pl.col('arrivals').shift(1).rolling_mean(window_size=4, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
-            pl.col('departures').shift(1).rolling_mean(window_size=4, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
-            pl.col('arrivals').shift(1).rolling_mean(window_size=12, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
-            pl.col('departures').shift(1).rolling_mean(window_size=12, min_periods=1)
-              .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
-        ])
-        
-        # Print null counts for moving averages
-        ma_cols = ['arrivals_ma4_weekly', 'departures_ma4_weekly', 'arrivals_ma12_weekly', 'departures_ma12_weekly']
-        for col in ma_cols:
-            null_count = df.select(pl.col(col).is_null().sum()).item()
-            print(f"  {col}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+        if self.add_long_lags:
+            # 4-week and 12-week moving averages for same time slots
+            print("    Computing 4-week and 12-week moving averages (excluding current interval)...")
+            df = df.with_columns([
+                # Shift 1 interval back to avoid using value at t (prevents leakage)
+                pl.col('arrivals').shift(1).rolling_mean(window_size=4, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('arrivals_ma4_weekly'),
+                pl.col('departures').shift(1).rolling_mean(window_size=4, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('departures_ma4_weekly'),
+                pl.col('arrivals').shift(1).rolling_mean(window_size=12, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('arrivals_ma12_weekly'),
+                pl.col('departures').shift(1).rolling_mean(window_size=12, min_periods=1)
+                  .over(['station_id', 'time_slot']).alias('departures_ma12_weekly')
+            ])
+            
+            # Print null counts for moving averages
+            ma_cols = ['arrivals_ma4_weekly', 'departures_ma4_weekly', 'arrivals_ma12_weekly', 'departures_ma12_weekly']
+            for col in ma_cols:
+                null_count = df.select(pl.col(col).is_null().sum()).item()
+                print(f"  {col}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
+        else:
+            print("  Skipping moving averages (add_long_lags=False)")
         
         # Conditionally fill missing values in station features
-        station_features = [
-            'arrivals_last_dt', 'departures_last_dt',
-            'arrivals_1w_lag', 'departures_1w_lag',
-            'arrivals_ma4_weekly', 'departures_ma4_weekly',
-            'arrivals_ma12_weekly', 'departures_ma12_weekly'
-        ]
+        station_features = ['arrivals_last_dt', 'departures_last_dt']
+        if self.add_long_lags:
+            station_features += [
+                'arrivals_1w_lag', 'departures_1w_lag',
+                'arrivals_ma4_weekly', 'departures_ma4_weekly',
+                'arrivals_ma12_weekly', 'departures_ma12_weekly'
+            ]
         
         if self.fill_nulls:
             print(f"  Filling station feature nulls with strategy: {self.fill_strategy}...")
@@ -660,7 +678,8 @@ class FeatureEngineer:
 
 
 def load_and_process_data(data_path, station_id=None, delta_t_minutes=30, 
-                         fill_nulls=True, fill_strategy='zero'):
+                         fill_nulls=True, fill_strategy='zero',
+                         add_long_lags=True, lookback_intervals=1):
     """
     Convenience function to load and process data.
     
@@ -670,6 +689,8 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
         delta_t_minutes (int): Time interval in minutes
         fill_nulls (bool): Whether to fill null values (default: True)
         fill_strategy (str): Strategy for filling nulls ('zero', 'mean', 'median', 'forward_fill')
+        add_long_lags (bool): Whether to create 1-week lags and rolling means
+        lookback_intervals (int): How many ΔT steps back for last_dt features
         
     Returns:
         tuple: (processed_df, feature_engineer)
@@ -703,7 +724,9 @@ def load_and_process_data(data_path, station_id=None, delta_t_minutes=30,
     # Initialize feature engineer
     fe = FeatureEngineer(delta_t_minutes=delta_t_minutes, 
                         fill_nulls=fill_nulls, 
-                        fill_strategy=fill_strategy)
+                        fill_strategy=fill_strategy,
+                        add_long_lags=add_long_lags,
+                        lookback_intervals=lookback_intervals)
     
     # Process data
     processed_df = fe.process_data(df, station_id=station_id)
