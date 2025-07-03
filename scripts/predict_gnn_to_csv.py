@@ -134,17 +134,17 @@ def load_trained_model(model_path: str, device: str = 'auto') -> torch.nn.Module
             "Please use a model trained with the current training pipeline."
         )
     
-    # load state dict, handling DataParallel wrapper
-    # handle both "module." at the beginning and ".module." in the middle of keys
-    if any('module.' in key for key in state_dict.keys()):
-        print("  Detected DataParallel model, cleaning state_dict keys...")
+    # load state dict, handling DataParallel wrapper (leading 'module.')
+    if any(key.startswith('module.') for key in state_dict.keys()):
+        print("  Detected DataParallel wrapper at top-level, stripping 'module.' prefix…")
         new_state_dict = {}
         for key, value in state_dict.items():
-            # remove 'module.' from anywhere in the key
-            new_key = key.replace('.module.', '.').replace('module.', '')
-            new_state_dict[new_key] = value
-            if key != new_key:
+            if key.startswith('module.'):
+                new_key = key[len('module.'):]
+                new_state_dict[new_key] = value
                 print(f"    {key} -> {new_key}")
+            else:
+                new_state_dict[key] = value  # keep interior '.module.' (BatchNorm)
         state_dict = new_state_dict
     
     # try to load state dict with error handling
