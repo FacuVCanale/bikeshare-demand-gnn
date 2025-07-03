@@ -188,7 +188,8 @@ class BikePredictionPipeline:
             use_gpu=self.config['use_gpu'],
             val_start_date=self.config.get('val_start_date'),
             test_start_date=self.config.get('test_start_date'),
-            no_test=self.config['no_test']
+            no_test=self.config['no_test'],
+            split_percents=self.config.get('split_percents')
         )
         
         # Store results
@@ -389,6 +390,11 @@ def create_config_from_args():
     parser.add_argument('--lookback_intervals', type=int, default=1,
                        help='Number of delta_T intervals to look back for last_dt features (default: 1)')
     
+    # Split percentages
+    parser.add_argument('--split_percents', type=float, nargs=3, default=None,
+                        metavar=('TRAIN_PCT', 'VAL_PCT', 'TEST_PCT'),
+                        help='Porcentajes para train, val y test (ej: 0.6 0.2 0.2). Ignora --test_size y --validation_size.')
+    
     args = parser.parse_args()
     
     # Create configuration
@@ -416,6 +422,7 @@ def create_config_from_args():
         'no_test': args.no_test,
         'add_long_lags': not args.disable_long_lags,
         'lookback_intervals': args.lookback_intervals,
+        'split_percents': args.split_percents,
     }
     
     return config

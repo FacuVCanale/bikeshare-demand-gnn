@@ -46,7 +46,8 @@ class ModelTrainer:
         
     def prepare_data(self, X, y, metadata, test_size=0.2, validation_size=0.2,
                     scale_features=True, use_time_split=True,
-                    val_start_date=None, test_start_date=None, no_test=False):
+                    val_start_date=None, test_start_date=None, no_test=False,
+                    split_percents=None):
         """
         Prepare data for training with proper time-aware splits.
         
@@ -61,6 +62,7 @@ class ModelTrainer:
             val_start_date (str): Start date for validation split
             test_start_date (str): Start date for test split
             no_test (bool): Only use train/val splits, report train/val metrics
+            split_percents (list): List of percentages for split
             
         Returns:
             dict: Dictionary with train/val/test splits
@@ -74,7 +76,32 @@ class ModelTrainer:
             y = y.to_pandas()
             metadata = metadata.to_pandas()
         
-        if no_test:
+        if split_percents is not None:
+            # Split por porcentaje explícito (ignora test_size/validation_size)
+            print(f"  Usando split porcentual explícito: {split_percents}")
+            X_with_time = X.copy()
+            X_with_time['datetime'] = metadata['datetime']
+            X_with_time = X_with_time.sort_values('datetime')
+            n_samples = len(X_with_time)
+            train_end = int(n_samples * split_percents[0])
+            val_end = train_end + int(n_samples * split_percents[1])
+            train_idx = X_with_time.index[:train_end]
+            val_idx = X_with_time.index[train_end:val_end]
+            test_idx = X_with_time.index[val_end:]
+
+            X_train = X.loc[train_idx].drop(['datetime'], axis=1, errors='ignore')
+            X_val = X.loc[val_idx].drop(['datetime'], axis=1, errors='ignore')
+            X_test = X.loc[test_idx].drop(['datetime'], axis=1, errors='ignore')
+
+            y_train = y.loc[train_idx]
+            y_val = y.loc[val_idx]
+            y_test = y.loc[test_idx]
+
+            meta_train = metadata.loc[train_idx]
+            meta_val = metadata.loc[val_idx]
+            meta_test = metadata.loc[test_idx]
+
+        elif no_test:
             # Special case: only train/val splits, use 2024 as validation
             print("  Using no-test mode: 2024 as validation, everything else as training")
             meta_dt = metadata['datetime']
@@ -555,7 +582,8 @@ class ModelTrainer:
 def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'], 
                   model_types=['xgboost', 'lightgbm'], save_models=True,
                   save_dir='models', use_gpu=True,
-                  val_start_date=None, test_start_date=None, no_test=False):
+                  val_start_date=None, test_start_date=None, no_test=False,
+                  split_percents=None):
     """
     Complete training pipeline function.
     
@@ -571,6 +599,7 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
         val_start_date (str): Start date for validation split
         test_start_date (str): Start date for test split
         no_test (bool): Only use train/val splits, report train/val metrics
+        split_percents (list): List of percentages for split
         
     Returns:
         tuple: (trainer, results, best_models)
@@ -586,9 +615,14 @@ def train_pipeline(X, y, metadata, target_cols=['arrivals', 'departures'],
     # Prepare data
     data_splits = trainer.prepare_data(
         X, y, metadata,
+        test_size=test_size,
+        validation_size=validation_size,
+        scale_features=scale_features,
+        use_time_split=use_time_split,
         val_start_date=val_start_date,
         test_start_date=test_start_date,
-        no_test=no_test
+        no_test=no_test,
+        split_percents=split_percents
     )
     
     # Train models
