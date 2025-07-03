@@ -142,14 +142,17 @@ def run_inference(
     )
     processed_df = fe.process_data(combined_raw, station_id=station_id)
 
-    # Identify evaluation window (datetime span of *test_raw*) so that we only
-    # score the new data, not the historical portion used for lags.
-    test_start = test_raw.select(pl.col("fecha_origen_recorrido").min()).item()
-    test_end = test_raw.select(pl.col("fecha_destino_recorrido").max()).item()
-
+    # Filter for specific date and time range: 9/9/2024, 12:00-18:00
+    target_date = "2024-09-09"
+    start_hour = 12
+    end_hour = 18
+    
     eval_df = processed_df.filter(
-        (pl.col("datetime") >= test_start) & (pl.col("datetime") <= test_end)
+        (pl.col("datetime").dt.date() == pl.date(2024, 9, 9)) &
+        (pl.col("datetime").dt.hour() >= start_hour) &
+        (pl.col("datetime").dt.hour() <= end_hour)
     )
+    print(f"Filtered for {target_date} {start_hour}:00-{end_hour}:00")
     print(f"Processed intervals for evaluation: {len(eval_df):,}")
 
     # Prepare for model input (features / targets)
