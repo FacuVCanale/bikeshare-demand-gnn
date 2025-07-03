@@ -140,6 +140,8 @@ def run_inference(
         print(f"  Weather rows: {len(weather_df):,}")
         
         # Convert weather datetime column to proper format
+        print(f"  Weather columns: {weather_df.columns}")
+        
         if 'time' in weather_df.columns:
             weather_df = weather_df.with_columns([
                 pl.col('time').str.to_datetime().alias('datetime_weather')
@@ -148,8 +150,20 @@ def run_inference(
             weather_df = weather_df.with_columns([
                 pl.col('datetime').str.to_datetime().alias('datetime_weather')
             ])
+        elif 'date' in weather_df.columns:
+            weather_df = weather_df.with_columns([
+                pl.col('date').str.to_datetime().alias('datetime_weather')
+            ])
+        elif 'fecha' in weather_df.columns:
+            weather_df = weather_df.with_columns([
+                pl.col('fecha').str.to_datetime().alias('datetime_weather')
+            ])
+        elif 'timestamp' in weather_df.columns:
+            weather_df = weather_df.with_columns([
+                pl.col('timestamp').str.to_datetime().alias('datetime_weather')
+            ])
         else:
-            raise ValueError("Weather data must have 'time' or 'datetime' column")
+            raise ValueError(f"Weather data must have 'time', 'datetime', 'date', 'fecha', or 'timestamp' column. Found columns: {weather_df.columns}")
         
         # Rename weather columns to match expected format
         weather_cols_mapping = {
