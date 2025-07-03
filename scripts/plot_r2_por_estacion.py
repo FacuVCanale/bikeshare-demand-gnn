@@ -52,6 +52,14 @@ def main():
     # calcular R² por estación
     serie_r2 = calcular_r2_por_estacion(df, args.target_col, args.pred_col)
 
+    # R² promedio excluyendo valores negativos
+    r2_pos = serie_r2[serie_r2 >= 0].dropna()
+    if len(r2_pos):
+        r2_promedio = r2_pos.mean()
+        print(f"R² promedio (solo estaciones con R² >= 0): {r2_promedio:.4f}  —  {len(r2_pos)}/{len(serie_r2)} estaciones")
+    else:
+        print("Todas las estaciones tienen R² negativo o NaN – no se calculó promedio positivo")
+
     # plot
     plt.figure(figsize=(16, 8), dpi=args.dpi)
     # gráfico de barras por estación
