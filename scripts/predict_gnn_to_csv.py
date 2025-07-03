@@ -57,6 +57,7 @@ import argparse
 import sys
 from typing import Dict, Any, List, Optional
 import warnings
+import torch.nn.functional as F
 
 # add project root to path
 project_root = Path(__file__).parent.parent
@@ -389,6 +390,19 @@ def create_predictions_dataframe(
     return df
 
 
+def torch_metrics(preds_np: np.ndarray, targets_np: np.ndarray) -> Dict[str, float]:
+    """Compute metrics using the same formulation as calculate_gnn_metrics."""
+    preds = torch.tensor(preds_np, dtype=torch.float32)
+    targets = torch.tensor(targets_np, dtype=torch.float32)
+    mse = F.mse_loss(preds, targets).item()
+    mae = F.l1_loss(preds, targets).item()
+    rmse = torch.sqrt(F.mse_loss(preds, targets)).item()
+    ss_res = torch.sum((targets - preds) ** 2)
+    ss_tot = torch.sum((targets - torch.mean(targets)) ** 2)
+    r2 = (1 - ss_res / ss_tot).item()
+    return {'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2}
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate GNN predictions on test data and save to CSV')
     parser.add_argument('--model_path', type=str, required=True,
@@ -472,6 +486,20 @@ def main():
     file_size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"  File size: {file_size_mb:.1f} MB")
     
+    # torch-style metrics (for consistency with train_gnn.py)
+    metrics_torch = torch_metrics(
+        df_predictions[args.target_col].values.astype(np.float32),
+        df_predictions['arrivals'].values.astype(np.float32)
+    )
+
+    # print torch-style metrics first (to compare with training script)
+    print(f"\nTorch-style Metrics (same as train_gnn.py):")
+    print(f"  MSE:  {metrics_torch['mse']:.4f}")
+    print(f"  RMSE: {metrics_torch['rmse']:.4f}")
+    print(f"  MAE:  {metrics_torch['mae']:.4f}")
+    print(f"  R²:   {metrics_torch['r2']:.4f}")
+
+    # sklearn metrics (redundant but keeps previous output)
     # calculate evaluation metrics
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
     
