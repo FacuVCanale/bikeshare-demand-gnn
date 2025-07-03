@@ -163,9 +163,9 @@ def run_inference(
                 pl.col(datetime_col).str.to_datetime().alias('datetime_weather')
             ])
         else:
-            # Already datetime type, just rename
+            # Already datetime type, just rename and remove timezone info for consistency
             weather_df = weather_df.with_columns([
-                pl.col(datetime_col).alias('datetime_weather')
+                pl.col(datetime_col).dt.replace_time_zone(None).alias('datetime_weather')
             ])
         
         # Rename weather columns to match expected format
@@ -187,11 +187,17 @@ def run_inference(
         else:
             weather_df = weather_df.select(['datetime_weather'] + rename_exprs)
             
-            # Merge weather data with trip data based on datetime
-            # First, add datetime_weather column to combined_raw for merging
-            combined_raw = combined_raw.with_columns([
-                pl.col('fecha_origen_recorrido').dt.truncate('1h').alias('datetime_weather')
-            ])
+            # Ensure combined_raw datetime columns are properly formatted before merging
+            # Handle both string and datetime types for fecha_origen_recorrido
+            origen_dtype = combined_raw.schema['fecha_origen_recorrido']
+            if origen_dtype in [pl.String, pl.Utf8]:
+                combined_raw = combined_raw.with_columns([
+                    pl.col('fecha_origen_recorrido').str.to_datetime().dt.truncate('1h').alias('datetime_weather')
+                ])
+            else:
+                combined_raw = combined_raw.with_columns([
+                    pl.col('fecha_origen_recorrido').dt.replace_time_zone(None).dt.truncate('1h').alias('datetime_weather')
+                ])
             
             # Join weather data
             combined_raw = combined_raw.join(
@@ -222,6 +228,9 @@ def run_inference(
     start_hour = 12
     end_hour = 18
     
+    print(f"Before filtering: {len(processed_df):,} intervals")
+    print(f"Date range in data: {processed_df.select(pl.col('datetime').min()).item()} to {processed_df.select(pl.col('datetime').max()).item()}")
+    
     eval_df = processed_df.filter(
         (pl.col("datetime").dt.date() == pl.date(2024, 9, 9)) &
         (pl.col("datetime").dt.hour() >= start_hour) &
@@ -229,6 +238,13 @@ def run_inference(
     )
     print(f"Filtered for {target_date} {start_hour}:00-{end_hour}:00")
     print(f"Processed intervals for evaluation: {len(eval_df):,}")
+    
+    if len(eval_df) == 0:
+        print("WARNING: No data found for the specified date/time range!")
+        print("Available dates in processed data:")
+        available_dates = processed_df.select(pl.col("datetime").dt.date().unique().sort()).to_series().to_list()
+        print(f"  {available_dates[:10]}...")  # Show first 10 dates
+        raise ValueError("No data available for September 9, 2024, 12:00-18:00")
 
     # Prepare for model input (features / targets)
     X_pl, y_pl, metadata_pl = fe.prepare_for_training(
@@ -250,12 +266,23 @@ def run_inference(
     if hasattr(scaler, "feature_names_in_"):
         expected_cols = list(scaler.feature_names_in_)
         missing = set(expected_cols) - set(X.columns)
+        extra = set(X.columns) - set(expected_cols)
+        
         if missing:
+            print(f"  Missing columns: {sorted(missing)}")
+            print(f"  Available columns: {sorted(X.columns)}")
+            print("  This likely means the feature engineering parameters don't match training.")
+            print("  Check: --lookback_intervals, --add_long_lags, weather data availability")
             raise ValueError(
                 f"Missing columns required by scaler: {sorted(missing)}"
             )
+        
+        if extra:
+            print(f"  Extra columns will be dropped: {sorted(extra)}")
+        
         # Reorder accordingly
         X = X[expected_cols]
+        print(f"  Aligned {len(expected_cols)} features with scaler")
     else:
         print("  Warning: `StandardScaler` object has no `feature_names_in_`. "
               "Assuming training & inference column order are identical.")

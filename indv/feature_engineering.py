@@ -137,14 +137,20 @@ class FeatureEngineer:
         destino_dtype = df.schema['fecha_destino_recorrido']
         
         # Handle fecha_origen_recorrido
-        if origen_dtype == pl.String or origen_dtype == pl.Utf8:
+        if origen_dtype in [pl.String, pl.Utf8]:
             datetime_cols.append(pl.col('fecha_origen_recorrido').str.to_datetime())
+        elif 'datetime' in str(origen_dtype).lower():
+            # Already datetime, but ensure no timezone for consistency
+            datetime_cols.append(pl.col('fecha_origen_recorrido').dt.replace_time_zone(None))
         else:
             datetime_cols.append(pl.col('fecha_origen_recorrido').cast(pl.Datetime))
             
         # Handle fecha_destino_recorrido  
-        if destino_dtype == pl.String or destino_dtype == pl.Utf8:
+        if destino_dtype in [pl.String, pl.Utf8]:
             datetime_cols.append(pl.col('fecha_destino_recorrido').str.to_datetime())
+        elif 'datetime' in str(destino_dtype).lower():
+            # Already datetime, but ensure no timezone for consistency
+            datetime_cols.append(pl.col('fecha_destino_recorrido').dt.replace_time_zone(None))
         else:
             datetime_cols.append(pl.col('fecha_destino_recorrido').cast(pl.Datetime))
             
