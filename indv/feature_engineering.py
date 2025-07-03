@@ -362,13 +362,19 @@ class FeatureEngineer:
         """
         print("Adding station features...")
         
-        # Last delta T features and optional 1-week lag / rolling means
+        # Last delta T lag features up to lookback_intervals
         lag_periods = 7 * 24 * (60 // self.delta_t_minutes)  # 1 week in ΔT periods
 
-        feature_exprs = [
-            pl.col('arrivals').shift(self.lookback_intervals).over('station_id').alias('arrivals_last_dt'),
-            pl.col('departures').shift(self.lookback_intervals).over('station_id').alias('departures_last_dt'),
-        ]
+        feature_exprs = []
+
+        for i in range(1, self.lookback_intervals + 1):
+            postfix = '' if i == 1 else f'_{i}'
+            feature_exprs.append(
+                pl.col('arrivals').shift(i).over('station_id').alias(f'arrivals_last_dt{postfix}')
+            )
+            feature_exprs.append(
+                pl.col('departures').shift(i).over('station_id').alias(f'departures_last_dt{postfix}')
+            )
 
         if self.add_long_lags:
             feature_exprs += [
@@ -378,18 +384,20 @@ class FeatureEngineer:
 
         df = df.with_columns(feature_exprs)
         
-        # Print null counts for last delta T features
-        arrivals_last_nulls = df.select(pl.col('arrivals_last_dt').is_null().sum()).item()
-        departures_last_nulls = df.select(pl.col('departures_last_dt').is_null().sum()).item()
-        print(f"  arrivals_last_dt: {arrivals_last_nulls} nulls ({arrivals_last_nulls/len(df)*100:.1f}%)")
-        print(f"  departures_last_dt: {departures_last_nulls} nulls ({departures_last_nulls/len(df)*100:.1f}%)")
+        # Print null counts for generated last_dt features
+        for i in range(1, self.lookback_intervals + 1):
+            postfix = '' if i == 1 else f'_{i}'
+            for prefix in ['arrivals', 'departures']:
+                cname = f'{prefix}_last_dt{postfix}'
+                null_count = df.select(pl.col(cname).is_null().sum()).item()
+                print(f"  {cname}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
         
         if self.add_long_lags:
             # Print null counts for 1 week lag features
-            arrivals_1w_nulls = df.select(pl.col('arrivals_1w_lag').is_null().sum()).item()
-            departures_1w_nulls = df.select(pl.col('departures_1w_lag').is_null().sum()).item()
-            print(f"  arrivals_1w_lag: {arrivals_1w_nulls} nulls ({arrivals_1w_nulls/len(df)*100:.1f}%)")
-            print(f"  departures_1w_lag: {departures_1w_nulls} nulls ({departures_1w_nulls/len(df)*100:.1f}%)")
+            for prefix in ['arrivals', 'departures']:
+                cname = f'{prefix}_1w_lag'
+                null_count = df.select(pl.col(cname).is_null().sum()).item()
+                print(f"  {cname}: {null_count} nulls ({null_count/len(df)*100:.1f}%)")
         
         # Create time slot identifier for same-time-across-weeks moving averages
         # Combine hour and day_of_week to create unique time slots
@@ -436,8 +444,12 @@ class FeatureEngineer:
         else:
             print("  Skipping moving averages (add_long_lags=False)")
         
-        # Conditionally fill missing values in station features
-        station_features = ['arrivals_last_dt', 'departures_last_dt']
+        # Build dynamic list of station lag features
+        station_features = []
+        for i in range(1, self.lookback_intervals + 1):
+            postfix = '' if i == 1 else f'_{i}'
+            station_features += [f'arrivals_last_dt{postfix}', f'departures_last_dt{postfix}']
+        
         if self.add_long_lags:
             station_features += [
                 'arrivals_1w_lag', 'departures_1w_lag',
