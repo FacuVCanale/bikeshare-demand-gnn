@@ -55,10 +55,12 @@ def main():
     # R² promedio excluyendo valores negativos
     r2_pos = serie_r2[serie_r2 >= 0].dropna()
     if len(r2_pos):
-        r2_promedio = r2_pos.mean()
-        print(f"R² promedio (solo estaciones con R² >= 0): {r2_promedio:.4f}  —  {len(r2_pos)}/{len(serie_r2)} estaciones")
+        estaciones_validas = r2_pos.index
+        df_filtrado = df[df['station_id'].isin(estaciones_validas)]
+        r2_global = r2_score(df_filtrado[args.target_col], df_filtrado[args.pred_col])
+        print(f"R² global (usando solo estaciones con R² >= 0): {r2_global:.4f}  —  {len(estaciones_validas)}/{len(serie_r2)} estaciones")
     else:
-        print("Todas las estaciones tienen R² negativo o NaN – no se calculó promedio positivo")
+        print("Todas las estaciones tienen R² negativo o NaN – no se pudo calcular R² global positivo")
 
     # plot
     plt.figure(figsize=(16, 8), dpi=args.dpi)
