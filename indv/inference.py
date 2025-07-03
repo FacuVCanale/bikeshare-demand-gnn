@@ -142,28 +142,31 @@ def run_inference(
         # Convert weather datetime column to proper format
         print(f"  Weather columns: {weather_df.columns}")
         
+        datetime_col = None
         if 'time' in weather_df.columns:
-            weather_df = weather_df.with_columns([
-                pl.col('time').str.to_datetime().alias('datetime_weather')
-            ])
+            datetime_col = 'time'
         elif 'datetime' in weather_df.columns:
-            weather_df = weather_df.with_columns([
-                pl.col('datetime').str.to_datetime().alias('datetime_weather')
-            ])
+            datetime_col = 'datetime'
         elif 'date' in weather_df.columns:
-            weather_df = weather_df.with_columns([
-                pl.col('date').str.to_datetime().alias('datetime_weather')
-            ])
+            datetime_col = 'date'
         elif 'fecha' in weather_df.columns:
-            weather_df = weather_df.with_columns([
-                pl.col('fecha').str.to_datetime().alias('datetime_weather')
-            ])
+            datetime_col = 'fecha'
         elif 'timestamp' in weather_df.columns:
-            weather_df = weather_df.with_columns([
-                pl.col('timestamp').str.to_datetime().alias('datetime_weather')
-            ])
+            datetime_col = 'timestamp'
         else:
             raise ValueError(f"Weather data must have 'time', 'datetime', 'date', 'fecha', or 'timestamp' column. Found columns: {weather_df.columns}")
+        
+        # Check if the datetime column is already datetime type or string
+        col_dtype = weather_df.schema[datetime_col]
+        if col_dtype in [pl.String, pl.Utf8]:
+            weather_df = weather_df.with_columns([
+                pl.col(datetime_col).str.to_datetime().alias('datetime_weather')
+            ])
+        else:
+            # Already datetime type, just rename
+            weather_df = weather_df.with_columns([
+                pl.col(datetime_col).alias('datetime_weather')
+            ])
         
         # Rename weather columns to match expected format
         weather_cols_mapping = {
