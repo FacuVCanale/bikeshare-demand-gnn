@@ -2,8 +2,6 @@
 
 Graph Neural Network models for real-time demand forecasting in the EcoBici public bike-sharing system of Buenos Aires, Argentina.
 
-This is the **model component** of a three-repo system: model (this repo) · dashboard · API.
-
 ---
 
 ## Overview
