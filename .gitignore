@@ -214,3 +214,19 @@ data/
 !src/data/
 !data/raw/sample_trips.csv
 models/*.json
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Experiment / training run outputs
+**/training_history.json
+**/model_architecture.json
+arr_dep_transformer*/
+dt*/
+
+# Reference paper PDFs
+reports/sources/*.pdf
+
+# Course/assignment documents
+*.pdf

@@ -1,488 +1,203 @@
-# EcoBici-AI: Predicción de Demanda con Graph Neural Networks
+# bikeshare-demand-gnn
 
-Sistema de predicción de demanda de bicicletas públicas utilizando Graph Neural Networks (GNN) para el sistema EcoBici de Buenos Aires.
+Graph Neural Network models for real-time demand forecasting in the EcoBici public bike-sharing system of Buenos Aires, Argentina.
 
-## 📋 Índice
+This is the **model component** of a three-repo system: model (this repo) · dashboard · API.
 
-- [Descripción del Proyecto](#descripción-del-proyecto)
-- [Instalación](#instalación)
-- [Preparación de Datos](#preparación-de-datos)
-- [Modelos Disponibles](#modelos-disponibles)
-- [Scripts Principales](#scripts-principales)
-- [Entrenamiento de Modelos](#entrenamiento-de-modelos)
-- [Evaluación de Modelos](#evaluación-de-modelos)
-- [Ejemplos de Uso](#ejemplos-de-uso)
-- [Estructura del Proyecto](#estructura-del-proyecto)
+---
 
-## 🎯 Descripción del Proyecto
+## Overview
 
-Este proyecto predice la demanda de bicicletas en el sistema EcoBici utilizando:
+EcoBici operates ~500 docking stations across Buenos Aires. Predicting how many arrivals and departures will occur at each station cluster in the next time window lets the operator rebalance bikes proactively, reduce empty/full station events, and improve service quality.
 
-- **Clustering de estaciones**: Agrupa estaciones geográficamente cercanas
-- **Features temporales**: Patrones horarios, diarios, semanales y estacionales
-- **Features de lag**: Histórico de demanda para capturar tendencias temporales
-- **Features meteorológicos**: Temperatura, precipitación, viento, etc.
-- **Graph Neural Networks**: Capturan relaciones espaciales entre clusters
+The challenge is inherently **spatial and temporal**: nearby station clusters are correlated, usage patterns shift by hour/day/season, and weather drives demand spikes. We model stations as nodes in a spatial graph and apply Graph Neural Networks to capture both dimensions simultaneously.
 
-### Tipos de Predicción Disponibles:
-- **Arribos externos**: Viajes entre clusters (llegadas)
-- **Partidas externas**: Viajes entre clusters (salidas)
-- **Ambos**: Arribos + partidas simultáneamente
-- **Demografia**: Predicciones por género y edad
+This project was developed as part of an academic course on machine learning applied to urban systems (1st semester 2025). All data comes from the publicly available EcoBici trip dataset published by the City of Buenos Aires.
 
-## 🛠️ Instalación
+---
 
-### Requisitos
-- Python 3.8+
-- CUDA (opcional, para GPU)
+## Problem Setup
 
-### Dependencias Principales
-```bash
-pip install -r requirements.txt
+| Dimension | Detail |
+|---|---|
+| Prediction target | Arrivals + departures between station clusters per time step |
+| Time resolution | 30-minute intervals |
+| Spatial resolution | 93 K-Means clusters of individual docking stations |
+| Prediction horizon | Next time step (t+1) |
+| Data range | Full EcoBici historical dataset; train / val / test split: up to 2023-01-01 / up to 2023-07-01 / rest |
+
+---
+
+## Why Graph Neural Networks?
+
+Station clusters are not independent — a surge of departures at a business-district cluster will show up as arrivals at residential clusters 20 minutes later. A standard temporal model (e.g., per-station LSTM) misses this structure.
+
+We build a **spatial graph** where each node is a station cluster and edges connect geographically close clusters (k-NN with distance threshold). A GNN message-passing step lets each node aggregate information from its neighbours before making a prediction, encoding spatial dependencies directly into the model.
+
+---
+
+## Architecture
+
+### Graph construction
+
+- Nodes: 93 station clusters (K-Means over GPS coordinates)
+- Edges: k-nearest-neighbour connectivity (default k=5, max distance 5 km)
+- Node features: 196-dimensional vector (temporal + lag + weather, described below)
+
+### Input features (per node, per time step)
+
+| Feature group | Examples |
+|---|---|
+| Temporal | Hour of day, day of week, month, rush-hour flags, holidays |
+| Lag | Arrival/departure counts at t-1, t-2, … (sliding window of 24 steps) |
+| Weather | Temperature, precipitation, wind speed (joined from Open-Meteo) |
+| Cluster identity | Centroid lat/lon, number of docking stations |
+
+### GNN models implemented
+
+| Name | Key idea | Notes |
+|---|---|---|
+| `TemporalGCN` | Graph Convolutional Network | Fast baseline |
+| `SpatialGAT` | Graph Attention Network | Learns edge weights via attention |
+| `GraphSAGE` | Sample-and-aggregate | Scales to larger graphs |
+| `GraphTransformer` | Transformer-style attention on graph | Best overall performance |
+| `HybridSpatioTemporalGNN` | GCN + GAT combined | Strong temporal modelling |
+
+The best-performing model is **GraphTransformer** — 5 `TransformerConv` layers, hidden dim 512, 8 attention heads, BatchNorm, GELU activation, 23.4M parameters.
+
+---
+
+## Results
+
+Best checkpoint (GraphTransformer, validation set):
+
+| Metric | Value |
+|---|---|
+| R² | **0.906** |
+| MAE | 0.138 |
+| RMSE | 0.225 |
+| MSE | 0.051 |
+
+The model jointly predicts arrivals and departures (2-dimensional output per cluster node) in a single forward pass.
+
+---
+
+## Stack
+
+| Layer | Library / tool |
+|---|---|
+| GNN framework | PyTorch Geometric |
+| Deep learning | PyTorch |
+| Data processing | Polars, Pandas, NumPy |
+| Clustering | scikit-learn (K-Means) |
+| Baseline models | XGBoost, LightGBM, CatBoost |
+| Experiment tracking | JSON checkpoints |
+| Python version | 3.10+ |
+
+---
+
+## Repository Structure
+
+```
+EcoBici-AI/
+├── src/
+│   ├── models/          # GNN architectures (gnn_models.py, catboost_model.py, gbdt_models.py)
+│   ├── clustering/      # K-Means station clustering and feature engineering
+│   ├── dataset/         # Dataset classes for graph data loading
+│   ├── training/        # Training loop, early stopping, metric logging
+│   └── notebooks/       # Exploration and baseline notebooks
+├── scripts/
+│   ├── generate_cluster_dataset.py  # Step 1: cluster stations, build features
+│   ├── prepare_gnn_dataset.py       # Step 2: build PyG graph objects
+│   ├── train_gnn.py                 # Step 3: train and compare models
+│   ├── test_model.py                # Step 4: evaluate a checkpoint
+│   └── load_experiment.py           # Inspect saved experiments
+├── data/                # Raw and processed data (not committed)
+├── reports/             # Analysis outputs
+├── model.md             # Architecture design notes
+├── pyproject.toml
+└── requirements.txt
 ```
 
-Dependencias clave:
-- `torch` + `torch-geometric`: Para GNN
-- `polars`: Procesamiento eficiente de datos
-- `scikit-learn`: Clustering y métricas
-- `pandas`, `numpy`: Manipulación de datos
+---
 
-## 📊 Preparación de Datos
+## Quickstart
 
-### Paso 1: Datos de Entrada Requeridos
+### 1. Install dependencies
 
-Coloca en el directorio `data/` los siguientes archivos:
+```bash
+pip install -r requirements.txt
+# or, for development extras:
+pip install -e ".[dev]"
+```
+
+PyTorch Geometric requires a matching PyTorch + CUDA version. Follow [the official installation guide](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html).
+
+### 2. Prepare data
+
+Place the EcoBici raw files in `data/`:
 
 ```
 data/
-├── trips_with_weather.parquet    # Viajes con datos meteorológicos
-├── trips.parquet                 # Datos de viajes básicos
-└── users.parquet                 # Información de usuarios
+├── trips_with_weather.parquet
+├── trips.parquet
+└── users.parquet
 ```
 
-### Paso 2: Generar Dataset Clusterizado
+The EcoBici trip dataset is published by the City of Buenos Aires at [data.buenosaires.gob.ar](https://data.buenosaires.gob.ar).
+
+### 3. Build the dataset pipeline
 
 ```bash
-python scripts/generate_cluster_dataset.py [opciones]
+# Cluster stations and generate aggregate features
+python scripts/generate_cluster_dataset.py --n_clusters 93 --dt_minutes 30 --use_checkpoints
+
+# Convert to PyTorch Geometric graph objects
+python scripts/prepare_gnn_dataset.py --target both_external_counts --sequence_length 24 --k_neighbors 5
 ```
 
-**Parámetros principales:**
-- `--n_clusters`: Número de clusters (default: 93)
-- `--dt_minutes`: Intervalo temporal en minutos (default: 30)
-- `--train_end_date`: Fecha fin del entrenamiento (default: "2023-01-01")
-- `--val_end_date`: Fecha fin de validación (default: "2023-07-01")
-- `--random_state`: Semilla para reproducibilidad (default: 42)
-
-**Ejemplo:**
-```bash
-python scripts/generate_cluster_dataset.py \
-    --n_clusters 93 \
-    --dt_minutes 30 \
-    --train_end_date "2023-01-01" \
-    --val_end_date "2023-07-01"
-```
-
-**Salida:**
-```
-data/clustered/
-├── train_cluster_features.parquet
-├── val_cluster_features.parquet
-├── test_cluster_features.parquet
-├── dataset_metadata.json
-└── models/kmeans_k93_model.pkl
-```
-
-### Paso 3: Preparar Datos para GNN
+### 4. Train
 
 ```bash
-python scripts/prepare_gnn_dataset.py [opciones]
-```
-
-**Parámetros de Target:**
-- `arr_external_count`: Solo arribos externos
-- `dep_external_count`: Solo partidas externas
-- `both_external_counts`: Arribos + partidas (recomendado)
-- `arr_external_demographics`: Demografia de arribos
-- `dep_external_demographics`: Demografia de partidas
-- `all_external_demographics`: Toda la demografia
-
-**Otros parámetros:**
-- `--input_dir`: Directorio de datos clusterizados (default: "data/clustered")
-- `--output_dir`: Directorio de salida (default: "data/gnn_ready")
-- `--sequence_length`: Longitud de secuencias temporales (default: 24)
-- `--k_neighbors`: Vecinos para conectividad del grafo (default: 5)
-- `--distance_threshold`: Distancia máxima para conexiones (default: 5.0 km)
-
-**Ejemplo:**
-```bash
-python scripts/prepare_gnn_dataset.py \
-    --target both_external_counts \
-    --sequence_length 24 \
-    --k_neighbors 5
-```
-
-**Salida:**
-```
-data/gnn_ready/
-├── train_data.pt
-├── val_data.pt
-├── test_data.pt
-├── train_feature_names.json
-├── processing_config.json
-├── adjacency_matrix.npy
-└── edge_index.pt
-```
-
-## 🧠 Modelos Disponibles
-
-### 1. **TemporalGCN** (`gcn`)
-- **Descripción**: Graph Convolutional Network básico
-- **Uso**: Baseline simple y eficiente
-- **Parámetros específicos**:
-  - `activation`: Función de activación ('relu', 'elu', 'leaky_relu', 'gelu')
-
-### 2. **SpatialGAT** (`gat`) 
-- **Descripción**: Graph Attention Network con mecanismo de atención
-- **Uso**: Captura relaciones espaciales complejas
-- **Parámetros específicos**:
-  - `num_heads`: Número de cabezas de atención (default: 8)
-  - `attention_dropout`: Dropout en atención (default: 0.1)
-
-### 3. **GraphSAGE** (`sage`)
-- **Descripción**: Sample and Aggregate para grafos grandes
-- **Uso**: Escalable para grafos muy grandes
-- **Parámetros específicos**:
-  - `aggregation`: Tipo de agregación ('mean', 'max', 'sum')
-
-### 4. **GraphTransformer** (`transformer`)
-- **Descripción**: Transformer adaptado para grafos
-- **Uso**: Estado del arte en muchas tareas de grafos
-- **Parámetros específicos**:
-  - `num_heads`: Cabezas de atención (default: 8)
-
-### 5. **HybridSpatioTemporalGNN** (`hybrid`)
-- **Descripción**: Combina GCN + GAT para relaciones espacio-temporales
-- **Uso**: Mejor para datos con fuerte componente temporal
-- **Parámetros específicos**:
-  - `use_temporal`: Habilitar componente temporal
-  - `temporal_dim`: Dimensión temporal (default: 64)
-
-## 📝 Scripts Principales
-
-### `generate_cluster_dataset.py`
-Procesa datos raw y crea clusters de estaciones.
-
-```bash
-python scripts/generate_cluster_dataset.py [opciones]
-```
-
-**Parámetros completos:**
-```bash
---data_dir          # Directorio de datos raw (default: "data")
---output_dir        # Directorio de salida (default: "data/clustered")
---n_clusters        # Número de clusters (default: 93)
---dt_minutes        # Intervalo temporal (default: 30)
---train_end_date    # Fin del entrenamiento (default: "2023-01-01")
---val_end_date      # Fin de validación (default: "2023-07-01")
---random_state      # Semilla (default: 42)
---log_level         # Nivel de logging (DEBUG, INFO, WARNING, ERROR)
---use_checkpoints   # Usar checkpoints para reanudar
---clear_checkpoints # Limpiar checkpoints existentes
-```
-
-### `prepare_gnn_dataset.py`
-Convierte datos clusterizados al formato PyTorch Geometric.
-
-```bash
-python scripts/prepare_gnn_dataset.py [opciones]
-```
-
-**Parámetros completos:**
-```bash
---input_dir           # Directorio de entrada (default: "data/clustered")
---output_dir          # Directorio de salida (default: "data/gnn_ready")
---target             # Target a predecir (ver opciones arriba)
---sequence_length    # Longitud de secuencias (default: 24)
---k_neighbors        # Vecinos en grafo (default: 5)
---distance_threshold # Distancia máx conexiones (default: 5.0)
-```
-
-### `train_gnn.py`
-Entrena modelos GNN.
-
-```bash
-python scripts/train_gnn.py [opciones]
-```
-
-**Parámetros completos:**
-```bash
-# modelo y datos
---model              # Tipo de modelo (gcn, gat, sage, transformer, hybrid, all)
---data_dir          # Directorio de datos GNN (default: "data/gnn_ready")
---experiment_name   # Nombre del experimento
-
-# reproducibilidad
---seed              # Semilla aleatoria (default: 42)
-
-# entrenamiento
---epochs            # Número de epochs (default: 100)
---patience          # Early stopping patience (default: 15)
---learning_rate     # Learning rate (default: 0.001)
---weight_decay      # Weight decay (default: 1e-5)
---optimizer         # Optimizador (adam, adamw, sgd)
---scheduler         # Scheduler (plateau, cosine, none)
-
-# arquitectura del modelo
---hidden_dim        # Dimensión oculta (default: 128)
---num_layers        # Número de capas (default: 3)
---dropout           # Dropout rate (default: 0.2)
---batch_norm        # Usar batch normalization (default: True)
-
-# específicos por modelo
---num_heads         # Cabezas atención GAT/Transformer (default: 8)
---attention_dropout # Dropout atención GAT (default: 0.1)
---activation        # Activación GCN/SAGE (relu, elu, etc.)
-
-# hardware
---device            # Device (cuda, cpu, auto)
-
-# resultados
---save_results      # Guardar resultados detallados
-```
-
-### `test_model.py`
-Evalúa modelos entrenados.
-
-```bash
-python scripts/test_model.py [opciones]
-```
-
-**Parámetros:**
-```bash
---model_path        # Ruta al modelo (.pt) [REQUERIDO]
---data_dir          # Directorio de datos (default: "data/gnn_ready")
---model_type        # Tipo de modelo (si no se puede inferir)
---device            # Device (cuda, cpu, auto)
---save_predictions  # Guardar predicciones
---hidden_dim        # Override dimensión oculta
---num_layers        # Override número de capas
---num_heads         # Override cabezas de atención
---dropout           # Override dropout
-```
-
-## 🚀 Entrenamiento de Modelos
-
-### Entrenamiento Básico
-
-**1. Preparar datos:**
-```bash
-# generar clusters
-python scripts/generate_cluster_dataset.py
-
-# preparar para GNN con ambos targets
-python scripts/prepare_gnn_dataset.py --target both_external_counts
-```
-
-**2. Entrenar modelo:**
-```bash
-# modelo GAT básico
-python scripts/train_gnn.py --model gat --epochs 100
-
-# modelo transformer avanzado
+# Train the best-performing model
 python scripts/train_gnn.py \
     --model transformer \
     --hidden_dim 512 \
     --num_layers 5 \
+    --num_heads 8 \
+    --dropout 0.1 \
     --epochs 5000 \
     --patience 100 \
-    --num_heads 8 \
-    --learning_rate 3e-4 \
-    --dropout 0.1
-```
+    --learning_rate 3e-4
 
-### Comparación de Modelos
-
-```bash
-# comparar todos los modelos
+# Or compare all architectures
 python scripts/train_gnn.py --model all --epochs 200 --save_results
 ```
 
-### Entrenamiento con GPU
+### 5. Evaluate
 
 ```bash
-# forzar uso de GPU
-python scripts/train_gnn.py --model gat --device cuda
-
-# configuración optimizada para GPU
-python scripts/train_gnn.py \
-    --model transformer \
-    --hidden_dim 1024 \
-    --num_layers 6 \
-    --epochs 10000 \
-    --device cuda
-```
-
-## 🔍 Evaluación de Modelos
-
-### Evaluar Modelo Entrenado
-
-```bash
-# evaluación básica
 python scripts/test_model.py \
-    --model_path experiments/gnn/experiment_name/final_model.pt
-
-# con configuración específica
-python scripts/test_model.py \
-    --model_path final_model.pt \
+    --model_path experiments/gnn/<experiment_name>/final_model.pt \
     --hidden_dim 512 \
     --num_heads 8 \
     --save_predictions
 ```
 
-### Métricas Disponibles
-- **MSE**: Mean Squared Error
-- **MAE**: Mean Absolute Error  
-- **RMSE**: Root Mean Squared Error
-- **R²**: Coeficiente de determinación
-- **Test Loss**: Loss en conjunto de prueba
+---
 
-## 📁 Ejemplos de Uso
+## Key design choices
 
-### Ejemplo 1: Predicción Solo de Arribos
+**Station clustering.** Individual docking stations are too granular and sparse — many have very few trips per 30-minute window. K-Means (k=93) reduces noise while preserving meaningful geographic units. The optimal k was found by elbow analysis (`scripts/find_optimal_k.py`).
 
-```bash
-# 1. preparar datos
-python scripts/prepare_gnn_dataset.py --target arr_external_count
+**External vs. internal trips.** We separate _external_ flows (trips that cross cluster boundaries) from _internal_ ones (origin and destination in the same cluster). The GNN targets external flows because those are the ones that require rebalancing between stations.
 
-# 2. entrenar
-python scripts/train_gnn.py --model gat --epochs 500 --patience 50
+**Data leakage prevention.** The dataset preparation script explicitly removes any features that would leak future information into the input window.
 
-# 3. evaluar
-python scripts/test_model.py --model_path experiments/gnn/*/final_model.pt
-```
+**Reproducibility.** All scripts accept a `--seed` parameter and use deterministic operations where PyTorch allows it. A `test_reproducibility.py` script verifies that two training runs with the same seed produce identical checkpoints.
 
-### Ejemplo 2: Predicción de Arribos + Partidas
+---
 
-```bash
-# 1. preparar datos
-python scripts/prepare_gnn_dataset.py --target both_external_counts
+## License
 
-# 2. entrenar transformer robusto
-python scripts/train_gnn.py \
-    --model transformer \
-    --hidden_dim 512 \
-    --num_layers 4 \
-    --epochs 2000 \
-    --patience 100 \
-    --num_heads 16 \
-    --learning_rate 1e-4 \
-    --dropout 0.15 \
-    --seed 42
-
-# 3. evaluar
-python scripts/test_model.py \
-    --model_path experiments/gnn/*/final_model.pt \
-    --hidden_dim 512 \
-    --num_heads 16 \
-    --save_predictions
-```
-
-### Ejemplo 3: Experimentación Completa
-
-```bash
-# 1. generar dataset completo
-python scripts/generate_cluster_dataset.py \
-    --n_clusters 93 \
-    --dt_minutes 30 \
-    --use_checkpoints
-
-# 2. preparar múltiples targets
-python scripts/prepare_gnn_dataset.py --target both_external_counts
-python scripts/prepare_gnn_dataset.py --target all_external_demographics --output_dir data/gnn_demographics
-
-# 3. comparar modelos en ambos targets
-python scripts/train_gnn.py --model all --data_dir data/gnn_ready --save_results
-python scripts/train_gnn.py --model all --data_dir data/gnn_demographics --save_results
-
-# 4. entrenar mejores modelos con hiperparámetros optimizados
-python scripts/train_gnn.py \
-    --model transformer \
-    --hidden_dim 768 \
-    --num_layers 6 \
-    --epochs 5000 \
-    --patience 200 \
-    --learning_rate 5e-5 \
-    --experiment_name "transformer_large"
-```
-
-## 🏗️ Estructura del Proyecto
-
-```
-EcoBici-AI/
-├── data/                          # Datos
-│   ├── raw/                       # Datos originales
-│   ├── clustered/                 # Datos clusterizados
-│   └── gnn_ready/                # Datos para GNN
-├── src/                           # Código fuente
-│   ├── clustering/                # Clustering de estaciones
-│   ├── models/                    # Modelos GNN
-│   ├── training/                  # Entrenamiento
-│   └── utils/                     # Utilidades
-├── scripts/                       # Scripts principales
-│   ├── generate_cluster_dataset.py
-│   ├── prepare_gnn_dataset.py
-│   ├── train_gnn.py
-│   └── test_model.py
-├── experiments/                   # Resultados de experimentos
-│   └── gnn/
-├── reports/                       # Reportes y análisis
-└── models/                        # Modelos guardados
-```
-
-## 🔧 Troubleshooting
-
-### Error: "Can't instantiate abstract class"
-- **Causa**: Problema con la herencia de clases base
-- **Solución**: Asegúrate de usar la versión más reciente del código
-
-### Error: "size mismatch" al cargar modelo
-- **Causa**: Configuración del modelo no coincide con el checkpoint
-- **Solución**: Especifica parámetros correctos en `test_model.py`:
-```bash
-python scripts/test_model.py \
-    --model_path model.pt \
-    --hidden_dim 512 \
-    --num_heads 8
-```
-
-### Error: "No such file" en datos
-- **Causa**: Archivos de datos no encontrados
-- **Solución**: Verifica que existen los archivos en `data/`:
-  - `trips_with_weather.parquet`
-  - `trips.parquet` 
-  - `users.parquet`
-
-### Performance lento
-- **GPU**: Usar `--device cuda`
-- **Batch size**: Reducir `--hidden_dim` o `--num_layers`
-- **Early stopping**: Usar `--patience` menor
-
-## 📈 Tips de Optimización
-
-### Para Mejor Performance:
-- Usar GPU: `--device cuda`
-- Aumentar `hidden_dim` y `num_layers`
-- Usar `--model transformer` o `--model hybrid`
-- Aumentar `--epochs` y `--patience`
-
-### Para Mejor Generalización:
-- Aumentar `--dropout` (0.2-0.3)
-- Usar `--weight_decay` mayor (1e-4)
-- Usar regularización: `--batch_norm`
-- Cross-validation con diferentes `--seed`
-
-### Para Datasets Grandes:
-- Usar `--model sage` (más escalable)
-- Reducir `--sequence_length`
-- Aumentar `--k_neighbors` gradualmente
-
+MIT — see [LICENSE](LICENSE).

@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Juan Francisco Lebrero", email = "lebrerojuanfrancisco@gmail.com"},
+    {name = "EcoBici-AI Contributors"},
 ]
 keywords = [
     "machine-learning",
@@ -50,10 +50,10 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/usuario/EcoBici-AI"
-"Bug Reports" = "https://github.com/usuario/EcoBici-AI/issues"
-"Source" = "https://github.com/usuario/EcoBici-AI"
-"Documentation" = "https://github.com/usuario/EcoBici-AI/blob/main/README.md"
+"Homepage" = "https://github.com/FacuVCanale/EcoBici-AI"
+"Bug Reports" = "https://github.com/FacuVCanale/EcoBici-AI/issues"
+"Source" = "https://github.com/FacuVCanale/EcoBici-AI"
+"Documentation" = "https://github.com/FacuVCanale/EcoBici-AI/blob/main/README.md"
 
 [project.scripts]
 ecobici-pipeline = "src.data_pipeline:main"
